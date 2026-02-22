@@ -113,6 +113,7 @@ cachecannon config/redis.toml
 | Zipfian distribution | Yes | No | Yes |
 | Pipelining | Yes | Yes | Yes |
 | CPU pinning | Yes | No | Yes |
+| End-to-end latency | Yes | TTFB only | Yes |
 
 ## Documentation
 
