@@ -14,18 +14,28 @@ jobs:
   momento:
     name: Momento
     runs-on: ubuntu-latest
-    if: ${{ secrets.MOMENTO_API_KEY != '' }}
+    env:
+      MOMENTO_API_KEY: ${{ secrets.MOMENTO_API_KEY }}
     steps:
+      - name: Check for Momento API key
+        run: |
+          if [ -z "$MOMENTO_API_KEY" ]; then
+            echo "MOMENTO_API_KEY not set, skipping"
+            echo "SKIP=true" >> $GITHUB_ENV
+          fi
       - uses: actions/checkout@v4
+        if: env.SKIP != 'true'
       - uses: dtolnay/rust-toolchain@stable
+        if: env.SKIP != 'true'
       - uses: Swatinem/rust-cache@v2
+        if: env.SKIP != 'true'
         with:
           shared-key: momento
       - name: Build release binary
+        if: env.SKIP != 'true'
         run: cargo build --release
       - name: Run Momento integration test
-        env:
-          MOMENTO_API_KEY: ${{ secrets.MOMENTO_API_KEY }}
+        if: env.SKIP != 'true'
         run: |
           set -euo pipefail
           echo "Running cachecannon against Momento..."
