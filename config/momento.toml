@@ -1,0 +1,67 @@
+# Momento benchmark configuration
+#
+# Required environment variables:
+#   MOMENTO_API_KEY   - Your Momento API key
+#   MOMENTO_ENDPOINT  - The Momento cache endpoint (e.g., cache.cell-4-us-west-2-1.prod.a.momentohq.com)
+
+[general]
+duration = "60s"
+warmup = "10s"
+threads = 1
+
+[target]
+# Endpoints are not used for Momento (it uses MOMENTO_ENDPOINT env var)
+# but we need at least one entry for config validation
+endpoints = ["127.0.0.1:443"]
+protocol = "momento"
+
+[connection]
+# Number of concurrent Momento connections
+connections = 1
+# Max in-flight requests per connection
+pipeline_depth = 32
+
+[workload]
+# Optional rate limit (requests per second)
+# rate_limit = 10000
+
+[workload.keyspace]
+# Key size in bytes
+length = 16
+# Number of unique keys
+count = 1000000
+# Key distribution: uniform or zipf
+distribution = "uniform"
+
+[workload.commands]
+# GET/SET ratio (must sum to 100)
+get = 80
+set = 20
+
+[workload.values]
+# Value size for SET operations
+length = 64
+
+[momento]
+# Cache name to use
+cache_name = "default-cache"
+# TTL for SET operations in seconds
+ttl_seconds = 3600
+# Optional: override MOMENTO_ENDPOINT env var
+#endpoint = "cache.cell-4-us-west-2-1.prod.a.momentohq.com"
+# Wire format: "grpc" (default) or "protosocket"
+#wire_format = "protosocket"
+# Use private endpoints (VPC endpoints) instead of public endpoints
+#use_private_endpoints = true
+# Availability zone for filtering private endpoints (e.g., "usw2-az1")
+# Can also be set via MOMENTO_AZ environment variable
+#availability_zone = "usw2-az1"
+
+[timestamps]
+enabled = true
+mode = "userspace"
+
+[admin]
+# listen = "127.0.0.1:9090"  # Prometheus metrics endpoint
+# parquet = "metrics.parquet"  # Write metrics to parquet file at end of run
+# parquet_interval = "1s"  # Snapshot interval for parquet recording

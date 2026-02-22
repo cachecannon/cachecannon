@@ -1,0 +1,64 @@
+# Example configuration — all available options shown
+#
+# This is a comprehensive reference. For quick-start configs, see:
+#   redis.toml, memcache.toml, momento.toml, ping.toml
+
+[general]
+duration = "60s"
+warmup = "10s"
+threads = 1
+# cpu_list = "0-3"       # Pin worker threads to CPUs (e.g., "0-3", "0,2,4,6", "0-3,8-11")
+# io_engine = "auto"     # "auto" (default), "uring" (Linux 6.0+), or "mio" (portable)
+
+[target]
+endpoints = ["127.0.0.1:6379"]
+protocol = "resp"         # "resp", "resp3", "memcache", "memcache_binary", "momento", "ping"
+# tls = false             # Enable TLS encryption for connections
+# cluster = false         # Enable Redis Cluster mode (topology discovery via CLUSTER SLOTS)
+
+[connection]
+connections = 4           # Total connections distributed across threads
+pipeline_depth = 32       # Max in-flight requests per connection
+connect_timeout = "5s"
+request_timeout = "1s"
+# request_distribution = "roundrobin"  # "roundrobin" (even spread) or "greedy" (fill pipeline first)
+
+[workload]
+# prefill = true              # Write each key once before test starts
+# prefill_timeout = "300s"    # Timeout for prefill phase (0 to disable)
+# backfill_on_miss = true     # On GET miss, SET the key (cache-aside pattern)
+# rate_limit = 100000         # Requests/second limit (omit for unlimited)
+
+[workload.keyspace]
+length = 16                   # Key length in bytes
+count = 1000000               # Number of unique keys
+distribution = "uniform"      # "uniform" or "zipf"
+
+[workload.commands]
+get = 80
+set = 20
+
+[workload.values]
+length = 64                   # Value length in bytes for SET commands
+
+[timestamps]
+enabled = true
+mode = "userspace"            # "userspace" (portable) or "software" (kernel SO_TIMESTAMPING, Linux only)
+
+[admin]
+# listen = "127.0.0.1:9090"  # Prometheus metrics endpoint
+# parquet = "metrics.parquet" # Write metrics to parquet file at end of run
+# parquet_interval = "1s"    # Snapshot interval for parquet recording
+# format = "clean"           # Output format: "clean", "json", "verbose", "quiet"
+# color = "auto"             # Color mode: "auto", "always", "never"
+
+# Saturation search: automatically find max throughput that meets SLO
+# Uncomment to enable saturation search mode
+# [workload.saturation_search]
+# slo = { p999 = "1ms" }       # Latency SLO thresholds (any of: p50, p99, p999)
+# start_rate = 1000             # Starting request rate (req/s)
+# step_multiplier = 1.05        # Increase rate by 5% each step
+# sample_window = "5s"          # Duration to sample at each rate level
+# stop_after_failures = 3       # Stop after N consecutive SLO violations
+# max_rate = 100000000          # Absolute maximum rate to try
+# min_throughput_ratio = 0.9    # Fail step if achieved < 90% of target

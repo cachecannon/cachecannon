@@ -1,0 +1,44 @@
+# Desync stress test — high concurrency to expose protocol desynchronization
+#
+# This test uses a large number of connections (128) with deep pipelining to
+# stress the server's ability to correctly match responses to requests under
+# heavy concurrent load. "Desync" refers to protocol desynchronization, where
+# a response is incorrectly matched to the wrong request — typically caused by
+# race conditions in connection handling, buffer management, or pipeline state.
+#
+# Signs of desync: unexpected error responses, value corruption, or mismatched
+# keys/values in GET responses.
+
+[general]
+duration = "30s"
+warmup = "5s"
+threads = 4
+
+[target]
+endpoints = ["127.0.0.1:6379"]
+protocol = "resp"
+
+[connection]
+connections = 128        # High connection count to maximize concurrent I/O
+pipeline_depth = 32      # Deep pipelining amplifies desync risk
+connect_timeout = "5s"
+request_timeout = "1s"
+
+[workload]
+# rate_limit = 100000
+
+[workload.keyspace]
+length = 16
+count = 1000000
+distribution = "uniform"
+
+[workload.commands]
+get = 80
+set = 20
+
+[workload.values]
+length = 64
+
+[timestamps]
+enabled = true
+mode = "userspace"

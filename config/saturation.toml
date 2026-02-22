@@ -1,0 +1,68 @@
+# Saturation Search Example Configuration
+#
+# This configuration demonstrates the saturation search feature, which
+# automatically finds the maximum throughput that meets your SLO.
+#
+# The benchmark starts at a low rate and geometrically increases until
+# the SLO is violated for N consecutive steps.
+
+[general]
+duration = "300s"    # Allow enough time for the search
+warmup = "10s"
+threads = 1
+
+[target]
+endpoints = ["127.0.0.1:6379"]
+protocol = "resp"
+
+[connection]
+connections = 8
+pipeline_depth = 32
+connect_timeout = "5s"
+request_timeout = "1s"
+
+[workload.keyspace]
+length = 16
+count = 1000000
+distribution = "uniform"
+
+[workload.commands]
+get = 80
+set = 20
+
+[workload.values]
+length = 64
+
+# Saturation search configuration
+[workload.saturation_search]
+# SLO thresholds - at least one must be specified
+# All specified thresholds must be met for the SLO to pass
+slo = { p999 = "1ms" }
+
+# Starting request rate (req/s)
+start_rate = 1000
+
+# Increase rate by this factor each step (1.05 = 5% increase)
+step_multiplier = 1.05
+
+# Duration to sample at each rate level
+sample_window = "5s"
+
+# Stop after this many consecutive SLO violations
+stop_after_failures = 3
+
+# Maximum rate to try (absolute ceiling)
+max_rate = 100000000
+
+# Minimum ratio of achieved/target throughput (0.0-1.0)
+# When achieved throughput falls below this fraction of the target,
+# the step fails regardless of latency (detects saturation)
+min_throughput_ratio = 0.9
+
+[timestamps]
+enabled = true
+mode = "userspace"
+
+[admin]
+# Optional: record metrics to parquet for later analysis
+# parquet = "saturation.parquet"

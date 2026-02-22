@@ -1,0 +1,33 @@
+# Eviction test configuration
+#
+# Designed to fill the cache quickly and trigger multiple eviction cycles.
+# Uses high write rate and small items to maximize eviction activity.
+
+[general]
+duration = "10s"
+warmup = "1s"
+threads = 2
+
+[target]
+endpoints = ["127.0.0.1:6379"]
+protocol = "resp"
+
+[connection]
+connections = 8
+pipeline_depth = 16
+
+[workload.keyspace]
+length = 16
+# Large keyspace to ensure we're always writing new keys (not updating)
+# This forces eviction rather than overwrites
+count = 1000000
+distribution = "uniform"
+
+[workload.commands]
+# High write ratio to fill cache and trigger eviction
+get = 20
+set = 80
+
+[workload.values]
+# Small values to fit more items and trigger more evictions
+length = 64

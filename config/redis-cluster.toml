@@ -1,0 +1,29 @@
+# Benchmark configuration for Redis Cluster.
+#
+# Uses CLUSTER SLOTS to discover topology and routes keys by CRC16 hash slot.
+# Adapts to MOVED redirects during topology changes (failover, rebalance).
+
+[general]
+duration = "60s"
+warmup = "10s"
+threads = 4
+
+[target]
+# Seed nodes — only one needs to be reachable for topology discovery.
+endpoints = ["127.0.0.1:7000"]
+protocol = "resp"
+cluster = true
+
+[connection]
+connections = 16
+pipeline_depth = 32
+
+[workload]
+prefill = true
+
+[workload.keyspace]
+count = 1_000_000
+
+[workload.commands]
+get = 80
+set = 20

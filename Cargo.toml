@@ -1,0 +1,112 @@
+[package]
+name = "cachecannon"
+version = "0.0.1"
+authors = ["Brian Martin <brayniac@gmail.com>"]
+edition = "2024"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/cachecannon/cachecannon"
+description = "High-performance cache protocol benchmark tool"
+
+[dependencies]
+# I/O event loop
+ringline = { git = "https://github.com/ringline-rs/ringline.git", rev = "fac53e3", features = ["tls", "timestamps"] }
+ringline-momento = { git = "https://github.com/ringline-rs/ringline.git", rev = "fac53e3", features = ["timestamps"] }
+
+# Consistent hashing
+ketama = "0.0.1"
+
+# Channels
+crossbeam-channel = "0.5"
+
+# Protocol implementations
+resp-proto = { version = "0.0.1", features = ["resp3"] }
+
+# Client crates
+ringline-redis = { git = "https://github.com/ringline-rs/ringline.git", rev = "fac53e3", features = ["timestamps"] }
+ringline-memcache = { git = "https://github.com/ringline-rs/ringline.git", rev = "fac53e3", features = ["timestamps"] }
+ringline-ping = { git = "https://github.com/ringline-rs/ringline.git", rev = "fac53e3", features = ["timestamps"] }
+
+# Metrics
+metrics = { git = "https://github.com/brayniac/crucible", rev = "876a317" }
+metriken = "0.7"
+metriken-exposition = { version = "0.12", features = ["parquet"] }
+metriken-query = { version = "0.1.2", features = ["http"] }
+
+# Configuration
+toml = "0.8"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1.0"
+
+# Time/Date
+chrono = { version = "0.4", features = ["serde"] }
+
+# CLI
+clap = { version = "4", features = ["derive"] }
+
+# Utilities
+bytes = "1.11.1"
+libc = "0.2"
+socket2 = { version = "0.5", features = ["all"] }
+thiserror = "2"
+itoa = "1.0"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# RNG for workload generation
+rand = "0.9"
+rand_xoshiro = "0.7"
+
+# Signal handling
+ctrlc = { version = "3", features = ["termination"] }
+
+# Async runtime for admin server
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "net", "io-util", "sync", "time", "macros"] }
+
+# Viewer dependencies
+arrow = "56"
+parquet = "56"
+axum = "0.8"
+tower = "0.5"
+tower-http = { version = "0.6", features = ["compression-gzip", "decompression-gzip"] }
+tower-livereload = "0.9"
+histogram = "0.11"
+include_dir = "0.7"
+open = "5"
+ringlog = "0.7"
+http = "1"
+
+# Jemalloc allocator
+tikv-jemallocator = "0.6"
+tikv-jemalloc-ctl = { version = "0.6", features = ["stats"] }
+
+[features]
+default = []
+
+[[bin]]
+name = "cachecannon"
+path = "src/main.rs"
+
+[package.metadata.deb]
+name = "cachecannon"
+maintainer = "Brian Martin <brayniac@gmail.com>"
+section = "net"
+priority = "optional"
+assets = [
+    ["target/release/cachecannon", "usr/bin/", "755"],
+    ["config/example.toml", "etc/cachecannon/benchmark.toml.example", "644"],
+]
+
+[package.metadata.generate-rpm]
+name = "cachecannon"
+assets = [
+    { source = "target/release/cachecannon", dest = "/usr/bin/cachecannon", mode = "0755" },
+    { source = "config/example.toml", dest = "/etc/cachecannon/benchmark.toml.example", mode = "0644", config = true },
+]
+
+[profile.release]
+lto = true
+codegen-units = 1
+panic = "abort"
+debug = true

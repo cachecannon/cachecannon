@@ -1,0 +1,41 @@
+# Redis (RESP2) benchmark configuration
+
+[general]
+duration = "60s"
+warmup = "10s"
+threads = 4  # Number of worker threads
+# cpu_list = "0-3"  # Pin worker threads to CPUs (e.g., "0-3,8-11")
+
+[target]
+endpoints = ["127.0.0.1:6379"]
+protocol = "resp"  # Redis RESP2 protocol
+
+[connection]
+connections = 16     # Total number of connections (distributed across threads)
+pipeline_depth = 32  # Max in-flight requests per connection
+connect_timeout = "5s"
+request_timeout = "1s"
+
+[workload]
+# rate_limit = 100000  # Uncomment to limit rate (requests/second)
+
+[workload.keyspace]
+length = 16         # Key length in bytes
+count = 1000000     # Number of unique keys
+distribution = "uniform"  # or "zipf"
+
+[workload.commands]
+get = 80  # 80% GET
+set = 20  # 20% SET
+
+[workload.values]
+length = 64  # Value length for SET commands
+
+[timestamps]
+enabled = true
+mode = "userspace"  # or "software" for SO_TIMESTAMPING (Linux only)
+
+[admin]
+# listen = "127.0.0.1:9090"  # Prometheus metrics endpoint
+# parquet = "metrics.parquet"  # Write metrics to parquet file at end of run
+# parquet_interval = "1s"  # Snapshot interval for parquet recording

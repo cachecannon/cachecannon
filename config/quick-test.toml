@@ -1,0 +1,35 @@
+# Quick smoke test — fast validation that connectivity and basic operations work
+#
+# Runs for just 5 seconds with minimal resources. Use this to verify that
+# cachecannon can connect to your server and issue requests successfully
+# before running a longer benchmark.
+
+[general]
+duration = "5s"          # Short duration for quick feedback
+warmup = "2s"            # Brief warmup
+threads = 2              # Minimal threads
+
+[target]
+endpoints = ["127.0.0.1:6379"]
+protocol = "resp"
+
+[connection]
+connections = 4          # Few connections (just enough to verify)
+pipeline_depth = 8       # Low pipeline depth
+
+[workload.keyspace]
+length = 16
+count = 10000            # Small keyspace (higher hit rate, less memory)
+distribution = "uniform"
+
+[workload.commands]
+get = 80
+set = 20
+
+[workload.values]
+length = 64
+
+[admin]
+# listen = "127.0.0.1:9090"
+# parquet = "metrics.parquet"
+# parquet_interval = "1s"
