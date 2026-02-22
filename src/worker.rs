@@ -1289,20 +1289,12 @@ async fn momento_connection_task(state: Arc<SharedWorkerState>, _conn_idx: usize
 
         metrics::CONNECTIONS_ACTIVE.increment();
 
-        tracing::debug!(
-            worker = state.task_state.worker_id,
-            "Momento connected"
-        );
+        tracing::debug!(worker = state.task_state.worker_id, "Momento connected");
 
         // Drive workload
-        let result = drive_momento_session(
-            &mut client,
-            &state,
-            &mut rng,
-            &mut key_buf,
-            &mut value_buf,
-        )
-        .await;
+        let result =
+            drive_momento_session(&mut client, &state, &mut rng, &mut key_buf, &mut value_buf)
+                .await;
 
         metrics::CONNECTIONS_ACTIVE.decrement();
 
@@ -1385,7 +1377,9 @@ async fn drive_momento_session(
                     client.fire_delete(cache_name, key_buf).is_ok()
                 } else {
                     rng.fill_bytes(value_buf);
-                    client.fire_set(cache_name, key_buf, value_buf, ttl_ms).is_ok()
+                    client
+                        .fire_set(cache_name, key_buf, value_buf, ttl_ms)
+                        .is_ok()
                 };
 
                 if sent {
