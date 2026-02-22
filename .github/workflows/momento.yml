@@ -1,0 +1,33 @@
+name: Momento Integration Test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  momento:
+    name: Momento
+    runs-on: ubuntu-latest
+    if: ${{ secrets.MOMENTO_API_KEY != '' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: momento
+      - name: Build release binary
+        run: cargo build --release
+      - name: Run Momento integration test
+        env:
+          MOMENTO_API_KEY: ${{ secrets.MOMENTO_API_KEY }}
+        run: |
+          set -euo pipefail
+          echo "Running cachecannon against Momento..."
+          ./target/release/cachecannon config/momento-ci.toml
+          echo "PASS: Momento integration test"

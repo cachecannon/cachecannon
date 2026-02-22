@@ -1,0 +1,40 @@
+# Momento CI integration test configuration
+#
+# Conservative settings to validate connectivity and protocol correctness
+# without burning API quota.
+#
+# Required environment variables:
+#   MOMENTO_API_KEY   - Your Momento API key
+
+[general]
+duration = "10s"
+warmup = "5s"
+threads = 1
+
+[target]
+endpoints = ["127.0.0.1:443"]
+protocol = "momento"
+
+[connection]
+connections = 1
+pipeline_depth = 1
+
+[workload.keyspace]
+length = 16
+count = 1000
+distribution = "uniform"
+
+[workload.commands]
+get = 80
+set = 20
+
+[workload.values]
+length = 64
+
+[momento]
+cache_name = "cachecannon"
+ttl_seconds = 300
+
+[timestamps]
+enabled = true
+mode = "userspace"
