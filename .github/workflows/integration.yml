@@ -62,54 +62,46 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
 
-      - name: Generate self-signed TLS certificates
+      - name: Install Redis and generate TLS certificates
         run: |
+          sudo apt-get update && sudo apt-get install -y redis-server
+
           mkdir -p /tmp/redis-tls
           openssl req -x509 -newkey rsa:4096 -sha256 -days 1 \
             -nodes -keyout /tmp/redis-tls/redis.key \
             -out /tmp/redis-tls/redis.crt \
             -subj "/CN=localhost" \
             -addext "subjectAltName=DNS:localhost,IP:127.0.0.1"
-          # Redis requires a CA cert file; use the self-signed cert as its own CA
           cp /tmp/redis-tls/redis.crt /tmp/redis-tls/ca.crt
 
       - name: Start Redis with TLS
         run: |
-          docker run -d --name redis-tls \
-            --network host \
-            -v /tmp/redis-tls:/tls:ro \
-            redis:latest \
-            redis-server \
-              --tls-port 6380 \
-              --port 0 \
-              --tls-cert-file /tls/redis.crt \
-              --tls-key-file /tls/redis.key \
-              --tls-ca-cert-file /tls/ca.crt \
-              --tls-auth-clients no
-          # Wait for Redis to be ready
+          redis-server \
+            --tls-port 6380 \
+            --port 0 \
+            --tls-cert-file /tmp/redis-tls/redis.crt \
+            --tls-key-file /tmp/redis-tls/redis.key \
+            --tls-ca-cert-file /tmp/redis-tls/ca.crt \
+            --tls-auth-clients no \
+            --daemonize yes
+
+          # Wait for Redis to be ready (fail if it never responds)
           for i in $(seq 1 30); do
-            if docker exec redis-tls redis-cli --tls \
-              --cert /tls/redis.crt --key /tls/redis.key --cacert /tls/ca.crt \
+            if redis-cli --tls \
+              --cert /tmp/redis-tls/redis.crt --key /tmp/redis-tls/redis.key \
+              --cacert /tmp/redis-tls/ca.crt \
               -p 6380 ping 2>/dev/null | grep -q PONG; then
               echo "Redis TLS is ready"
-              break
+              exit 0
             fi
             echo "Waiting for Redis TLS... ($i)"
             sleep 1
           done
+          echo "ERROR: Redis TLS never became ready"
+          exit 1
 
       - name: Build
         run: cargo build --release
 
-      - name: Verify TLS port is reachable
-        run: |
-          openssl s_client -connect 127.0.0.1:6380 -servername localhost </dev/null 2>&1 | head -20
-
       - name: Run benchmark against Redis TLS
         run: ./target/release/cachecannon config/redis-tls-ci.toml
-        env:
-          RUST_LOG: cachecannon=debug
-
-      - name: Cleanup
-        if: always()
-        run: docker rm -f redis-tls || true
