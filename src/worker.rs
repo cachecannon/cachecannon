@@ -31,14 +31,16 @@ use std::time::{Duration, Instant};
 pub enum Phase {
     /// Initial connection phase
     Connect = 0,
+    /// Precheck phase - verify basic connectivity with a test command
+    Precheck = 1,
     /// Prefill phase - write each key exactly once
-    Prefill = 1,
+    Prefill = 2,
     /// Warmup phase - run workload but don't record metrics
-    Warmup = 2,
+    Warmup = 3,
     /// Main measurement phase - record metrics
-    Running = 3,
+    Running = 4,
     /// Stop phase - workers should exit
-    Stop = 4,
+    Stop = 5,
 }
 
 impl Phase {
@@ -46,9 +48,10 @@ impl Phase {
     pub fn from_u8(v: u8) -> Self {
         match v {
             0 => Phase::Connect,
-            1 => Phase::Prefill,
-            2 => Phase::Warmup,
-            3 => Phase::Running,
+            1 => Phase::Precheck,
+            2 => Phase::Prefill,
+            3 => Phase::Warmup,
+            4 => Phase::Running,
             _ => Phase::Stop,
         }
     }
@@ -85,6 +88,8 @@ pub enum DisconnectReason {
 pub struct SharedState {
     /// Current test phase (controlled by main thread)
     phase: AtomicU8,
+    /// Number of workers that have completed precheck
+    precheck_done: AtomicUsize,
     /// Number of workers that have completed prefill
     prefill_complete: AtomicUsize,
     /// Total number of prefill keys confirmed across all workers
@@ -97,6 +102,7 @@ impl SharedState {
     pub fn new() -> Self {
         Self {
             phase: AtomicU8::new(Phase::Connect as u8),
+            precheck_done: AtomicUsize::new(0),
             prefill_complete: AtomicUsize::new(0),
             prefill_keys_confirmed: AtomicUsize::new(0),
             prefill_keys_total: AtomicUsize::new(0),
@@ -113,6 +119,18 @@ impl SharedState {
     #[inline]
     pub fn set_phase(&self, phase: Phase) {
         self.phase.store(phase as u8, Ordering::Release);
+    }
+
+    /// Mark one worker's precheck as complete.
+    #[inline]
+    pub fn mark_precheck_complete(&self) {
+        self.precheck_done.fetch_add(1, Ordering::Release);
+    }
+
+    /// Get the number of workers that have completed precheck.
+    #[inline]
+    pub fn precheck_complete_count(&self) -> usize {
+        self.precheck_done.load(Ordering::Acquire)
     }
 
     /// Mark this worker's prefill as complete.
@@ -276,11 +294,28 @@ struct SharedWorkerState {
     prefill_total: usize,
     /// Whether prefill is already complete for this worker.
     prefill_done: AtomicU8, // 0 = not done, 1 = done
+    /// Whether precheck is already complete for this worker.
+    precheck_done: AtomicU8, // 0 = not done, 1 = done
 }
 
 impl SharedWorkerState {
     fn is_prefill_done(&self) -> bool {
         self.prefill_done.load(Ordering::Acquire) != 0
+    }
+
+    fn is_precheck_done(&self) -> bool {
+        self.precheck_done.load(Ordering::Acquire) != 0
+    }
+
+    /// Mark this worker's precheck as complete (only the first connection to succeed does this).
+    fn mark_precheck_done(&self) {
+        if self
+            .precheck_done
+            .compare_exchange(0, 1, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+        {
+            self.task_state.shared.mark_precheck_complete();
+        }
     }
 }
 
@@ -457,10 +492,17 @@ impl AsyncEventHandler for BenchHandler {
             tls_server_name,
         });
 
+        // Workers with no connections immediately pass precheck
+        let precheck_already_done = my_connections == 0;
+        if precheck_already_done {
+            cfg.shared.mark_precheck_complete();
+        }
+
         let worker_state = Arc::new(SharedWorkerState {
             task_state,
             prefill_total,
             prefill_done: AtomicU8::new(if prefill_done { 1 } else { 0 }),
+            precheck_done: AtomicU8::new(if precheck_already_done { 1 } else { 0 }),
         });
 
         let result = BenchHandler {
@@ -735,6 +777,40 @@ async fn resp_connection_task(state: Arc<SharedWorkerState>, endpoint_idx: usize
             conn_index = conn.index(),
             "connected (RESP)"
         );
+
+        // Precheck: send PING to verify connectivity
+        if state.task_state.shared.phase() == Phase::Precheck && !state.is_precheck_done() {
+            match client.ping().await {
+                Ok(()) => {
+                    tracing::debug!(
+                        worker = state.task_state.worker_id,
+                        endpoint = %endpoint,
+                        "precheck PING ok"
+                    );
+                    state.mark_precheck_done();
+                }
+                Err(e) => {
+                    tracing::debug!(
+                        worker = state.task_state.worker_id,
+                        endpoint = %endpoint,
+                        "precheck PING failed: {}",
+                        e
+                    );
+                    metrics::CONNECTIONS_ACTIVE.decrement();
+                    metrics::CONNECTIONS_FAILED.increment();
+                    ringline::sleep(Duration::from_millis(100)).await;
+                    continue;
+                }
+            }
+            // Wait for phase to advance past Precheck
+            while state.task_state.shared.phase() == Phase::Precheck {
+                if state.task_state.shared.phase().should_stop() {
+                    metrics::CONNECTIONS_ACTIVE.decrement();
+                    return;
+                }
+                ringline::sleep(Duration::from_millis(10)).await;
+            }
+        }
 
         let result = drive_resp_workload(
             &mut client,
@@ -1014,6 +1090,40 @@ async fn memcache_connection_task(state: Arc<SharedWorkerState>, endpoint_idx: u
             "connected (Memcache)"
         );
 
+        // Precheck: send VERSION to verify connectivity
+        if state.task_state.shared.phase() == Phase::Precheck && !state.is_precheck_done() {
+            match client.version().await {
+                Ok(_version) => {
+                    tracing::debug!(
+                        worker = state.task_state.worker_id,
+                        endpoint = %endpoint,
+                        "precheck VERSION ok"
+                    );
+                    state.mark_precheck_done();
+                }
+                Err(e) => {
+                    tracing::debug!(
+                        worker = state.task_state.worker_id,
+                        endpoint = %endpoint,
+                        "precheck VERSION failed: {}",
+                        e
+                    );
+                    metrics::CONNECTIONS_ACTIVE.decrement();
+                    metrics::CONNECTIONS_FAILED.increment();
+                    ringline::sleep(Duration::from_millis(100)).await;
+                    continue;
+                }
+            }
+            // Wait for phase to advance past Precheck
+            while state.task_state.shared.phase() == Phase::Precheck {
+                if state.task_state.shared.phase().should_stop() {
+                    metrics::CONNECTIONS_ACTIVE.decrement();
+                    return;
+                }
+                ringline::sleep(Duration::from_millis(10)).await;
+            }
+        }
+
         let result = drive_memcache_workload(
             &mut client,
             &state,
@@ -1221,6 +1331,40 @@ async fn ping_connection_task(state: Arc<SharedWorkerState>, endpoint_idx: usize
             "connected (Ping)"
         );
 
+        // Precheck: send PING to verify connectivity
+        if state.task_state.shared.phase() == Phase::Precheck && !state.is_precheck_done() {
+            match client.ping().await {
+                Ok(()) => {
+                    tracing::debug!(
+                        worker = state.task_state.worker_id,
+                        endpoint = %endpoint,
+                        "precheck PING ok (ping protocol)"
+                    );
+                    state.mark_precheck_done();
+                }
+                Err(e) => {
+                    tracing::debug!(
+                        worker = state.task_state.worker_id,
+                        endpoint = %endpoint,
+                        "precheck PING failed (ping protocol): {}",
+                        e
+                    );
+                    metrics::CONNECTIONS_ACTIVE.decrement();
+                    metrics::CONNECTIONS_FAILED.increment();
+                    ringline::sleep(Duration::from_millis(100)).await;
+                    continue;
+                }
+            }
+            // Wait for phase to advance past Precheck
+            while state.task_state.shared.phase() == Phase::Precheck {
+                if state.task_state.shared.phase().should_stop() {
+                    metrics::CONNECTIONS_ACTIVE.decrement();
+                    return;
+                }
+                ringline::sleep(Duration::from_millis(10)).await;
+            }
+        }
+
         let result = drive_ping_workload(&mut client, &state).await;
 
         metrics::CONNECTIONS_ACTIVE.decrement();
@@ -1324,6 +1468,23 @@ async fn momento_connection_task(state: Arc<SharedWorkerState>, _conn_idx: usize
         metrics::CONNECTIONS_ACTIVE.increment();
 
         tracing::debug!(worker = state.task_state.worker_id, "Momento connected");
+
+        // Precheck: successful connect already proves connectivity for Momento
+        if state.task_state.shared.phase() == Phase::Precheck && !state.is_precheck_done() {
+            tracing::debug!(
+                worker = state.task_state.worker_id,
+                "precheck ok (Momento connect succeeded)"
+            );
+            state.mark_precheck_done();
+            // Wait for phase to advance past Precheck
+            while state.task_state.shared.phase() == Phase::Precheck {
+                if state.task_state.shared.phase().should_stop() {
+                    metrics::CONNECTIONS_ACTIVE.decrement();
+                    return;
+                }
+                ringline::sleep(Duration::from_millis(10)).await;
+            }
+        }
 
         // Drive workload
         let result =

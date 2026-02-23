@@ -221,13 +221,6 @@ fn run_cachecannon(
         vec![None; num_threads]
     };
 
-    // Print prefill phase indicator if enabled
-    if prefill_enabled {
-        formatter.print_prefill(key_count);
-    } else {
-        formatter.print_warmup(warmup);
-    }
-
     // Allocate shared value pool: 1GB of random bytes shared across all workers.
     // Workers pick random offsets into this pool for SET values, avoiding per-worker
     // copies. The pool is seeded deterministically for reproducibility.
@@ -315,12 +308,9 @@ fn run_cachecannon(
         RinglineBuilder::new(krio_config).launch::<cachecannon::worker::BenchHandler>()?;
     tracing::debug!(workers = handles.len(), "ringline workers launched");
 
-    // Start in prefill or warmup phase
-    if prefill_enabled {
-        shared.set_phase(Phase::Prefill);
-    } else {
-        shared.set_phase(Phase::Warmup);
-    }
+    // Start in precheck phase
+    shared.set_phase(Phase::Precheck);
+    formatter.print_precheck();
 
     // Early liveness check: give workers time to complete EventLoop::new(),
     // then verify at least one is still alive. This catches setup failures
@@ -366,11 +356,7 @@ fn run_cachecannon(
     let mut baseline_get_count = 0u64;
     let mut baseline_set_count = 0u64;
     let mut baseline_backfill_set_count = 0u64;
-    let mut current_phase = if prefill_enabled {
-        Phase::Prefill
-    } else {
-        Phase::Warmup
-    };
+    let mut current_phase = Phase::Precheck;
 
     let mut actual_duration = duration;
 
@@ -378,7 +364,11 @@ fn run_cachecannon(
     let mut saturation_state: Option<SaturationSearchState> = None;
 
     // Track when warmup actually starts (after prefill completes)
-    let mut warmup_start: Option<Instant> = if prefill_enabled { None } else { Some(start) };
+    let mut warmup_start: Option<Instant> = None;
+
+    // Precheck tracking
+    let precheck_start = Instant::now();
+    let precheck_timeout = config.connection.connect_timeout;
 
     // Prefill progress tracking
     let prefill_start = Instant::now();
@@ -407,6 +397,50 @@ fn run_cachecannon(
                 actual_duration = Duration::ZERO;
             }
             break;
+        }
+
+        // Handle precheck -> prefill/warmup transition
+        if current_phase == Phase::Precheck {
+            let precheck_complete = shared.precheck_complete_count();
+            if precheck_complete >= num_threads {
+                let elapsed = precheck_start.elapsed();
+                formatter.print_precheck_ok(elapsed);
+                if prefill_enabled {
+                    shared.set_phase(Phase::Prefill);
+                    current_phase = Phase::Prefill;
+                    formatter.print_prefill(key_count);
+                } else {
+                    shared.set_phase(Phase::Warmup);
+                    current_phase = Phase::Warmup;
+                    warmup_start = Some(Instant::now());
+                    formatter.print_warmup(warmup);
+                }
+                continue;
+            }
+
+            // Timeout detection
+            let elapsed = precheck_start.elapsed();
+            if elapsed >= precheck_timeout {
+                let conns_failed = metrics::CONNECTIONS_FAILED.value();
+                formatter.print_precheck_failed(elapsed, conns_failed);
+                shared.set_phase(Phase::Stop);
+
+                // Shutdown workers cleanly
+                shutdown_handle.shutdown();
+                let shutdown_start = Instant::now();
+                for handle in handles {
+                    let remaining =
+                        WORKER_SHUTDOWN_TIMEOUT.saturating_sub(shutdown_start.elapsed());
+                    if remaining.is_zero() {
+                        break;
+                    }
+                    let _ = handle.join();
+                }
+
+                return Err("precheck failed: no connectivity".into());
+            }
+
+            continue;
         }
 
         // Handle prefill -> warmup transition

@@ -130,6 +130,41 @@ impl OutputFormatter for CleanFormatter {
         println!();
     }
 
+    fn print_precheck(&self) {
+        println!("[precheck]");
+        let _ = io::stdout().flush();
+    }
+
+    fn print_precheck_ok(&self, elapsed: Duration) {
+        println!("[precheck ok {}ms]", elapsed.as_millis());
+        let _ = io::stdout().flush();
+    }
+
+    fn print_precheck_failed(&self, elapsed: Duration, conns_failed: u64) {
+        println!();
+        println!(
+            "{}",
+            self.red("────────────────────────────────────────────────────────────────────────")
+        );
+        println!("{}", self.red("PRECHECK FAILED"));
+        println!(
+            "{}",
+            self.red("────────────────────────────────────────────────────────────────────────")
+        );
+        println!(
+            "{}",
+            self.red(&format!(
+                "no connectivity after {}ms ({} connection attempts failed)",
+                elapsed.as_millis(),
+                conns_failed
+            ))
+        );
+        println!();
+        println!("hint: check that the server is running and reachable");
+        println!("hint: check firewall rules and target address in config");
+        let _ = io::stdout().flush();
+    }
+
     fn print_prefill(&self, key_count: usize) {
         use super::format::format_count;
         println!("[prefill {} keys]", format_count(key_count as u64));

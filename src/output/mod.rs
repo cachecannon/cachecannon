@@ -224,6 +224,25 @@ pub trait OutputFormatter: Send + Sync {
     /// Print the configuration summary at startup.
     fn print_config(&self, config: &Config);
 
+    /// Print the precheck phase indicator.
+    fn print_precheck(&self) {
+        println!("[precheck]");
+    }
+
+    /// Print precheck success.
+    fn print_precheck_ok(&self, elapsed: Duration) {
+        println!("[precheck ok {}ms]", elapsed.as_millis());
+    }
+
+    /// Print precheck failure.
+    fn print_precheck_failed(&self, elapsed: Duration, conns_failed: u64) {
+        println!(
+            "[precheck failed] no connectivity after {}ms ({} connection attempts failed)",
+            elapsed.as_millis(),
+            conns_failed
+        );
+    }
+
     /// Print the prefill phase indicator.
     fn print_prefill(&self, key_count: usize) {
         println!("PREFILL: writing {} keys...", key_count);
