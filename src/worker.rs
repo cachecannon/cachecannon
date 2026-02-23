@@ -470,9 +470,10 @@ impl AsyncEventHandler for BenchHandler {
         let slot_table = cfg.slot_table;
 
         // Build ketama consistent hash ring from endpoint addresses.
-        // For Momento, endpoints is empty — skip building the ring.
+        // For Momento, endpoints is empty — use a dummy single-node ring
+        // (the ring is never consulted when there are no endpoints).
         let ring = if endpoints.is_empty() {
-            ketama::Ring::build(&[])
+            ketama::Ring::build(&["_"])
         } else {
             let server_ids: Vec<String> = endpoints.iter().map(|a| a.to_string()).collect();
             ketama::Ring::build(&server_ids.iter().map(|s| s.as_str()).collect::<Vec<_>>())
