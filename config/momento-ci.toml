@@ -19,7 +19,7 @@ connections = 1
 pipeline_depth = 1
 
 [workload]
-rate_limit = 50
+rate_limit = 10
 
 [workload.keyspace]
 length = 16

@@ -43,9 +43,9 @@ jobs:
           set -euo pipefail
           echo "Running cachecannon against Momento..."
           ./target/release/cachecannon config/momento-ci.toml 2>&1 | tee momento-output.txt
-          # Fail if there were no successful requests
-          if grep -q "0 req/s" momento-output.txt && grep -q "failed" momento-output.txt; then
-            echo "FAIL: No successful requests — all connections failed"
+          # Verify we got successful requests (throughput line shows non-zero req/s)
+          if ! grep -qP 'throughput\s+[1-9]\d*\s+req/s' momento-output.txt; then
+            echo "FAIL: No successful requests"
             exit 1
           fi
           echo "PASS: Momento integration test"

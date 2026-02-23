@@ -1646,7 +1646,12 @@ async fn drive_momento_session(
 /// Map a ringline-momento CompletedOp to a RequestResult.
 fn map_momento_op(op: ringline_momento::CompletedOp) -> RequestResult {
     match op {
-        ringline_momento::CompletedOp::Get { id, result, .. } => {
+        ringline_momento::CompletedOp::Get {
+            id,
+            result,
+            latency_ns,
+            ..
+        } => {
             let (success, is_error, hit) = match result {
                 Ok(Some(_)) => (true, false, Some(true)),
                 Ok(None) => (true, false, Some(false)),
@@ -1656,7 +1661,7 @@ fn map_momento_op(op: ringline_momento::CompletedOp) -> RequestResult {
                 id: id.value(),
                 success,
                 is_error_response: is_error,
-                latency_ns: 0,
+                latency_ns,
                 ttfb_ns: None,
                 request_type: RequestType::Get,
                 hit,
@@ -1665,7 +1670,12 @@ fn map_momento_op(op: ringline_momento::CompletedOp) -> RequestResult {
                 redirect: None,
             }
         }
-        ringline_momento::CompletedOp::Set { id, result, .. } => {
+        ringline_momento::CompletedOp::Set {
+            id,
+            result,
+            latency_ns,
+            ..
+        } => {
             let (success, is_error) = match result {
                 Ok(()) => (true, false),
                 Err(_) => (false, true),
@@ -1674,7 +1684,7 @@ fn map_momento_op(op: ringline_momento::CompletedOp) -> RequestResult {
                 id: id.value(),
                 success,
                 is_error_response: is_error,
-                latency_ns: 0,
+                latency_ns,
                 ttfb_ns: None,
                 request_type: RequestType::Set,
                 hit: None,
@@ -1683,7 +1693,12 @@ fn map_momento_op(op: ringline_momento::CompletedOp) -> RequestResult {
                 redirect: None,
             }
         }
-        ringline_momento::CompletedOp::Delete { id, result, .. } => {
+        ringline_momento::CompletedOp::Delete {
+            id,
+            result,
+            latency_ns,
+            ..
+        } => {
             let (success, is_error) = match result {
                 Ok(()) => (true, false),
                 Err(_) => (false, true),
@@ -1692,7 +1707,7 @@ fn map_momento_op(op: ringline_momento::CompletedOp) -> RequestResult {
                 id: id.value(),
                 success,
                 is_error_response: is_error,
-                latency_ns: 0,
+                latency_ns,
                 ttfb_ns: None,
                 request_type: RequestType::Delete,
                 hit: None,
