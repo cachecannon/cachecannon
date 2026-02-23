@@ -37,8 +37,15 @@ jobs:
         run: cargo build --release
       - name: Run Momento integration test
         if: env.SKIP != 'true'
+        env:
+          RUST_LOG: debug
         run: |
           set -euo pipefail
           echo "Running cachecannon against Momento..."
-          ./target/release/cachecannon config/momento-ci.toml
+          ./target/release/cachecannon config/momento-ci.toml 2>&1 | tee momento-output.txt
+          # Fail if there were no successful requests
+          if grep -q "0 req/s" momento-output.txt && grep -q "failed" momento-output.txt; then
+            echo "FAIL: No successful requests — all connections failed"
+            exit 1
+          fi
           echo "PASS: Momento integration test"
