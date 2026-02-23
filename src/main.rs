@@ -271,9 +271,7 @@ fn run_cachecannon(
         } else {
             rustls::ClientConfig::builder()
                 .dangerous()
-                .with_custom_certificate_verifier(std::sync::Arc::new(
-                    NoCertificateVerification,
-                ))
+                .with_custom_certificate_verifier(std::sync::Arc::new(NoCertificateVerification))
                 .with_no_client_auth()
         };
 

@@ -756,13 +756,16 @@ async fn resp_connection_task(state: Arc<SharedWorkerState>, endpoint_idx: usize
             return;
         }
 
-        let conn = match establish_connection(endpoint, state.task_state.worker_id, tls_name.as_deref()).await {
-            Ok(conn) => conn,
-            Err(_) => {
-                ringline::sleep(Duration::from_millis(100)).await;
-                continue;
-            }
-        };
+        let conn =
+            match establish_connection(endpoint, state.task_state.worker_id, tls_name.as_deref())
+                .await
+            {
+                Ok(conn) => conn,
+                Err(_) => {
+                    ringline::sleep(Duration::from_millis(100)).await;
+                    continue;
+                }
+            };
 
         metrics::CONNECTIONS_ACTIVE.increment();
         let use_kernel_ts = matches!(config.timestamps.mode, TimestampMode::Software);
@@ -1068,13 +1071,16 @@ async fn memcache_connection_task(state: Arc<SharedWorkerState>, endpoint_idx: u
             return;
         }
 
-        let conn = match establish_connection(endpoint, state.task_state.worker_id, tls_name.as_deref()).await {
-            Ok(conn) => conn,
-            Err(_) => {
-                ringline::sleep(Duration::from_millis(100)).await;
-                continue;
-            }
-        };
+        let conn =
+            match establish_connection(endpoint, state.task_state.worker_id, tls_name.as_deref())
+                .await
+            {
+                Ok(conn) => conn,
+                Err(_) => {
+                    ringline::sleep(Duration::from_millis(100)).await;
+                    continue;
+                }
+            };
 
         metrics::CONNECTIONS_ACTIVE.increment();
         let use_kernel_ts = matches!(config.timestamps.mode, TimestampMode::Software);
@@ -1309,13 +1315,16 @@ async fn ping_connection_task(state: Arc<SharedWorkerState>, endpoint_idx: usize
             return;
         }
 
-        let conn = match establish_connection(endpoint, state.task_state.worker_id, tls_name.as_deref()).await {
-            Ok(conn) => conn,
-            Err(_) => {
-                ringline::sleep(Duration::from_millis(100)).await;
-                continue;
-            }
-        };
+        let conn =
+            match establish_connection(endpoint, state.task_state.worker_id, tls_name.as_deref())
+                .await
+            {
+                Ok(conn) => conn,
+                Err(_) => {
+                    ringline::sleep(Duration::from_millis(100)).await;
+                    continue;
+                }
+            };
 
         metrics::CONNECTIONS_ACTIVE.increment();
         let use_kernel_ts = matches!(config.timestamps.mode, TimestampMode::Software);
