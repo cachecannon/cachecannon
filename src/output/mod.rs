@@ -17,7 +17,7 @@ pub use json::JsonFormatter;
 pub use quiet::QuietFormatter;
 pub use verbose::VerboseFormatter;
 
-use crate::config::Config;
+use crate::config::{Config, Protocol};
 use chrono::{DateTime, Utc};
 use std::fmt;
 use std::time::Duration;
@@ -235,7 +235,8 @@ pub trait OutputFormatter: Send + Sync {
     }
 
     /// Print precheck failure.
-    fn print_precheck_failed(&self, elapsed: Duration, conns_failed: u64) {
+    fn print_precheck_failed(&self, elapsed: Duration, conns_failed: u64, protocol: Protocol) {
+        let _ = protocol;
         println!(
             "[precheck failed] no connectivity after {}ms ({} connection attempts failed)",
             elapsed.as_millis(),

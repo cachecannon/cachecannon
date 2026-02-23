@@ -469,9 +469,14 @@ impl AsyncEventHandler for BenchHandler {
         let backfill_on_miss = cfg.config.workload.backfill_on_miss;
         let slot_table = cfg.slot_table;
 
-        // Build ketama consistent hash ring from endpoint addresses
-        let server_ids: Vec<String> = endpoints.iter().map(|a| a.to_string()).collect();
-        let ring = ketama::Ring::build(&server_ids.iter().map(|s| s.as_str()).collect::<Vec<_>>());
+        // Build ketama consistent hash ring from endpoint addresses.
+        // For Momento, endpoints is empty — skip building the ring.
+        let ring = if endpoints.is_empty() {
+            ketama::Ring::build(&[])
+        } else {
+            let server_ids: Vec<String> = endpoints.iter().map(|a| a.to_string()).collect();
+            ketama::Ring::build(&server_ids.iter().map(|s| s.as_str()).collect::<Vec<_>>())
+        };
 
         let tls_enabled = cfg.config.target.tls;
         let tls_server_name = cfg.config.target.tls_hostname.clone();
@@ -1463,11 +1468,21 @@ async fn momento_connection_task(state: Arc<SharedWorkerState>, _conn_idx: usize
         let mut client = match ringline_momento::Client::connect(&credential).await {
             Ok(client) => client,
             Err(e) => {
-                tracing::debug!(
-                    worker = state.task_state.worker_id,
-                    "Momento connect failed: {}",
-                    e
-                );
+                // During precheck, surface connection errors at warn level so they're
+                // visible without RUST_LOG=debug
+                if phase == Phase::Precheck {
+                    tracing::warn!(
+                        worker = state.task_state.worker_id,
+                        "Momento connect failed: {}",
+                        e
+                    );
+                } else {
+                    tracing::debug!(
+                        worker = state.task_state.worker_id,
+                        "Momento connect failed: {}",
+                        e
+                    );
+                }
                 metrics::CONNECTIONS_FAILED.increment();
                 ringline::sleep(Duration::from_millis(100)).await;
                 continue;

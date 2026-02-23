@@ -12,7 +12,6 @@ warmup = "5s"
 threads = 1
 
 [target]
-endpoints = ["127.0.0.1:443"]
 protocol = "momento"
 
 [connection]

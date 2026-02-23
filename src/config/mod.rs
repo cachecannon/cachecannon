@@ -70,6 +70,7 @@ fn num_cpus() -> usize {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct Target {
+    #[serde(default)]
     pub endpoints: Vec<SocketAddr>,
     #[serde(default)]
     pub protocol: Protocol,
@@ -467,7 +468,20 @@ impl Config {
     pub fn load<P: AsRef<Path>>(path: P) -> Result<Self, ConfigError> {
         let content =
             std::fs::read_to_string(path.as_ref()).map_err(|e| ConfigError::Io(e.to_string()))?;
-        toml::from_str(&content).map_err(|e| ConfigError::Parse(e.to_string()))
+        let config: Self =
+            toml::from_str(&content).map_err(|e| ConfigError::Parse(e.to_string()))?;
+        config.validate()?;
+        Ok(config)
+    }
+
+    /// Validate config invariants that can't be expressed via serde alone.
+    fn validate(&self) -> Result<(), ConfigError> {
+        if self.target.endpoints.is_empty() && self.target.protocol != Protocol::Momento {
+            return Err(ConfigError::Validation(
+                "endpoints must be specified for non-Momento protocols".to_string(),
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -477,6 +491,8 @@ pub enum ConfigError {
     Io(String),
     #[error("failed to parse config: {0}")]
     Parse(String),
+    #[error("invalid config: {0}")]
+    Validation(String),
 }
 
 /// Parse a Linux-style CPU list string into a vector of CPU IDs.

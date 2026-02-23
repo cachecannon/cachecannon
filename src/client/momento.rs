@@ -29,4 +29,16 @@ impl MomentoSetup {
 
         Ok(Self { credential })
     }
+
+    /// Resolve the Momento endpoint hostname for display purposes.
+    /// Returns the host portion of the endpoint (e.g. "cache.cell-us-west-2-1.prod.a.momentohq.com").
+    pub fn resolve_endpoint_display(config: &Config) -> Option<String> {
+        let credential = Credential::from_env().ok()?;
+        let credential = if let Some(ref endpoint) = config.momento.endpoint {
+            Credential::with_endpoint(credential.token().to_string(), endpoint.clone())
+        } else {
+            credential
+        };
+        Some(credential.endpoint().to_string())
+    }
 }

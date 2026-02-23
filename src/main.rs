@@ -420,7 +420,7 @@ fn run_cachecannon(
             let elapsed = precheck_start.elapsed();
             if elapsed >= precheck_timeout {
                 let conns_failed = metrics::CONNECTIONS_FAILED.value();
-                formatter.print_precheck_failed(elapsed, conns_failed);
+                formatter.print_precheck_failed(elapsed, conns_failed, config.target.protocol);
                 shared.set_phase(Phase::Stop);
 
                 // Shutdown workers cleanly
