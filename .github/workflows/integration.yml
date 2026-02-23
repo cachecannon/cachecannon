@@ -76,7 +76,7 @@ jobs:
       - name: Start Redis with TLS
         run: |
           docker run -d --name redis-tls \
-            -p 6380:6380 \
+            --network host \
             -v /tmp/redis-tls:/tls:ro \
             redis:latest \
             redis-server \
@@ -101,8 +101,14 @@ jobs:
       - name: Build
         run: cargo build --release
 
+      - name: Verify TLS port is reachable
+        run: |
+          openssl s_client -connect 127.0.0.1:6380 -servername localhost </dev/null 2>&1 | head -20
+
       - name: Run benchmark against Redis TLS
         run: ./target/release/cachecannon config/redis-tls-ci.toml
+        env:
+          RUST_LOG: cachecannon=debug
 
       - name: Cleanup
         if: always()
