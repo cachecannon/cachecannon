@@ -16,7 +16,7 @@ jobs:
     runs-on: ubuntu-latest
     env:
       MOMENTO_API_KEY: ${{ secrets.MOMENTO_API_KEY }}
-      MOMENTO_REGION: us-west-2
+      MOMENTO_ENDPOINT: cache.cell-4-us-west-2-1.prod.a.momentohq.com
     steps:
       - name: Check for Momento API key
         run: |
