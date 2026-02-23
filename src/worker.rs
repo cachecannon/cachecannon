@@ -262,6 +262,10 @@ struct TaskSharedState {
     backfill_on_miss: bool,
     /// Momento setup (resolved once, shared across tasks).
     momento_setup: Mutex<Option<MomentoSetup>>,
+    /// Whether TLS is enabled for connections.
+    tls_enabled: bool,
+    /// SNI server name for TLS connections.
+    tls_server_name: Option<String>,
 }
 
 /// State shared between the BenchHandler (on_tick) and connection tasks.
@@ -434,6 +438,9 @@ impl AsyncEventHandler for BenchHandler {
         let server_ids: Vec<String> = endpoints.iter().map(|a| a.to_string()).collect();
         let ring = ketama::Ring::build(&server_ids.iter().map(|s| s.as_str()).collect::<Vec<_>>());
 
+        let tls_enabled = cfg.config.target.tls;
+        let tls_server_name = cfg.config.target.tls_hostname.clone();
+
         let task_state = Arc::new(TaskSharedState {
             config: cfg.config.clone(),
             shared: Arc::clone(&cfg.shared),
@@ -446,6 +453,8 @@ impl AsyncEventHandler for BenchHandler {
             worker_id: cfg.id,
             backfill_on_miss,
             momento_setup: Mutex::new(None),
+            tls_enabled,
+            tls_server_name,
         });
 
         let worker_state = Arc::new(SharedWorkerState {
@@ -557,11 +566,19 @@ fn spawn_momento_tasks(
 // ── Connection establishment helper ──────────────────────────────────────
 
 /// Try to connect to an endpoint, returning Ok(conn) or Err with retry sleep.
+/// When `tls_server_name` is Some, uses TLS via `ringline::connect_tls`.
 async fn establish_connection(
     endpoint: SocketAddr,
     worker_id: usize,
+    tls_server_name: Option<&str>,
 ) -> Result<ConnCtx, DisconnectReason> {
-    match ringline::connect(endpoint) {
+    let connect_result = if let Some(server_name) = tls_server_name {
+        ringline::connect_tls(endpoint, server_name)
+    } else {
+        ringline::connect(endpoint)
+    };
+
+    match connect_result {
         Ok(future) => match future.await {
             Ok(conn) => Ok(conn),
             Err(e) => {
@@ -587,6 +604,20 @@ async fn establish_connection(
             Err(DisconnectReason::ConnectFailed)
         }
     }
+}
+
+/// Resolve the TLS server name for an endpoint from task shared state.
+/// Returns None if TLS is disabled, otherwise the explicit hostname or the IP string.
+fn resolve_tls_server_name(state: &TaskSharedState, endpoint: SocketAddr) -> Option<String> {
+    if !state.tls_enabled {
+        return None;
+    }
+    Some(
+        state
+            .tls_server_name
+            .clone()
+            .unwrap_or_else(|| endpoint.ip().to_string()),
+    )
 }
 
 // ── on_result callback factories ─────────────────────────────────────────
@@ -672,6 +703,7 @@ fn make_ping_callback() -> impl Fn(&ringline_ping::CommandResult) {
 async fn resp_connection_task(state: Arc<SharedWorkerState>, endpoint_idx: usize, seed: u64) {
     let endpoint = state.task_state.endpoints[endpoint_idx];
     let config = &state.task_state.config;
+    let tls_name = resolve_tls_server_name(&state.task_state, endpoint);
     let mut rng = Xoshiro256PlusPlus::seed_from_u64(seed);
     let mut key_buf = vec![0u8; config.workload.keyspace.length];
     let mut backfill_queue: Vec<usize> = Vec::new();
@@ -682,7 +714,7 @@ async fn resp_connection_task(state: Arc<SharedWorkerState>, endpoint_idx: usize
             return;
         }
 
-        let conn = match establish_connection(endpoint, state.task_state.worker_id).await {
+        let conn = match establish_connection(endpoint, state.task_state.worker_id, tls_name.as_deref()).await {
             Ok(conn) => conn,
             Err(_) => {
                 ringline::sleep(Duration::from_millis(100)).await;
@@ -949,6 +981,7 @@ fn check_resp_redirect(error: &ringline_redis::Error, state: &Arc<SharedWorkerSt
 async fn memcache_connection_task(state: Arc<SharedWorkerState>, endpoint_idx: usize, seed: u64) {
     let endpoint = state.task_state.endpoints[endpoint_idx];
     let config = &state.task_state.config;
+    let tls_name = resolve_tls_server_name(&state.task_state, endpoint);
     let mut rng = Xoshiro256PlusPlus::seed_from_u64(seed);
     let mut key_buf = vec![0u8; config.workload.keyspace.length];
     let mut backfill_queue: Vec<usize> = Vec::new();
@@ -959,7 +992,7 @@ async fn memcache_connection_task(state: Arc<SharedWorkerState>, endpoint_idx: u
             return;
         }
 
-        let conn = match establish_connection(endpoint, state.task_state.worker_id).await {
+        let conn = match establish_connection(endpoint, state.task_state.worker_id, tls_name.as_deref()).await {
             Ok(conn) => conn,
             Err(_) => {
                 ringline::sleep(Duration::from_millis(100)).await;
@@ -1158,6 +1191,7 @@ async fn drive_memcache_workload(
 async fn ping_connection_task(state: Arc<SharedWorkerState>, endpoint_idx: usize, _seed: u64) {
     let endpoint = state.task_state.endpoints[endpoint_idx];
     let config = &state.task_state.config;
+    let tls_name = resolve_tls_server_name(&state.task_state, endpoint);
 
     loop {
         let phase = state.task_state.shared.phase();
@@ -1165,7 +1199,7 @@ async fn ping_connection_task(state: Arc<SharedWorkerState>, endpoint_idx: usize
             return;
         }
 
-        let conn = match establish_connection(endpoint, state.task_state.worker_id).await {
+        let conn = match establish_connection(endpoint, state.task_state.worker_id, tls_name.as_deref()).await {
             Ok(conn) => conn,
             Err(_) => {
                 ringline::sleep(Duration::from_millis(100)).await;

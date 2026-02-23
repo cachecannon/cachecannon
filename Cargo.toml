@@ -43,6 +43,10 @@ chrono = { version = "0.4", features = ["serde"] }
 # CLI
 clap = { version = "4", features = ["derive"] }
 
+# TLS
+rustls = { version = "0.23", default-features = false, features = ["std", "ring"] }
+webpki-roots = "0.26"
+
 # Utilities
 bytes = "1.11.1"
 libc = "0.2"

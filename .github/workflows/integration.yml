@@ -1,0 +1,108 @@
+name: Integration Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  redis:
+    name: Redis
+    runs-on: ubuntu-latest
+    services:
+      redis:
+        image: redis:latest
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build
+        run: cargo build --release
+      - name: Run benchmark against Redis
+        run: ./target/release/cachecannon config/redis-ci.toml
+
+  valkey:
+    name: Valkey
+    runs-on: ubuntu-latest
+    services:
+      valkey:
+        image: valkey/valkey:latest
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "valkey-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build
+        run: cargo build --release
+      - name: Run benchmark against Valkey
+        run: ./target/release/cachecannon config/redis-ci.toml
+
+  redis-tls:
+    name: Redis TLS
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Generate self-signed TLS certificates
+        run: |
+          mkdir -p /tmp/redis-tls
+          openssl req -x509 -newkey rsa:4096 -sha256 -days 1 \
+            -nodes -keyout /tmp/redis-tls/redis.key \
+            -out /tmp/redis-tls/redis.crt \
+            -subj "/CN=localhost" \
+            -addext "subjectAltName=DNS:localhost,IP:127.0.0.1"
+          # Redis requires a CA cert file; use the self-signed cert as its own CA
+          cp /tmp/redis-tls/redis.crt /tmp/redis-tls/ca.crt
+
+      - name: Start Redis with TLS
+        run: |
+          docker run -d --name redis-tls \
+            -p 6380:6380 \
+            -v /tmp/redis-tls:/tls:ro \
+            redis:latest \
+            redis-server \
+              --tls-port 6380 \
+              --port 0 \
+              --tls-cert-file /tls/redis.crt \
+              --tls-key-file /tls/redis.key \
+              --tls-ca-cert-file /tls/ca.crt
+          # Wait for Redis to be ready
+          for i in $(seq 1 30); do
+            if docker exec redis-tls redis-cli --tls \
+              --cert /tls/redis.crt --key /tls/redis.key --cacert /tls/ca.crt \
+              -p 6380 ping 2>/dev/null | grep -q PONG; then
+              echo "Redis TLS is ready"
+              break
+            fi
+            echo "Waiting for Redis TLS... ($i)"
+            sleep 1
+          done
+
+      - name: Build
+        run: cargo build --release
+
+      - name: Run benchmark against Redis TLS
+        run: ./target/release/cachecannon config/redis-tls-ci.toml
+
+      - name: Cleanup
+        if: always()
+        run: docker rm -f redis-tls || true

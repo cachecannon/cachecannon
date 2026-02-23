@@ -14,6 +14,8 @@ threads = 1
 endpoints = ["127.0.0.1:6379"]
 protocol = "resp"         # "resp", "resp3", "memcache", "memcache_binary", "momento", "ping"
 # tls = false             # Enable TLS encryption for connections
+# tls_hostname = "redis.example.com"  # Explicit SNI hostname (defaults to endpoint IP)
+# tls_verify = true       # Verify server certificate (set false for self-signed certs)
 # cluster = false         # Enable Redis Cluster mode (topology discovery via CLUSTER SLOTS)
 
 [connection]

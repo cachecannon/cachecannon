@@ -58,6 +58,10 @@ fn default_threads() -> usize {
     num_cpus()
 }
 
+fn default_tls_verify() -> bool {
+    true
+}
+
 fn num_cpus() -> usize {
     std::thread::available_parallelism()
         .map(|n| n.get())
@@ -71,6 +75,15 @@ pub struct Target {
     pub protocol: Protocol,
     #[serde(default)]
     pub tls: bool,
+    /// Explicit SNI hostname for TLS connections. When not set, the endpoint
+    /// IP address is used. Needed because SocketAddr loses the original hostname
+    /// after DNS resolution.
+    #[serde(default)]
+    pub tls_hostname: Option<String>,
+    /// Whether to verify the server's TLS certificate. Default: true.
+    /// Set to false for self-signed certificates (e.g., CI testing).
+    #[serde(default = "default_tls_verify")]
+    pub tls_verify: bool,
     /// Enable Redis Cluster mode: discover topology via CLUSTER SLOTS and route
     /// by hash slot instead of ketama consistent hashing.
     #[serde(default)]
