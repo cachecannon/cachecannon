@@ -2,22 +2,43 @@
 
 A high-performance load generator for cache servers with support for multiple protocols, detailed latency measurements, and flexible workload configuration.
 
+## Installation
+
+### GitHub Releases (recommended)
+
+Download pre-built `.deb` or `.rpm` packages from [GitHub Releases](https://github.com/cachecannon/cachecannon/releases):
+
+```bash
+# Debian/Ubuntu
+sudo dpkg -i cachecannon_0.0.1-1_amd64.deb
+
+# RHEL/Fedora
+sudo rpm -i cachecannon-0.0.1-1.x86_64.rpm
+```
+
+Packages are available for both amd64 and arm64 architectures. Each package includes a detached GPG signature (`.asc`) for verification.
+
+### Build from source
+
+```bash
+cargo build --release
+# Binary is at ./target/release/cachecannon
+```
+
+Requires Rust 1.76+ and Linux 6.0+ (for io_uring support).
+
 ## Quick Start
 
 ```bash
-# Build the benchmark tool
-cargo build --release
-
 # Run against a local Redis server
-./target/release/cachecannon config/redis.toml
+cachecannon config/redis.toml
 
 # Run against a local Memcached server
-./target/release/cachecannon config/memcache.toml
+cachecannon config/memcache.toml
 
 # Save results to Parquet and view in the web dashboard
-./target/release/cachecannon config/redis.toml \
-    --parquet results.parquet
-./target/release/cachecannon view results.parquet
+cachecannon config/redis.toml --parquet results.parquet
+cachecannon view results.parquet
 ```
 
 ## Features
@@ -120,15 +141,9 @@ cachecannon config/redis.toml
 - **[Practical Guide](docs/guide.md)** — End-to-end walkthrough, workload patterns, prefill, backfill, saturation search, cluster mode, tuning, and troubleshooting
 - **[Configuration & Metrics Reference](docs/reference.md)** — Complete TOML configuration, output formats, dashboard charts, Parquet schema, and full metrics catalog
 
-## Building
+## Development
 
 ```bash
-# Build release binary
-cargo build --release
-
-# Build with specific features
-cargo build --release --features io_uring
-
-# Run tests
-cargo test
+cargo build --release          # Build release binary
+cargo test                     # Run tests
 ```
