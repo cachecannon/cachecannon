@@ -4,19 +4,42 @@ A high-performance load generator for cache servers with support for multiple pr
 
 ## Installation
 
-### GitHub Releases (recommended)
-
-Download pre-built `.deb` or `.rpm` packages from [GitHub Releases](https://github.com/cachecannon/cachecannon/releases):
+### APT (Debian/Ubuntu)
 
 ```bash
-# Debian/Ubuntu
-sudo dpkg -i cachecannon_0.0.1-1_amd64.deb
+# Import the signing key
+curl -fsSL https://apt.cachecannon.cc/gpg-key.asc | sudo gpg --dearmor -o /usr/share/keyrings/cachecannon-archive-keyring.gpg
 
-# RHEL/Fedora
-sudo rpm -i cachecannon-0.0.1-1.x86_64.rpm
+# Add the repository
+echo "deb [signed-by=/usr/share/keyrings/cachecannon-archive-keyring.gpg] https://apt.cachecannon.cc stable main" | sudo tee /etc/apt/sources.list.d/cachecannon.list
+
+# Install
+sudo apt update
+sudo apt install cachecannon
 ```
 
-Packages are available for both amd64 and arm64 architectures. Each package includes a detached GPG signature (`.asc`) for verification.
+### YUM/DNF (RHEL/Fedora)
+
+```bash
+# Add the repository
+sudo tee /etc/yum.repos.d/cachecannon.repo << 'EOF'
+[cachecannon-x86_64]
+name=Cachecannon
+baseurl=https://yum.cachecannon.cc/x86_64
+gpgcheck=1
+gpgkey=https://yum.cachecannon.cc/RPM-GPG-KEY-cachecannon
+enabled=1
+EOF
+
+# Install
+sudo yum install cachecannon    # or: sudo dnf install cachecannon
+```
+
+For arm64/aarch64, replace `x86_64` with `aarch64` in the baseurl.
+
+### GitHub Releases
+
+Pre-built `.deb` and `.rpm` packages are also available from [GitHub Releases](https://github.com/cachecannon/cachecannon/releases). Packages are available for both amd64 and arm64 architectures. Each package includes a detached GPG signature (`.asc`) for verification.
 
 ### Build from source
 
