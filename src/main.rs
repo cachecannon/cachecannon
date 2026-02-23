@@ -259,8 +259,9 @@ fn run_cachecannon(
     // Build ringline config (client-only, no bind).
     // With guard-based sends for SET values, the copy pool only holds small
     // protocol framing data, so the default 16KB slot size is sufficient.
-    // Momento handles its own TLS via ringline-momento::Client::connect()
-    let tls_client = if config.target.tls {
+    // Momento always needs TLS (ringline-momento::Client::connect() uses ringline::connect_tls)
+    let needs_tls = config.target.tls || config.target.protocol == CacheProtocol::Momento;
+    let tls_client = if needs_tls {
         let mut root_store = rustls::RootCertStore::empty();
         root_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
 
