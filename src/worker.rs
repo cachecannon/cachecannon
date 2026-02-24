@@ -1834,8 +1834,6 @@ fn record_counters(result: &RequestResult) {
     }
 }
 
-
-
 /// Route a key to an endpoint index.
 fn route_key(state: &TaskSharedState, key: &[u8]) -> usize {
     let slot_table = state.slot_table.lock().unwrap();

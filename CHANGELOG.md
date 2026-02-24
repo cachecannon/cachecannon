@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.2] - 2026-02-24
+
 ### Changed
 - Update ringline dependencies to 0f76448
 - Momento latency metrics now use the on_result callback pattern, matching
