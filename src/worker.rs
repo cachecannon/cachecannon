@@ -745,6 +745,24 @@ fn make_ping_callback() -> impl Fn(&ringline_ping::CommandResult) {
     }
 }
 
+/// Create a Momento on_result callback that records latency metrics for each completed command.
+fn make_momento_callback() -> impl Fn(&ringline_momento::CommandResult) {
+    move |r| {
+        match r.command {
+            ringline_momento::CommandType::Get => {
+                let _ = metrics::GET_LATENCY.increment(r.latency_ns);
+            }
+            ringline_momento::CommandType::Set => {
+                let _ = metrics::SET_LATENCY.increment(r.latency_ns);
+            }
+            ringline_momento::CommandType::Delete => {
+                let _ = metrics::DELETE_LATENCY.increment(r.latency_ns);
+            }
+        }
+        let _ = metrics::RESPONSE_LATENCY.increment(r.latency_ns);
+    }
+}
+
 // ── RESP connection task ─────────────────────────────────────────────────
 
 /// A single RESP (Redis) connection task that connects, drives workload, and reconnects.
@@ -1466,7 +1484,7 @@ async fn momento_connection_task(state: Arc<SharedWorkerState>, _conn_idx: usize
         }
 
         // Connect via ringline-momento (handles TLS + auth internally)
-        let mut client = match ringline_momento::Client::connect(&credential).await {
+        let authenticated = match ringline_momento::Client::connect(&credential).await {
             Ok(client) => client,
             Err(e) => {
                 // During precheck, surface connection errors at warn level so they're
@@ -1489,6 +1507,13 @@ async fn momento_connection_task(state: Arc<SharedWorkerState>, _conn_idx: usize
                 continue;
             }
         };
+
+        // Rebuild with on_result callback + kernel timestamps for latency recording
+        let use_kernel_ts = matches!(config.timestamps.mode, TimestampMode::Software);
+        let mut client = ringline_momento::Client::builder(authenticated.conn())
+            .on_result(make_momento_callback())
+            .kernel_timestamps(use_kernel_ts)
+            .build();
 
         metrics::CONNECTIONS_ACTIVE.increment();
 
@@ -1551,8 +1576,6 @@ async fn drive_momento_session(
         if phase.should_stop() {
             return Ok(());
         }
-
-        let recording = phase.is_recording();
 
         // Fill pipeline
         if phase == Phase::Prefill && !state.is_prefill_done() {
@@ -1635,23 +1658,15 @@ async fn drive_momento_session(
             handle_momento_prefill_results(results, state);
         }
 
-        // Record metrics
+        // Record counter metrics (latency is recorded by the on_result callback)
         record_counters(&result);
-        if recording {
-            record_latencies(&result);
-        }
     }
 }
 
 /// Map a ringline-momento CompletedOp to a RequestResult.
 fn map_momento_op(op: ringline_momento::CompletedOp) -> RequestResult {
     match op {
-        ringline_momento::CompletedOp::Get {
-            id,
-            result,
-            latency_ns,
-            ..
-        } => {
+        ringline_momento::CompletedOp::Get { id, result, .. } => {
             let (success, is_error, hit) = match result {
                 Ok(Some(_)) => (true, false, Some(true)),
                 Ok(None) => (true, false, Some(false)),
@@ -1661,7 +1676,7 @@ fn map_momento_op(op: ringline_momento::CompletedOp) -> RequestResult {
                 id: id.value(),
                 success,
                 is_error_response: is_error,
-                latency_ns,
+                latency_ns: 0,
                 ttfb_ns: None,
                 request_type: RequestType::Get,
                 hit,
@@ -1670,12 +1685,7 @@ fn map_momento_op(op: ringline_momento::CompletedOp) -> RequestResult {
                 redirect: None,
             }
         }
-        ringline_momento::CompletedOp::Set {
-            id,
-            result,
-            latency_ns,
-            ..
-        } => {
+        ringline_momento::CompletedOp::Set { id, result, .. } => {
             let (success, is_error) = match result {
                 Ok(()) => (true, false),
                 Err(_) => (false, true),
@@ -1684,7 +1694,7 @@ fn map_momento_op(op: ringline_momento::CompletedOp) -> RequestResult {
                 id: id.value(),
                 success,
                 is_error_response: is_error,
-                latency_ns,
+                latency_ns: 0,
                 ttfb_ns: None,
                 request_type: RequestType::Set,
                 hit: None,
@@ -1693,12 +1703,7 @@ fn map_momento_op(op: ringline_momento::CompletedOp) -> RequestResult {
                 redirect: None,
             }
         }
-        ringline_momento::CompletedOp::Delete {
-            id,
-            result,
-            latency_ns,
-            ..
-        } => {
+        ringline_momento::CompletedOp::Delete { id, result, .. } => {
             let (success, is_error) = match result {
                 Ok(()) => (true, false),
                 Err(_) => (false, true),
@@ -1707,7 +1712,7 @@ fn map_momento_op(op: ringline_momento::CompletedOp) -> RequestResult {
                 id: id.value(),
                 success,
                 is_error_response: is_error,
-                latency_ns,
+                latency_ns: 0,
                 ttfb_ns: None,
                 request_type: RequestType::Delete,
                 hit: None,
@@ -1829,29 +1834,7 @@ fn record_counters(result: &RequestResult) {
     }
 }
 
-/// Record latency histograms for a completed request result (only during Running phase).
-fn record_latencies(result: &RequestResult) {
-    let _ = metrics::RESPONSE_LATENCY.increment(result.latency_ns);
-    match result.request_type {
-        RequestType::Get => {
-            let _ = metrics::GET_LATENCY.increment(result.latency_ns);
-            if let Some(ttfb) = result.ttfb_ns {
-                let _ = metrics::GET_TTFB.increment(ttfb);
-            }
-        }
-        RequestType::Set => {
-            let _ = metrics::SET_LATENCY.increment(result.latency_ns);
-            if result.backfill {
-                metrics::BACKFILL_SET_COUNT.increment();
-                let _ = metrics::BACKFILL_SET_LATENCY.increment(result.latency_ns);
-            }
-        }
-        RequestType::Delete => {
-            let _ = metrics::DELETE_LATENCY.increment(result.latency_ns);
-        }
-        RequestType::Ping | RequestType::Other => {}
-    }
-}
+
 
 /// Route a key to an endpoint index.
 fn route_key(state: &TaskSharedState, key: &[u8]) -> usize {

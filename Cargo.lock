@@ -1336,10 +1336,11 @@ checksum = "47e1ffaa40ddd1f3ed91f717a33c8c0ee23fff369e3aa8772b9605cc1d22f4c3"
 
 [[package]]
 name = "memcache-proto"
-version = "0.0.1"
+version = "0.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9d9ce3407f1cea26c7596fbdc759cd7f5ad6e325f58c08b51f912f5fca2b49d4"
+checksum = "1e6f1d6ac2aabd607eca46582dd78d83d451177ca659516f876bc66df2716afe"
 dependencies = [
+ "bytes",
  "itoa",
  "memchr",
  "thiserror 2.0.18",
@@ -1961,7 +1962,7 @@ dependencies = [
 [[package]]
 name = "ringline"
 version = "0.0.3-alpha.0"
-source = "git+https://github.com/ringline-rs/ringline.git?rev=1dc1f89#1dc1f8947ef9a8a96275e931f11393f39c07f900"
+source = "git+https://github.com/ringline-rs/ringline.git?rev=0f76448#0f7644825f9f9596cb373b6344ba430352aa6681"
 dependencies = [
  "bytes",
  "crossbeam-channel",
@@ -1976,7 +1977,7 @@ dependencies = [
 [[package]]
 name = "ringline-memcache"
 version = "0.1.1"
-source = "git+https://github.com/ringline-rs/ringline.git?rev=1dc1f89#1dc1f8947ef9a8a96275e931f11393f39c07f900"
+source = "git+https://github.com/ringline-rs/ringline.git?rev=0f76448#0f7644825f9f9596cb373b6344ba430352aa6681"
 dependencies = [
  "bytes",
  "histogram",
@@ -1990,7 +1991,7 @@ dependencies = [
 [[package]]
 name = "ringline-momento"
 version = "0.1.0"
-source = "git+https://github.com/ringline-rs/ringline.git?rev=1dc1f89#1dc1f8947ef9a8a96275e931f11393f39c07f900"
+source = "git+https://github.com/ringline-rs/ringline.git?rev=0f76448#0f7644825f9f9596cb373b6344ba430352aa6681"
 dependencies = [
  "bytes",
  "histogram",
@@ -2002,7 +2003,7 @@ dependencies = [
 [[package]]
 name = "ringline-ping"
 version = "0.1.0"
-source = "git+https://github.com/ringline-rs/ringline.git?rev=1dc1f89#1dc1f8947ef9a8a96275e931f11393f39c07f900"
+source = "git+https://github.com/ringline-rs/ringline.git?rev=0f76448#0f7644825f9f9596cb373b6344ba430352aa6681"
 dependencies = [
  "histogram",
  "libc",
@@ -2014,7 +2015,7 @@ dependencies = [
 [[package]]
 name = "ringline-redis"
 version = "0.1.1"
-source = "git+https://github.com/ringline-rs/ringline.git?rev=1dc1f89#1dc1f8947ef9a8a96275e931f11393f39c07f900"
+source = "git+https://github.com/ringline-rs/ringline.git?rev=0f76448#0f7644825f9f9596cb373b6344ba430352aa6681"
 dependencies = [
  "bytes",
  "histogram",
