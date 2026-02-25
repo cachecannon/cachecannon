@@ -4,10 +4,10 @@ pub mod client;
 pub mod cluster;
 pub mod config;
 pub mod metrics;
-pub mod sharded_counter;
 pub mod output;
 pub mod ratelimit;
 pub mod saturation;
+pub mod sharded_counter;
 pub mod viewer;
 pub mod worker;
 
