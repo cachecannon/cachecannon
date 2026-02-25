@@ -9,8 +9,8 @@ description = "High-performance cache protocol benchmark tool"
 
 [dependencies]
 # I/O event loop
-ringline = { git = "https://github.com/ringline-rs/ringline.git", rev = "0f76448", features = ["timestamps"] }
-ringline-momento = { git = "https://github.com/ringline-rs/ringline.git", rev = "0f76448", features = ["timestamps"] }
+ringline = { git = "https://github.com/ringline-rs/ringline.git", rev = "1f08cac", features = ["timestamps"] }
+ringline-momento = { git = "https://github.com/ringline-rs/ringline.git", rev = "1f08cac", features = ["timestamps"] }
 
 # Consistent hashing
 ketama = "0.0.1"
@@ -22,9 +22,9 @@ crossbeam-channel = "0.5"
 resp-proto = { version = "0.0.1", features = ["resp3"] }
 
 # Client crates
-ringline-redis = { git = "https://github.com/ringline-rs/ringline.git", rev = "0f76448", features = ["timestamps"] }
-ringline-memcache = { git = "https://github.com/ringline-rs/ringline.git", rev = "0f76448", features = ["timestamps"] }
-ringline-ping = { git = "https://github.com/ringline-rs/ringline.git", rev = "0f76448", features = ["timestamps"] }
+ringline-redis = { git = "https://github.com/ringline-rs/ringline.git", rev = "1f08cac", features = ["timestamps"] }
+ringline-memcache = { git = "https://github.com/ringline-rs/ringline.git", rev = "1f08cac", features = ["timestamps"] }
+ringline-ping = { git = "https://github.com/ringline-rs/ringline.git", rev = "1f08cac", features = ["timestamps"] }
 
 # Metrics
 metriken = "0.7"
