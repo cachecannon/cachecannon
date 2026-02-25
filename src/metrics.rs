@@ -1,7 +1,7 @@
 //! Benchmark metrics using sharded counters.
 
-pub use metrics::set_thread_shard;
-use metrics::{Counter, CounterGroup};
+pub use crate::sharded_counter::set_thread_shard;
+use crate::sharded_counter::{Counter, CounterGroup};
 use metriken::{AtomicHistogram, Gauge, metric};
 
 // Counter groups

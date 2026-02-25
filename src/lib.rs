@@ -7,6 +7,7 @@ pub mod metrics;
 pub mod output;
 pub mod ratelimit;
 pub mod saturation;
+pub mod sharded_counter;
 pub mod viewer;
 pub mod worker;
 
