@@ -27,7 +27,6 @@ ringline-memcache = { git = "https://github.com/ringline-rs/ringline.git", rev =
 ringline-ping = { git = "https://github.com/ringline-rs/ringline.git", rev = "0f76448", features = ["timestamps"] }
 
 # Metrics
-metrics = { git = "https://github.com/brayniac/crucible", rev = "876a317" }
 metriken = "0.7"
 metriken-exposition = { version = "0.12", features = ["parquet"] }
 metriken-query = { version = "0.1.2", features = ["http"] }
