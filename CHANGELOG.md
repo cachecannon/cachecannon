@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.3] - 2026-02-25
+
+### Changed
+- Vendor sharded counter module, removing external crucible dependency
+- Update ringline dependencies to 1f08cac
+
 ## [0.0.2] - 2026-02-24
 
 ### Changed
