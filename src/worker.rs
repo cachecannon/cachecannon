@@ -961,8 +961,9 @@ async fn drive_resp_workload(
             }
         }
 
-        // Wait for one response
+        // Wait for one response (yield if idle to avoid starving other connections)
         if client.pending_count() == 0 {
+            ringline::sleep(Duration::from_micros(100)).await;
             continue;
         }
 
@@ -1361,8 +1362,9 @@ async fn drive_memcache_workload(
             }
         }
 
-        // Wait for one response
+        // Wait for one response (yield if idle to avoid starving other connections)
         if client.pending_count() == 0 {
+            ringline::sleep(Duration::from_micros(100)).await;
             continue;
         }
 
@@ -1781,8 +1783,9 @@ async fn drive_momento_session(
             }
         }
 
-        // Wait for one response
+        // Wait for one response (yield if idle to avoid starving other connections)
         if client.pending_count() == 0 {
+            ringline::sleep(Duration::from_micros(100)).await;
             continue;
         }
 
