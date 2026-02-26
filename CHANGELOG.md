@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.5] - 2026-02-26
+
+### Fixed
+- Fix prefill stall caused by idle connections spin-looping without
+  yielding to the cooperative scheduler, starving connections with
+  pending responses
+
 ## [0.0.4] - 2026-02-26
 
 ### Changed
