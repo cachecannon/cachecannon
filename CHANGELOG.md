@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.4] - 2026-02-26
+
+### Changed
+- Add fire/recv pipelining to RESP and Memcache workers, honoring
+  `pipeline_depth` config (previously ignored for these protocols)
+- Update ringline dependencies to c084d5c (fire/recv API)
+- Simplify on_result callbacks to record latency only; counter metrics
+  now go through the unified `record_counters()` path
+
+### Fixed
+- Fix tag-release workflow to create PR for dev version bump
+
 ## [0.0.3] - 2026-02-25
 
 ### Changed
