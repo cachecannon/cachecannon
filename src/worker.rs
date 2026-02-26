@@ -670,63 +670,41 @@ fn resolve_tls_server_name(state: &TaskSharedState, endpoint: SocketAddr) -> Opt
 
 // ── on_result callback factories ─────────────────────────────────────────
 
-/// Create a RESP on_result callback that records metrics for each completed command.
+/// Create a RESP on_result callback that records latency metrics only.
+/// Counter metrics (RESPONSES_RECEIVED, GET_COUNT, etc.) are recorded by record_counters().
 fn make_resp_callback() -> impl Fn(&ringline_redis::CommandResult) {
     move |r| {
-        metrics::RESPONSES_RECEIVED.increment();
         match r.command {
             ringline_redis::CommandType::Get => {
-                metrics::GET_COUNT.increment();
-                match r.hit {
-                    Some(true) => metrics::CACHE_HITS.increment(),
-                    Some(false) => metrics::CACHE_MISSES.increment(),
-                    _ => {}
-                }
                 let _ = metrics::GET_LATENCY.increment(r.latency_ns);
             }
             ringline_redis::CommandType::Set => {
-                metrics::SET_COUNT.increment();
                 let _ = metrics::SET_LATENCY.increment(r.latency_ns);
             }
             ringline_redis::CommandType::Del => {
-                metrics::DELETE_COUNT.increment();
                 let _ = metrics::DELETE_LATENCY.increment(r.latency_ns);
             }
             _ => {}
-        }
-        if !r.success {
-            metrics::REQUEST_ERRORS.increment();
         }
         let _ = metrics::RESPONSE_LATENCY.increment(r.latency_ns);
     }
 }
 
-/// Create a Memcache on_result callback that records metrics for each completed command.
+/// Create a Memcache on_result callback that records latency metrics only.
+/// Counter metrics (RESPONSES_RECEIVED, GET_COUNT, etc.) are recorded by record_counters().
 fn make_memcache_callback() -> impl Fn(&ringline_memcache::CommandResult) {
     move |r| {
-        metrics::RESPONSES_RECEIVED.increment();
         match r.command {
             ringline_memcache::CommandType::Get => {
-                metrics::GET_COUNT.increment();
-                match r.hit {
-                    Some(true) => metrics::CACHE_HITS.increment(),
-                    Some(false) => metrics::CACHE_MISSES.increment(),
-                    _ => {}
-                }
                 let _ = metrics::GET_LATENCY.increment(r.latency_ns);
             }
             ringline_memcache::CommandType::Set => {
-                metrics::SET_COUNT.increment();
                 let _ = metrics::SET_LATENCY.increment(r.latency_ns);
             }
             ringline_memcache::CommandType::Delete => {
-                metrics::DELETE_COUNT.increment();
                 let _ = metrics::DELETE_LATENCY.increment(r.latency_ns);
             }
             _ => {}
-        }
-        if !r.success {
-            metrics::REQUEST_ERRORS.increment();
         }
         let _ = metrics::RESPONSE_LATENCY.increment(r.latency_ns);
     }
@@ -863,7 +841,7 @@ async fn resp_connection_task(state: Arc<SharedWorkerState>, endpoint_idx: usize
     }
 }
 
-/// Drive the RESP workload on a connected client.
+/// Drive the RESP workload on a connected client using fire/recv pipelining.
 async fn drive_resp_workload(
     client: &mut ringline_redis::Client,
     state: &Arc<SharedWorkerState>,
@@ -880,6 +858,7 @@ async fn drive_resp_workload(
     let pool_len = state.task_state.value_pool.len();
     let backfill_on_miss = state.task_state.backfill_on_miss;
     let multi_endpoint = state.task_state.endpoints.len() > 1;
+    let pipeline_depth = config.connection.pipeline_depth;
 
     loop {
         let phase = state.task_state.shared.phase();
@@ -887,190 +866,276 @@ async fn drive_resp_workload(
             return Ok(());
         }
 
-        // Prefill phase
+        // Fill pipeline
         if phase == Phase::Prefill && !state.is_prefill_done() {
-            let key_id = {
-                let mut queue = state.task_state.prefill_queue.lock().unwrap();
-                queue.pop_front()
-            };
+            while client.pending_count() < pipeline_depth {
+                let key_id = {
+                    let mut queue = state.task_state.prefill_queue.lock().unwrap();
+                    match queue.pop_front() {
+                        Some(id) => id,
+                        None => break,
+                    }
+                };
 
-            if let Some(key_id) = key_id {
                 write_key(key_buf, key_id);
                 let guard =
                     make_value_guard(rng, &state.task_state.value_pool, value_len, pool_len);
 
-                metrics::REQUESTS_SENT.increment();
-                let result = client.set_with_guard(key_buf, guard).await;
-
-                match result {
-                    Ok(()) => {
-                        confirm_prefill_key(state);
-                    }
-                    Err(ringline_redis::Error::ConnectionClosed) => {
-                        requeue_prefill_key(state, key_id);
-                        return Err(DisconnectReason::Eof);
+                match client.fire_set_with_guard(key_buf, guard, 0) {
+                    Ok(_) => {
+                        metrics::REQUESTS_SENT.increment();
                     }
                     Err(_) => {
-                        requeue_prefill_key(state, key_id);
+                        let mut queue = state.task_state.prefill_queue.lock().unwrap();
+                        queue.push_front(key_id);
+                        break;
                     }
                 }
             }
-            continue;
-        }
+        } else if phase == Phase::Warmup || phase == Phase::Running {
+            while client.pending_count() < pipeline_depth {
+                // Drain backfill queue first
+                if let Some(key_id) = backfill_queue.pop() {
+                    write_key(key_buf, key_id);
+                    let guard =
+                        make_value_guard(rng, &state.task_state.value_pool, value_len, pool_len);
 
-        // Normal workload (Warmup or Running)
-        if phase != Phase::Warmup && phase != Phase::Running {
-            continue;
-        }
+                    if let Some(ref rl) = state.task_state.ratelimiter
+                        && !rl.try_acquire()
+                    {
+                        backfill_queue.push(key_id);
+                        break;
+                    }
 
-        // Drain backfill queue first
-        if let Some(key_id) = backfill_queue.pop() {
-            write_key(key_buf, key_id);
-            let guard = make_value_guard(rng, &state.task_state.value_pool, value_len, pool_len);
+                    // user_data encodes key_id with backfill marker (high bit set)
+                    let user_data = key_id as u64 | BACKFILL_MARKER;
+                    match client.fire_set_with_guard(key_buf, guard, user_data) {
+                        Ok(_) => {
+                            metrics::REQUESTS_SENT.increment();
+                        }
+                        Err(_) => {
+                            backfill_queue.push(key_id);
+                            break;
+                        }
+                    }
+                    continue;
+                }
 
-            if let Some(ref rl) = state.task_state.ratelimiter
-                && !rl.try_acquire()
-            {
-                backfill_queue.push(key_id);
-                continue;
+                // Rate limiting
+                if let Some(ref rl) = state.task_state.ratelimiter
+                    && !rl.try_acquire()
+                {
+                    break;
+                }
+
+                // Generate random key
+                let key_id = rng.random_range(0..key_count);
+                write_key(key_buf, key_id);
+
+                // Multi-endpoint routing
+                if multi_endpoint {
+                    let routed = route_key(&state.task_state, key_buf);
+                    if routed != endpoint_idx {
+                        continue;
+                    }
+                }
+
+                // Choose command
+                let roll = rng.random_range(0..100);
+                let sent = if roll < get_ratio {
+                    // Pass key_id as user_data for backfill-on-miss tracking
+                    client.fire_get(key_buf, key_id as u64).is_ok()
+                } else if roll < get_ratio + delete_ratio {
+                    client.fire_del(key_buf, 0).is_ok()
+                } else {
+                    let guard =
+                        make_value_guard(rng, &state.task_state.value_pool, value_len, pool_len);
+                    client.fire_set_with_guard(key_buf, guard, 0).is_ok()
+                };
+
+                if sent {
+                    metrics::REQUESTS_SENT.increment();
+                } else {
+                    break;
+                }
             }
+        }
 
-            let start = Instant::now();
-            metrics::REQUESTS_SENT.increment();
-            let result = client.set_with_guard(key_buf, guard).await;
-
-            match result {
-                Ok(()) => {
-                    metrics::BACKFILL_SET_COUNT.increment();
-                    let _ =
-                        metrics::BACKFILL_SET_LATENCY.increment(start.elapsed().as_nanos() as u64);
-                }
-                Err(ringline_redis::Error::ConnectionClosed) => {
-                    return Err(DisconnectReason::Eof);
-                }
-                Err(ref e) => {
-                    check_resp_redirect(e, state, key_buf);
-                }
-            }
+        // Wait for one response
+        if client.pending_count() == 0 {
             continue;
         }
 
-        // Rate limiting
-        if let Some(ref rl) = state.task_state.ratelimiter
-            && !rl.try_acquire()
+        let op = match client.recv().await {
+            Ok(op) => op,
+            Err(ringline_redis::Error::ConnectionClosed) => {
+                return Err(DisconnectReason::Eof);
+            }
+            Err(_) => {
+                return Err(DisconnectReason::RecvError);
+            }
+        };
+
+        // Map CompletedOp to RequestResult
+        let result = map_resp_op(op);
+
+        // Handle prefill tracking
+        if phase == Phase::Prefill
+            && !state.is_prefill_done()
+            && result.request_type == RequestType::Set
+            && result.success
         {
-            continue;
+            confirm_prefill_key(state);
         }
 
-        // Generate random key
-        let key_id = rng.random_range(0..key_count);
-        write_key(key_buf, key_id);
-
-        // Multi-endpoint routing: skip keys that don't route to our endpoint
-        if multi_endpoint {
-            let routed = route_key(&state.task_state, key_buf);
-            if routed != endpoint_idx {
-                continue;
-            }
+        // Handle backfill-on-miss
+        if backfill_on_miss
+            && result.request_type == RequestType::Get
+            && result.success
+            && result.hit == Some(false)
+            && let Some(key_id) = result.key_id
+        {
+            backfill_queue.push(key_id);
         }
 
-        // Choose command
-        let roll = rng.random_range(0..100);
-        if roll < get_ratio {
-            // GET
-            metrics::REQUESTS_SENT.increment();
-            let result = client.get(key_buf as &[u8]).await;
+        // Handle backfill SET tracking
+        if result.backfill && result.request_type == RequestType::Set && result.success {
+            metrics::BACKFILL_SET_COUNT.increment();
+        }
 
-            match &result {
-                Ok(None) if backfill_on_miss => {
-                    backfill_queue.push(key_id);
-                }
-                Err(ringline_redis::Error::ConnectionClosed) => {
-                    return Err(DisconnectReason::Eof);
-                }
-                Err(e) => {
-                    check_resp_redirect(e, state, key_buf);
-                }
-                _ => {}
+        // Handle cluster redirects
+        if let Some(ref redirect) = result.redirect {
+            check_resp_redirect_parsed(redirect, state);
+        }
+
+        // Record counter metrics (latency is recorded by the on_result callback)
+        record_counters(&result);
+    }
+}
+
+/// Marker bit for backfill SET user_data (high bit of u64).
+const BACKFILL_MARKER: u64 = 1 << 63;
+
+/// Map a ringline-redis CompletedOp to a RequestResult.
+fn map_resp_op(op: ringline_redis::CompletedOp) -> RequestResult {
+    match op {
+        ringline_redis::CompletedOp::Get { result, user_data } => {
+            let (success, is_error, hit) = match &result {
+                Ok(Some(_)) => (true, false, Some(true)),
+                Ok(None) => (true, false, Some(false)),
+                Err(_) => (false, true, None),
+            };
+            let redirect = if let Err(ringline_redis::Error::Redis(ref msg)) = result {
+                parse_resp_redirect(msg)
+            } else {
+                None
+            };
+            RequestResult {
+                id: 0,
+                success,
+                is_error_response: is_error,
+                latency_ns: 0,
+                ttfb_ns: None,
+                request_type: RequestType::Get,
+                hit,
+                key_id: Some(user_data as usize),
+                backfill: false,
+                redirect,
             }
-        } else if roll < get_ratio + delete_ratio {
-            // DELETE
-            metrics::REQUESTS_SENT.increment();
-            let result = client.del(key_buf as &[u8]).await;
-
-            match &result {
-                Err(ringline_redis::Error::ConnectionClosed) => {
-                    return Err(DisconnectReason::Eof);
-                }
-                Err(e) => {
-                    check_resp_redirect(e, state, key_buf);
-                }
-                _ => {}
+        }
+        ringline_redis::CompletedOp::Set { result, user_data } => {
+            let (success, is_error) = match &result {
+                Ok(()) => (true, false),
+                Err(_) => (false, true),
+            };
+            let redirect = if let Err(ringline_redis::Error::Redis(ref msg)) = result {
+                parse_resp_redirect(msg)
+            } else {
+                None
+            };
+            let backfill = user_data & BACKFILL_MARKER != 0;
+            RequestResult {
+                id: 0,
+                success,
+                is_error_response: is_error,
+                latency_ns: 0,
+                ttfb_ns: None,
+                request_type: RequestType::Set,
+                hit: None,
+                key_id: None,
+                backfill,
+                redirect,
             }
-        } else {
-            // SET with zero-copy value
-            let guard = make_value_guard(rng, &state.task_state.value_pool, value_len, pool_len);
-
-            metrics::REQUESTS_SENT.increment();
-            let result = client.set_with_guard(key_buf, guard).await;
-
-            match &result {
-                Err(ringline_redis::Error::ConnectionClosed) => {
-                    return Err(DisconnectReason::Eof);
-                }
-                Err(e) => {
-                    check_resp_redirect(e, state, key_buf);
-                }
-                _ => {}
+        }
+        ringline_redis::CompletedOp::Del {
+            result,
+            user_data: _,
+        } => {
+            let (success, is_error) = match &result {
+                Ok(_) => (true, false),
+                Err(_) => (false, true),
+            };
+            let redirect = if let Err(ringline_redis::Error::Redis(ref msg)) = result {
+                parse_resp_redirect(msg)
+            } else {
+                None
+            };
+            RequestResult {
+                id: 0,
+                success,
+                is_error_response: is_error,
+                latency_ns: 0,
+                ttfb_ns: None,
+                request_type: RequestType::Delete,
+                hit: None,
+                key_id: None,
+                backfill: false,
+                redirect,
             }
         }
     }
 }
 
-/// Check a RESP error for cluster redirects (MOVED/ASK) and update slot table.
-fn check_resp_redirect(error: &ringline_redis::Error, state: &Arc<SharedWorkerState>, _key: &[u8]) {
-    let msg = match error {
-        ringline_redis::Error::Redis(msg) => msg.as_str(),
-        _ => return,
-    };
-
-    // Parse "MOVED <slot> <host>:<port>" or "ASK <slot> <host>:<port>"
+/// Parse a Redis error message for MOVED/ASK redirect.
+fn parse_resp_redirect(msg: &str) -> Option<resp_proto::Redirect> {
     let (kind, rest) = if let Some(rest) = msg.strip_prefix("MOVED ") {
         (resp_proto::RedirectKind::Moved, rest)
     } else if let Some(rest) = msg.strip_prefix("ASK ") {
         (resp_proto::RedirectKind::Ask, rest)
     } else {
-        return;
+        return None;
     };
 
+    let mut parts = rest.splitn(2, ' ');
+    let slot: u16 = parts.next()?.parse().ok()?;
+    let address = parts.next()?;
+
+    Some(resp_proto::Redirect {
+        kind,
+        slot,
+        address: address.to_string(),
+    })
+}
+
+/// Handle a parsed MOVED redirect by updating the slot table.
+fn check_resp_redirect_parsed(redirect: &resp_proto::Redirect, state: &Arc<SharedWorkerState>) {
     metrics::CLUSTER_REDIRECTS.increment();
 
-    if kind != resp_proto::RedirectKind::Moved {
+    if redirect.kind != resp_proto::RedirectKind::Moved {
         return;
     }
 
-    // Parse slot and address
-    let mut parts = rest.splitn(2, ' ');
-    let slot: u16 = match parts.next().and_then(|s| s.parse().ok()) {
-        Some(s) => s,
-        None => return,
-    };
-    let address = match parts.next() {
-        Some(a) => a,
-        None => return,
-    };
-
-    if let Ok(addr) = address.parse::<SocketAddr>() {
+    if let Ok(addr) = redirect.address.parse::<SocketAddr>() {
         let mut slot_table = state.task_state.slot_table.lock().unwrap();
         if let Some(ref mut table) = *slot_table {
             let endpoint_idx = state.task_state.endpoints.iter().position(|a| *a == addr);
             if let Some(idx) = endpoint_idx {
-                table[slot as usize] = idx as u16;
+                table[redirect.slot as usize] = idx as u16;
             } else {
                 tracing::warn!(
                     worker = state.task_state.worker_id,
                     addr = %addr,
-                    slot = slot,
+                    slot = redirect.slot,
                     "MOVED redirect to unknown endpoint (cannot add dynamically)"
                 );
             }
@@ -1178,7 +1243,7 @@ async fn memcache_connection_task(state: Arc<SharedWorkerState>, endpoint_idx: u
     }
 }
 
-/// Drive the Memcache workload on a connected client.
+/// Drive the Memcache workload on a connected client using fire/recv pipelining.
 async fn drive_memcache_workload(
     client: &mut ringline_memcache::Client,
     state: &Arc<SharedWorkerState>,
@@ -1195,6 +1260,7 @@ async fn drive_memcache_workload(
     let pool_len = state.task_state.value_pool.len();
     let backfill_on_miss = state.task_state.backfill_on_miss;
     let multi_endpoint = state.task_state.endpoints.len() > 1;
+    let pipeline_depth = config.connection.pipeline_depth;
 
     loop {
         let phase = state.task_state.shared.phase();
@@ -1202,124 +1268,206 @@ async fn drive_memcache_workload(
             return Ok(());
         }
 
-        // Prefill phase
+        // Fill pipeline
         if phase == Phase::Prefill && !state.is_prefill_done() {
-            let key_id = {
-                let mut queue = state.task_state.prefill_queue.lock().unwrap();
-                queue.pop_front()
-            };
+            while client.pending_count() < pipeline_depth {
+                let key_id = {
+                    let mut queue = state.task_state.prefill_queue.lock().unwrap();
+                    match queue.pop_front() {
+                        Some(id) => id,
+                        None => break,
+                    }
+                };
 
-            if let Some(key_id) = key_id {
                 write_key(key_buf, key_id);
                 let guard =
                     make_value_guard(rng, &state.task_state.value_pool, value_len, pool_len);
 
-                metrics::REQUESTS_SENT.increment();
-                let result = client.set_with_guard(key_buf, guard, 0, 0).await;
-
-                match result {
-                    Ok(()) => {
-                        confirm_prefill_key(state);
-                    }
-                    Err(ringline_memcache::Error::ConnectionClosed) => {
-                        requeue_prefill_key(state, key_id);
-                        return Err(DisconnectReason::Eof);
+                match client.fire_set_with_guard(key_buf, guard, 0, 0, 0) {
+                    Ok(_) => {
+                        metrics::REQUESTS_SENT.increment();
                     }
                     Err(_) => {
-                        requeue_prefill_key(state, key_id);
+                        let mut queue = state.task_state.prefill_queue.lock().unwrap();
+                        queue.push_front(key_id);
+                        break;
                     }
                 }
             }
-            continue;
-        }
+        } else if phase == Phase::Warmup || phase == Phase::Running {
+            while client.pending_count() < pipeline_depth {
+                // Drain backfill queue first
+                if let Some(key_id) = backfill_queue.pop() {
+                    write_key(key_buf, key_id);
+                    let guard =
+                        make_value_guard(rng, &state.task_state.value_pool, value_len, pool_len);
 
-        // Normal workload (Warmup or Running)
-        if phase != Phase::Warmup && phase != Phase::Running {
-            continue;
-        }
+                    if let Some(ref rl) = state.task_state.ratelimiter
+                        && !rl.try_acquire()
+                    {
+                        backfill_queue.push(key_id);
+                        break;
+                    }
 
-        // Drain backfill queue first
-        if let Some(key_id) = backfill_queue.pop() {
-            write_key(key_buf, key_id);
-            let guard = make_value_guard(rng, &state.task_state.value_pool, value_len, pool_len);
-
-            if let Some(ref rl) = state.task_state.ratelimiter
-                && !rl.try_acquire()
-            {
-                backfill_queue.push(key_id);
-                continue;
-            }
-
-            let start = Instant::now();
-            metrics::REQUESTS_SENT.increment();
-            let result = client.set_with_guard(key_buf, guard, 0, 0).await;
-
-            match result {
-                Ok(()) => {
-                    metrics::BACKFILL_SET_COUNT.increment();
-                    let _ =
-                        metrics::BACKFILL_SET_LATENCY.increment(start.elapsed().as_nanos() as u64);
+                    let user_data = key_id as u64 | BACKFILL_MARKER;
+                    match client.fire_set_with_guard(key_buf, guard, 0, 0, user_data) {
+                        Ok(_) => {
+                            metrics::REQUESTS_SENT.increment();
+                        }
+                        Err(_) => {
+                            backfill_queue.push(key_id);
+                            break;
+                        }
+                    }
+                    continue;
                 }
-                Err(ringline_memcache::Error::ConnectionClosed) => {
-                    return Err(DisconnectReason::Eof);
+
+                // Rate limiting
+                if let Some(ref rl) = state.task_state.ratelimiter
+                    && !rl.try_acquire()
+                {
+                    break;
                 }
-                Err(_) => {}
+
+                // Generate random key
+                let key_id = rng.random_range(0..key_count);
+                write_key(key_buf, key_id);
+
+                // Multi-endpoint routing
+                if multi_endpoint {
+                    let routed = route_key(&state.task_state, key_buf);
+                    if routed != endpoint_idx {
+                        continue;
+                    }
+                }
+
+                // Choose command
+                let roll = rng.random_range(0..100);
+                let sent = if roll < get_ratio {
+                    client.fire_get(key_buf, key_id as u64).is_ok()
+                } else if roll < get_ratio + delete_ratio {
+                    client.fire_delete(key_buf, 0).is_ok()
+                } else {
+                    let guard =
+                        make_value_guard(rng, &state.task_state.value_pool, value_len, pool_len);
+                    client.fire_set_with_guard(key_buf, guard, 0, 0, 0).is_ok()
+                };
+
+                if sent {
+                    metrics::REQUESTS_SENT.increment();
+                } else {
+                    break;
+                }
             }
+        }
+
+        // Wait for one response
+        if client.pending_count() == 0 {
             continue;
         }
 
-        // Rate limiting
-        if let Some(ref rl) = state.task_state.ratelimiter
-            && !rl.try_acquire()
+        let op = match client.recv().await {
+            Ok(op) => op,
+            Err(ringline_memcache::Error::ConnectionClosed) => {
+                return Err(DisconnectReason::Eof);
+            }
+            Err(_) => {
+                return Err(DisconnectReason::RecvError);
+            }
+        };
+
+        // Map CompletedOp to RequestResult
+        let result = map_memcache_op(op);
+
+        // Handle prefill tracking
+        if phase == Phase::Prefill
+            && !state.is_prefill_done()
+            && result.request_type == RequestType::Set
+            && result.success
         {
-            continue;
+            confirm_prefill_key(state);
         }
 
-        // Generate random key
-        let key_id = rng.random_range(0..key_count);
-        write_key(key_buf, key_id);
-
-        // Multi-endpoint routing
-        if multi_endpoint {
-            let routed = route_key(&state.task_state, key_buf);
-            if routed != endpoint_idx {
-                continue;
-            }
+        // Handle backfill-on-miss
+        if backfill_on_miss
+            && result.request_type == RequestType::Get
+            && result.success
+            && result.hit == Some(false)
+            && let Some(key_id) = result.key_id
+        {
+            backfill_queue.push(key_id);
         }
 
-        // Choose command
-        let roll = rng.random_range(0..100);
-        if roll < get_ratio {
-            // GET
-            metrics::REQUESTS_SENT.increment();
-            let result = client.get(key_buf as &[u8]).await;
+        // Handle backfill SET tracking
+        if result.backfill && result.request_type == RequestType::Set && result.success {
+            metrics::BACKFILL_SET_COUNT.increment();
+        }
 
-            match &result {
-                Ok(None) if backfill_on_miss => {
-                    backfill_queue.push(key_id);
-                }
-                Err(ringline_memcache::Error::ConnectionClosed) => {
-                    return Err(DisconnectReason::Eof);
-                }
-                _ => {}
+        // Record counter metrics
+        record_counters(&result);
+    }
+}
+
+/// Map a ringline-memcache CompletedOp to a RequestResult.
+fn map_memcache_op(op: ringline_memcache::CompletedOp) -> RequestResult {
+    match op {
+        ringline_memcache::CompletedOp::Get { result, user_data } => {
+            let (success, is_error, hit) = match &result {
+                Ok(Some(_)) => (true, false, Some(true)),
+                Ok(None) => (true, false, Some(false)),
+                Err(_) => (false, true, None),
+            };
+            RequestResult {
+                id: 0,
+                success,
+                is_error_response: is_error,
+                latency_ns: 0,
+                ttfb_ns: None,
+                request_type: RequestType::Get,
+                hit,
+                key_id: Some(user_data as usize),
+                backfill: false,
+                redirect: None,
             }
-        } else if roll < get_ratio + delete_ratio {
-            // DELETE
-            metrics::REQUESTS_SENT.increment();
-            let result = client.delete(key_buf as &[u8]).await;
-
-            if let Err(ringline_memcache::Error::ConnectionClosed) = &result {
-                return Err(DisconnectReason::Eof);
+        }
+        ringline_memcache::CompletedOp::Set { result, user_data } => {
+            let (success, is_error) = match &result {
+                Ok(()) => (true, false),
+                Err(_) => (false, true),
+            };
+            let backfill = user_data & BACKFILL_MARKER != 0;
+            RequestResult {
+                id: 0,
+                success,
+                is_error_response: is_error,
+                latency_ns: 0,
+                ttfb_ns: None,
+                request_type: RequestType::Set,
+                hit: None,
+                key_id: None,
+                backfill,
+                redirect: None,
             }
-        } else {
-            // SET with zero-copy value (flags=0, exptime=0)
-            let guard = make_value_guard(rng, &state.task_state.value_pool, value_len, pool_len);
-
-            metrics::REQUESTS_SENT.increment();
-            let result = client.set_with_guard(key_buf, guard, 0, 0).await;
-
-            if let Err(ringline_memcache::Error::ConnectionClosed) = &result {
-                return Err(DisconnectReason::Eof);
+        }
+        ringline_memcache::CompletedOp::Delete {
+            result,
+            user_data: _,
+        } => {
+            let (success, is_error) = match &result {
+                Ok(_) => (true, false),
+                Err(_) => (false, true),
+            };
+            RequestResult {
+                id: 0,
+                success,
+                is_error_response: is_error,
+                latency_ns: 0,
+                ttfb_ns: None,
+                request_type: RequestType::Delete,
+                hit: None,
+                key_id: None,
+                backfill: false,
+                redirect: None,
             }
         }
     }
@@ -1789,12 +1937,6 @@ fn confirm_prefill_key(state: &Arc<SharedWorkerState>) {
         );
         state.task_state.shared.mark_prefill_complete();
     }
-}
-
-/// Put a prefill key back in the queue on failure.
-fn requeue_prefill_key(state: &Arc<SharedWorkerState>, key_id: usize) {
-    let mut queue = state.task_state.prefill_queue.lock().unwrap();
-    queue.push_front(key_id);
 }
 
 // ── Utility functions ────────────────────────────────────────────────────
