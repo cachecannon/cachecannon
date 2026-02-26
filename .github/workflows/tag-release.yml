@@ -67,14 +67,25 @@ jobs:
           IFS='.' read -r MAJOR MINOR PATCH <<< "$VERSION"
           NEXT_DEV="${MAJOR}.${MINOR}.$((PATCH + 1))-alpha.0"
           echo "Bumping to next dev version: $NEXT_DEV"
+          echo "next_dev=$NEXT_DEV" >> $GITHUB_OUTPUT
 
           # Update all Cargo.toml files
           cargo release version "$NEXT_DEV" --execute --no-confirm
 
-          # Commit and push
+          # Create a PR instead of pushing directly to main
+          BRANCH="chore/bump-${NEXT_DEV}"
+          git checkout -b "$BRANCH"
           git add -A
           git commit -m "chore: bump to ${NEXT_DEV} for next development iteration"
-          git push origin main
+          git push origin "$BRANCH"
+
+          gh pr create \
+            --title "chore: bump to ${NEXT_DEV}" \
+            --body "Automated post-release version bump to ${NEXT_DEV}." \
+            --base main \
+            --head "$BRANCH"
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
 
       - name: Summary
         run: |
@@ -84,7 +95,7 @@ jobs:
             echo "Tag v${{ steps.version.outputs.version }} already existed, skipped." >> $GITHUB_STEP_SUMMARY
           else
             echo "- Created tag: v${{ steps.version.outputs.version }}" >> $GITHUB_STEP_SUMMARY
-            echo "- Bumped to next dev version" >> $GITHUB_STEP_SUMMARY
+            echo "- Created PR for next dev version bump" >> $GITHUB_STEP_SUMMARY
             echo "" >> $GITHUB_STEP_SUMMARY
             echo "The release workflow will now build and publish artifacts." >> $GITHUB_STEP_SUMMARY
           fi
