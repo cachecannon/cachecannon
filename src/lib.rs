@@ -6,6 +6,7 @@ pub mod config;
 pub mod metrics;
 pub mod output;
 pub mod ratelimit;
+pub mod runner;
 pub mod saturation;
 pub mod sharded_counter;
 pub mod viewer;
@@ -18,5 +19,6 @@ pub use output::{
     Results, Sample, SaturationResults, SaturationStep, create_formatter,
 };
 pub use ratelimit::DynamicRateLimiter;
+pub use runner::{run_benchmark, run_benchmark_full};
 pub use saturation::SaturationSearchState;
 pub use worker::{BenchWorkerConfig, Phase, SharedState};
