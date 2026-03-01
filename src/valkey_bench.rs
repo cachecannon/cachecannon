@@ -1,13 +1,14 @@
 use cachecannon::config::{
-    Commands, Config, Connection, Distribution, General, Protocol, SaturationSearch, SloThresholds,
-    Target, Values, Workload,
+    Commands, Config, Connection, Distribution, General, Keyspace, Protocol, SaturationSearch,
+    SloThresholds, Target, Values, Workload,
 };
 use cachecannon::output::create_formatter_with_banner;
+use cachecannon::output::{ColorMode, OutputFormat};
 use cachecannon::viewer;
 use cachecannon::{parse_cpu_list, run_benchmark_full};
 
 use clap::{Parser, Subcommand, ValueEnum};
-use std::net::{SocketAddr, ToSocketAddrs};
+use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -21,12 +22,7 @@ use std::time::Duration;
 #[command(name = "valkey-bench")]
 #[command(version)]
 #[command(args_conflicts_with_subcommands = true)]
-#[command(disable_help_flag = true)]
 struct Cli {
-    /// Print help information.
-    #[arg(long, action = clap::ArgAction::Help)]
-    help: Option<bool>,
-
     #[command(subcommand)]
     command: Option<Command>,
 
@@ -50,40 +46,40 @@ enum Command {
 struct BenchArgs {
     // -- Tier 1 flags -------------------------------------------------------
     /// Server hostname or IP address.
-    #[arg(short = 'h', long)]
-    host: Option<String>,
+    #[arg(short = 'h', long, default_value = "127.0.0.1")]
+    host: String,
 
     /// Server port.
-    #[arg(short = 'p', long)]
-    port: Option<u16>,
+    #[arg(short = 'p', long, default_value_t = 6379)]
+    port: u16,
 
     /// Test duration (e.g. 60, 30s, 5m, 1h).
-    #[arg(short = 'd', long, value_parser = parse_duration)]
-    duration: Option<Duration>,
+    #[arg(short = 'd', long, default_value = "60s", value_parser = parse_duration)]
+    duration: Duration,
 
     /// Number of connections.
-    #[arg(short = 'c', long)]
-    connections: Option<usize>,
+    #[arg(short = 'c', long, default_value_t = 1)]
+    connections: usize,
 
     /// Pipeline depth (requests in flight per connection).
-    #[arg(short = 'P', long)]
-    pipeline: Option<usize>,
+    #[arg(short = 'P', long, default_value_t = 1)]
+    pipeline: usize,
 
     /// Number of worker threads (default: CPU count).
     #[arg(short = 't', long)]
     threads: Option<usize>,
 
     /// GET:SET ratio (e.g. "80:20").
-    #[arg(short = 'r', long)]
-    ratio: Option<String>,
+    #[arg(short = 'r', long, default_value = "80:20")]
+    ratio: String,
 
     /// Number of unique keys in the keyspace.
-    #[arg(short = 'n', long)]
-    keyspace: Option<usize>,
+    #[arg(short = 'n', long, default_value_t = 1_000_000)]
+    keyspace: usize,
 
     /// Value size in bytes for SET commands.
-    #[arg(short = 's', long)]
-    data_size: Option<usize>,
+    #[arg(short = 's', long, default_value_t = 64)]
+    data_size: usize,
 
     /// Enable Valkey/Redis Cluster mode.
     #[arg(long)]
@@ -94,21 +90,21 @@ struct BenchArgs {
     tls: bool,
 
     /// Output format: clean, json, verbose, quiet.
-    #[arg(short = 'o', long)]
-    output: Option<String>,
+    #[arg(short = 'o', long, default_value = "clean")]
+    output: String,
 
     // -- Tier 2 flags -------------------------------------------------------
     /// Warmup period before recording results (e.g. 10s, 1m).
-    #[arg(long, value_parser = parse_duration)]
-    warmup: Option<Duration>,
+    #[arg(long, default_value = "10s", value_parser = parse_duration)]
+    warmup: Duration,
 
     /// Key size in bytes.
-    #[arg(long)]
-    key_size: Option<usize>,
+    #[arg(long, default_value_t = 16)]
+    key_size: usize,
 
     /// Key distribution: uniform or zipf.
-    #[arg(long)]
-    distribution: Option<DistributionArg>,
+    #[arg(long, default_value = "uniform")]
+    distribution: DistributionArg,
 
     /// Rate limit in requests/second (0 = unlimited).
     #[arg(long)]
@@ -143,16 +139,16 @@ struct BenchArgs {
     tls_hostname: Option<String>,
 
     /// Connection timeout (e.g. 5s, 500ms).
-    #[arg(long, value_parser = parse_duration)]
-    connect_timeout: Option<Duration>,
+    #[arg(long, default_value = "5s", value_parser = parse_duration)]
+    connect_timeout: Duration,
 
     /// Request timeout (e.g. 1s, 500ms).
-    #[arg(long, value_parser = parse_duration)]
-    request_timeout: Option<Duration>,
+    #[arg(long, default_value = "1s", value_parser = parse_duration)]
+    request_timeout: Duration,
 
     /// Color mode: auto, always, never.
-    #[arg(long)]
-    color: Option<String>,
+    #[arg(long, default_value = "auto")]
+    color: String,
 
     /// Load base config from a TOML file. CLI flags override file values.
     #[arg(long)]
@@ -338,32 +334,17 @@ fn load_base_config(args: &BenchArgs) -> Result<Config, Box<dyn std::error::Erro
     if let Some(ref path) = args.config {
         Ok(Config::load(path)?)
     } else {
-        // No config file — build defaults matching CLI help text.
-        let host = args.host.as_deref().unwrap_or("127.0.0.1");
-        let port = args.port.unwrap_or(6379);
-        let addr = resolve_host(host, port)?;
-
         Ok(Config {
-            general: General {
-                duration: args.duration.unwrap_or(Duration::from_secs(60)),
-                warmup: args.warmup.unwrap_or(Duration::from_secs(10)),
-                ..General::default()
-            },
+            general: General::default(),
             target: Target {
-                endpoints: vec![addr],
+                endpoints: Vec::new(),
                 protocol: Protocol::default(),
                 tls: false,
                 tls_hostname: None,
                 tls_verify: true,
                 cluster: false,
             },
-            connection: Connection {
-                connections: args.connections.unwrap_or(1),
-                pipeline_depth: args.pipeline.unwrap_or(1),
-                connect_timeout: args.connect_timeout.unwrap_or(Duration::from_secs(5)),
-                request_timeout: args.request_timeout.unwrap_or(Duration::from_secs(1)),
-                ..Connection::default()
-            },
+            connection: Connection::default(),
             workload: Workload::default(),
             timestamps: Default::default(),
             admin: Default::default(),
@@ -372,43 +353,33 @@ fn load_base_config(args: &BenchArgs) -> Result<Config, Box<dyn std::error::Erro
     }
 }
 
-/// Apply explicitly-provided CLI flags onto the config, preserving TOML
-/// values for anything the user didn't specify on the command line.
+/// Apply all bench CLI flags onto the config, overriding TOML values.
 fn apply_bench_flags(
     config: &mut Config,
     args: &BenchArgs,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    // Target — only override endpoint when host or port is explicitly given
-    if args.host.is_some() || args.port.is_some() {
-        let host = args.host.as_deref().unwrap_or("127.0.0.1");
-        let port = args.port.unwrap_or(6379);
-        let addr = resolve_host(host, port)?;
-        config.target.endpoints = vec![addr];
-    }
+    // Target
+    let addr: SocketAddr = format!("{}:{}", args.host, args.port)
+        .parse()
+        .map_err(|e| format!("invalid host:port '{}:{}': {}", args.host, args.port, e))?;
+    config.target.endpoints = vec![addr];
 
-    if args.resp3 {
-        config.target.protocol = Protocol::Resp3;
-    }
-    if args.tls {
-        config.target.tls = true;
-    }
-    if args.tls_skip_verify {
-        config.target.tls_verify = false;
-    }
-    if args.cluster {
-        config.target.cluster = true;
-    }
+    let protocol = if args.resp3 {
+        Protocol::Resp3
+    } else {
+        Protocol::Resp
+    };
+    config.target.protocol = protocol;
+    config.target.tls = args.tls;
+    config.target.tls_verify = !args.tls_skip_verify;
+    config.target.cluster = args.cluster;
     if let Some(ref hostname) = args.tls_hostname {
         config.target.tls_hostname = Some(hostname.clone());
     }
 
     // General
-    if let Some(d) = args.duration {
-        config.general.duration = d;
-    }
-    if let Some(w) = args.warmup {
-        config.general.warmup = w;
-    }
+    config.general.duration = args.duration;
+    config.general.warmup = args.warmup;
     if let Some(t) = args.threads {
         config.general.threads = t;
     }
@@ -417,57 +388,37 @@ fn apply_bench_flags(
     }
 
     // Connection
-    if let Some(c) = args.connections {
-        config.connection.connections = c;
-    }
-    if let Some(p) = args.pipeline {
-        config.connection.pipeline_depth = p;
-    }
-    if let Some(t) = args.connect_timeout {
-        config.connection.connect_timeout = t;
-    }
-    if let Some(t) = args.request_timeout {
-        config.connection.request_timeout = t;
-    }
+    config.connection.connections = args.connections;
+    config.connection.pipeline_depth = args.pipeline;
+    config.connection.connect_timeout = args.connect_timeout;
+    config.connection.request_timeout = args.request_timeout;
 
     // Workload
-    if let Some(ref ratio) = args.ratio {
-        let (get, set) = parse_ratio(ratio)?;
-        config.workload.commands = Commands {
-            get,
-            set,
-            delete: 0,
-        };
-    }
-    if let Some(key_size) = args.key_size {
-        config.workload.keyspace.length = key_size;
-    }
-    if let Some(keyspace) = args.keyspace {
-        config.workload.keyspace.count = keyspace;
-    }
-    if let Some(dist) = args.distribution {
-        config.workload.keyspace.distribution = dist.into();
-    }
-    if let Some(data_size) = args.data_size {
-        config.workload.values = Values { length: data_size };
-    }
-    if args.prefill {
-        config.workload.prefill = true;
-    }
-    if args.backfill {
-        config.workload.backfill_on_miss = true;
-    }
+    let (get, set) = parse_ratio(&args.ratio)?;
+    config.workload.commands = Commands {
+        get,
+        set,
+        delete: 0,
+    };
+    config.workload.keyspace = Keyspace {
+        length: args.key_size,
+        count: args.keyspace,
+        distribution: args.distribution.into(),
+    };
+    config.workload.values = Values {
+        length: args.data_size,
+    };
+    config.workload.prefill = args.prefill;
+    config.workload.backfill_on_miss = args.backfill;
     if let Some(rate) = args.rate_limit {
         config.workload.rate_limit = Some(rate);
     }
 
     // Admin / output
-    if let Some(ref output) = args.output {
-        config.admin.format = output.parse().map_err(|e: String| e)?;
-    }
-    if let Some(ref color) = args.color {
-        config.admin.color = color.parse().map_err(|e: String| e)?;
-    }
+    let format: OutputFormat = args.output.parse().map_err(|e: String| e)?;
+    let color: ColorMode = args.color.parse().map_err(|e: String| e)?;
+    config.admin.format = format;
+    config.admin.color = color;
     if let Some(ref parquet) = args.parquet {
         config.admin.parquet = Some(parquet.clone());
     }
@@ -519,17 +470,8 @@ fn parse_duration(s: &str) -> Result<Duration, String> {
         "ms" => Ok(Duration::from_millis(value)),
         "s" | "sec" | "secs" | "" => Ok(Duration::from_secs(value)),
         "m" | "min" | "mins" => Ok(Duration::from_secs(value * 60)),
-        "h" | "hr" | "hrs" => Ok(Duration::from_secs(value * 3600)),
         other => Err(format!("unknown time unit '{}' in duration", other)),
     }
-}
-
-/// Resolve a hostname (or IP literal) and port to a `SocketAddr`.
-fn resolve_host(host: &str, port: u16) -> Result<SocketAddr, Box<dyn std::error::Error>> {
-    (host, port)
-        .to_socket_addrs()?
-        .next()
-        .ok_or_else(|| format!("could not resolve host '{host}'").into())
 }
 
 #[cfg(test)]
@@ -559,9 +501,6 @@ mod tests {
         assert_eq!(parse_duration("5s").unwrap(), Duration::from_secs(5));
         assert_eq!(parse_duration("10").unwrap(), Duration::from_secs(10));
         assert_eq!(parse_duration("100ns").unwrap(), Duration::from_nanos(100));
-        assert_eq!(parse_duration("2m").unwrap(), Duration::from_secs(120));
-        assert_eq!(parse_duration("1h").unwrap(), Duration::from_secs(3600));
-        assert_eq!(parse_duration("2hr").unwrap(), Duration::from_secs(7200));
     }
 
     #[test]
