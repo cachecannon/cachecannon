@@ -18,6 +18,11 @@ const HEADER_REPEAT_INTERVAL: u64 = 25;
 /// ANSI escape codes for colors.
 mod ansi {
     pub const RED: &str = "\x1b[31m";
+    pub const GREEN: &str = "\x1b[32m";
+    pub const YELLOW: &str = "\x1b[33m";
+    pub const CYAN: &str = "\x1b[36m";
+    pub const DIM: &str = "\x1b[2m";
+    pub const BOLD: &str = "\x1b[1m";
     pub const RESET: &str = "\x1b[0m";
 }
 
@@ -25,10 +30,16 @@ mod ansi {
 pub struct CleanFormatter {
     use_color: bool,
     sample_count: AtomicU64,
+    results_step_count: AtomicU64,
+    banner: String,
 }
 
 impl CleanFormatter {
     pub fn new(color_mode: ColorMode) -> Self {
+        Self::with_banner(color_mode, "cachecannon".to_string())
+    }
+
+    pub fn with_banner(color_mode: ColorMode, banner: String) -> Self {
         let use_color = match color_mode {
             ColorMode::Always => true,
             ColorMode::Never => false,
@@ -40,12 +51,54 @@ impl CleanFormatter {
         Self {
             use_color,
             sample_count: AtomicU64::new(0),
+            results_step_count: AtomicU64::new(0),
+            banner,
         }
     }
 
     fn red(&self, s: &str) -> String {
         if self.use_color {
             format!("{}{}{}", ansi::RED, s, ansi::RESET)
+        } else {
+            s.to_string()
+        }
+    }
+
+    fn green(&self, s: &str) -> String {
+        if self.use_color {
+            format!("{}{}{}", ansi::GREEN, s, ansi::RESET)
+        } else {
+            s.to_string()
+        }
+    }
+
+    fn yellow(&self, s: &str) -> String {
+        if self.use_color {
+            format!("{}{}{}", ansi::YELLOW, s, ansi::RESET)
+        } else {
+            s.to_string()
+        }
+    }
+
+    fn dim(&self, s: &str) -> String {
+        if self.use_color {
+            format!("{}{}{}", ansi::DIM, s, ansi::RESET)
+        } else {
+            s.to_string()
+        }
+    }
+
+    fn bold(&self, s: &str) -> String {
+        if self.use_color {
+            format!("{}{}{}", ansi::BOLD, s, ansi::RESET)
+        } else {
+            s.to_string()
+        }
+    }
+
+    fn cyan(&self, s: &str) -> String {
+        if self.use_color {
+            format!("{}{}{}", ansi::CYAN, s, ansi::RESET)
         } else {
             s.to_string()
         }
@@ -62,7 +115,7 @@ impl CleanFormatter {
 
 impl OutputFormatter for CleanFormatter {
     fn print_config(&self, config: &Config) {
-        println!("cachecannon");
+        println!("{}", self.banner);
         println!("──────────────────");
 
         // Target line
@@ -106,8 +159,12 @@ impl OutputFormatter for CleanFormatter {
         // Workload line
         let keyspace_count = format_count(config.workload.keyspace.count as u64);
         println!(
-            "workload   {} keys, {}B key, {}B value",
-            keyspace_count, config.workload.keyspace.length, config.workload.values.length
+            "workload   {} keys, {}B key, {}B value, {}:{} GET:SET",
+            keyspace_count,
+            config.workload.keyspace.length,
+            config.workload.values.length,
+            config.workload.commands.get,
+            config.workload.commands.set
         );
 
         // Threads line
@@ -124,9 +181,6 @@ impl OutputFormatter for CleanFormatter {
             config.connection.total_connections(),
             config.connection.pipeline_depth
         );
-
-        // Engine line
-        println!("engine     io_uring");
 
         // Rate limit line (optional)
         if let Some(rate) = config.workload.rate_limit {
@@ -192,10 +246,12 @@ impl OutputFormatter for CleanFormatter {
 
     fn print_header(&self) {
         println!(
-            "time UTC │ req/s │ err/s │ hit% │    p50 │    p90 │    p99 │  p99.9 │ p99.99 │    max"
+            "{}",
+            self.cyan("time UTC  req/s      p50      p90      p99     p999    p9999      max  err/s  hit%")
         );
         println!(
-            "─────────┼───────┼───────┼──────┼────────┼────────┼────────┼────────┼────────┼───────"
+            "{}",
+            self.dim("────────  ─────  ───────  ───────  ───────  ───────  ───────  ───────  ─────  ────")
         );
         let _ = io::stdout().flush();
     }
@@ -204,30 +260,34 @@ impl OutputFormatter for CleanFormatter {
         // Reprint header periodically for readability
         let count = self.sample_count.fetch_add(1, Ordering::Relaxed);
         if count > 0 && count.is_multiple_of(HEADER_REPEAT_INTERVAL) {
-            println!(
-                "─────────┼───────┼───────┼──────┼────────┼────────┼────────┼────────┼────────┼───────"
-            );
+            println!();
             self.print_header();
         }
 
         let time = sample.timestamp.format("%H:%M:%S");
-        let rate = format_rate_padded(sample.req_per_sec, 5);
+        let rate = self.bold(&format_rate_padded(sample.req_per_sec, 5));
         let err = format_rate_padded(sample.err_per_sec, 5);
         let hit = format_pct(sample.hit_pct);
 
-        // Color err/s red if > 0
-        let err_colored = self.maybe_red(&err, sample.err_per_sec > 0.0);
+        // Color err/s red if > 0, otherwise dim
+        let err_display = if sample.err_per_sec > 0.0 {
+            self.red(&err)
+        } else {
+            self.dim(&err)
+        };
 
-        let p50 = format_latency_padded(sample.p50_us, 7);
-        let p90 = format_latency_padded(sample.p90_us, 7);
-        let p99 = format_latency_padded(sample.p99_us, 7);
-        let p999 = format_latency_padded(sample.p999_us, 7);
-        let p9999 = format_latency_padded(sample.p9999_us, 7);
-        let max = format_latency_padded(sample.max_us, 7);
+        let p50 = self.dim(&format_latency_padded(sample.p50_us, 7));
+        let p90 = self.dim(&format_latency_padded(sample.p90_us, 7));
+        let p99 = self.dim(&format_latency_padded(sample.p99_us, 7));
+        let p999 = self.bold(&format_latency_padded(sample.p999_us, 7));
+        let p9999 = self.dim(&format_latency_padded(sample.p9999_us, 7));
+        let max = self.dim(&format_latency_padded(sample.max_us, 7));
 
         println!(
-            "{} │ {} │ {} │{:>5} │{} │{} │{} │{} │{} │{}",
-            time, rate, err_colored, hit, p50, p90, p99, p999, p9999, max
+            "{}  {}  {}  {}  {}  {}  {}  {}  {}  {:>4}",
+            self.dim(&format!("{}", time)),
+            rate, p50, p90, p99, p999, p9999, max, err_display,
+            self.dim(&hit)
         );
         let _ = io::stdout().flush();
     }
@@ -235,11 +295,13 @@ impl OutputFormatter for CleanFormatter {
     fn print_results(&self, results: &Results) {
         println!();
         println!(
-            "─────────────────────────────────────────────────────────────────────────────────────"
+            "{}",
+            self.dim("─────────────────────────────────────────────────────────────────────────────────────")
         );
-        println!("RESULTS ({:.0}s)", results.duration_secs);
+        println!("{}", self.bold(&format!("RESULTS ({:.0}s)", results.duration_secs)));
         println!(
-            "─────────────────────────────────────────────────────────────────────────────────────"
+            "{}",
+            self.dim("─────────────────────────────────────────────────────────────────────────────────────")
         );
 
         // Throughput line (guard against division by zero)
@@ -300,7 +362,7 @@ impl OutputFormatter for CleanFormatter {
         // Latency table
         println!(
             "latency      {:>6}  {:>6}  {:>6}  {:>6}  {:>6}  {:>6}",
-            "p50", "p90", "p99", "p99.9", "p99.99", "max"
+            "p50", "p90", "p99", "p999", "p9999", "max"
         );
 
         fn format_latency_row(name: &str, stats: &LatencyStats) -> String {
@@ -451,34 +513,108 @@ impl OutputFormatter for CleanFormatter {
     }
 
     fn print_saturation_step(&self, step: &SaturationStep) {
-        use super::format::format_rate;
+        use super::format::{format_latency_us, format_rate};
+
+        let step_num = self.results_step_count.fetch_add(1, Ordering::Relaxed) + 1;
 
         let target = format_rate(step.target_rate as f64);
-        let achieved = format_rate(step.achieved_rate);
-        let p999 = format_latency_padded(step.p999_us, 0);
+        let achieved_str = format_rate(step.achieved_rate);
+        let p999_str = format_latency_us(step.p999_us);
 
-        let slo_str = if step.slo_passed { "PASS" } else { "FAIL" };
-        let slo_colored = self.maybe_red(slo_str, !step.slo_passed);
+        let bar = self.dim("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
 
-        // Print as a distinct line that stands out from the regular sample table
+        // Build verdict header with cause
+        let is_throughput_fail =
+            !step.slo_passed && step.fail_reason.starts_with("Throughput");
+        let is_latency_fail =
+            !step.slo_passed && step.fail_reason.starts_with("Latency");
+
+        let verdict = if step.slo_passed {
+            self.green(&format!("STEP {} \u{2014} PASS", step_num))
+        } else if is_throughput_fail {
+            self.red(&format!(
+                "STEP {} \u{2014} FAIL \u{2014} Throughput Limited",
+                step_num
+            ))
+        } else if is_latency_fail {
+            self.red(&format!(
+                "STEP {} \u{2014} FAIL \u{2014} Latency Exceeded",
+                step_num
+            ))
+        } else {
+            self.red(&format!("STEP {} \u{2014} FAIL", step_num))
+        };
+
+        let slo_display = if step.slo_display.is_empty() {
+            String::new()
+        } else {
+            format!(" @ {}", step.slo_display)
+        };
+
+        println!();
+        println!("{}", bar);
+        println!("{}", verdict);
+        println!();
+        println!("SLO:    {}{}", target, slo_display);
         println!(
-            "──── step: {} target, {} achieved, p99.9={} ──── {}",
-            target, achieved, p999, slo_colored
+            "Result: {} @ p999={}",
+            self.bold(&achieved_str),
+            self.bold(&p999_str)
         );
+
+        // Fail reason: yellow for throughput, red for latency
+        if !step.slo_passed && !step.fail_reason.is_empty() {
+            if is_throughput_fail {
+                println!("{}", self.yellow(&step.fail_reason));
+            } else {
+                println!("{}", self.red(&step.fail_reason));
+            }
+        }
+
+        // Headroom on PASS
+        if step.slo_passed {
+            if let Some(threshold_us) = step.slo_threshold_us {
+                if threshold_us > 0.0 {
+                    let headroom = ((threshold_us - step.p999_us) / threshold_us) * 100.0;
+                    println!(
+                        "{}",
+                        self.dim(&format!("Headroom: {:.0}%", headroom.max(0.0)))
+                    );
+                }
+            }
+        }
+
+        println!("{}", bar);
+        println!();
+
+        // Reset sample count and reprint header for the next step's rows
+        self.sample_count.store(0, Ordering::Relaxed);
+        self.print_header();
         let _ = io::stdout().flush();
     }
 
     fn print_saturation_results(&self, results: &SaturationResults) {
         println!();
-        println!("────────────────────────────────────────────────────────");
+        println!(
+            "{}",
+            self.dim("────────────────────────────────────────────────────────")
+        );
 
         match results.max_compliant_rate {
             Some(rate) => {
-                println!("MAX COMPLIANT THROUGHPUT: {} req/s", format_count(rate));
+                println!(
+                    "{}",
+                    self.green(&format!(
+                        "MAX COMPLIANT THROUGHPUT: {} req/s",
+                        format_count(rate)
+                    ))
+                );
             }
             None => {
-                let msg = "MAX COMPLIANT THROUGHPUT: none (SLO never met)";
-                println!("{}", self.red(msg));
+                println!(
+                    "{}",
+                    self.red("MAX COMPLIANT THROUGHPUT: none (SLO never met)")
+                );
             }
         }
     }

@@ -145,6 +145,12 @@ pub struct SaturationStep {
     pub p999_us: f64,
     /// Whether SLO was met for this step.
     pub slo_passed: bool,
+    /// Reason for failure (empty if passed).
+    pub fail_reason: String,
+    /// SLO threshold display string (e.g. "p999=1ms").
+    pub slo_display: String,
+    /// SLO threshold in microseconds (for percentage calculation).
+    pub slo_threshold_us: Option<f64>,
 }
 
 /// Results from saturation search.
@@ -307,8 +313,17 @@ pub trait OutputFormatter: Send + Sync {
 
 /// Create a formatter based on the output format and color mode.
 pub fn create_formatter(format: OutputFormat, color: ColorMode) -> Box<dyn OutputFormatter> {
+    create_formatter_with_banner(format, color, "cachecannon".to_string())
+}
+
+/// Create a formatter with a custom banner name.
+pub fn create_formatter_with_banner(
+    format: OutputFormat,
+    color: ColorMode,
+    banner: String,
+) -> Box<dyn OutputFormatter> {
     match format {
-        OutputFormat::Clean => Box::new(CleanFormatter::new(color)),
+        OutputFormat::Clean => Box::new(CleanFormatter::with_banner(color, banner)),
         OutputFormat::Json => Box::new(JsonFormatter::new()),
         OutputFormat::Verbose => Box::new(VerboseFormatter::new()),
         OutputFormat::Quiet => Box::new(QuietFormatter::new()),

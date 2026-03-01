@@ -40,31 +40,31 @@ pub fn format_latency_us(us: f64) -> String {
     if us < 1_000.0 {
         // Microseconds
         if us < 10.0 {
-            format!("{:.2}us", us)
+            format!("{:.2} \u{00B5}s", us)
         } else if us < 100.0 {
-            format!("{:.1}us", us)
+            format!("{:.1} \u{00B5}s", us)
         } else {
-            format!("{:.0}us", us)
+            format!("{:.0} \u{00B5}s", us)
         }
     } else if us < 1_000_000.0 {
         // Milliseconds
         let ms = us / 1_000.0;
         if ms < 10.0 {
-            format!("{:.2}ms", ms)
+            format!("{:.2} ms", ms)
         } else if ms < 100.0 {
-            format!("{:.1}ms", ms)
+            format!("{:.1} ms", ms)
         } else {
-            format!("{:.0}ms", ms)
+            format!("{:.0} ms", ms)
         }
     } else {
         // Seconds
         let s = us / 1_000_000.0;
         if s < 10.0 {
-            format!("{:.2}s", s)
+            format!("{:.2} s", s)
         } else if s < 100.0 {
-            format!("{:.1}s", s)
+            format!("{:.1} s", s)
         } else {
-            format!("{:.0}s", s)
+            format!("{:.0} s", s)
         }
     }
 }
@@ -173,17 +173,17 @@ mod tests {
     #[test]
     fn test_format_latency() {
         // Microseconds - 3 significant figures
-        assert_eq!(format_latency_us(1.23), "1.23us");
-        assert_eq!(format_latency_us(42.5), "42.5us");
-        assert_eq!(format_latency_us(999.0), "999us");
+        assert_eq!(format_latency_us(1.23), "1.23 \u{00B5}s");
+        assert_eq!(format_latency_us(42.5), "42.5 \u{00B5}s");
+        assert_eq!(format_latency_us(999.0), "999 \u{00B5}s");
         // Milliseconds - 3 significant figures
-        assert_eq!(format_latency_us(1_230.0), "1.23ms");
-        assert_eq!(format_latency_us(42_500.0), "42.5ms");
-        assert_eq!(format_latency_us(200_000.0), "200ms");
+        assert_eq!(format_latency_us(1_230.0), "1.23 ms");
+        assert_eq!(format_latency_us(42_500.0), "42.5 ms");
+        assert_eq!(format_latency_us(200_000.0), "200 ms");
         // Seconds - 3 significant figures
-        assert_eq!(format_latency_us(1_230_000.0), "1.23s");
-        assert_eq!(format_latency_us(42_500_000.0), "42.5s");
-        assert_eq!(format_latency_us(200_000_000.0), "200s");
+        assert_eq!(format_latency_us(1_230_000.0), "1.23 s");
+        assert_eq!(format_latency_us(42_500_000.0), "42.5 s");
+        assert_eq!(format_latency_us(200_000_000.0), "200 s");
     }
 
     #[test]
