@@ -52,7 +52,7 @@ jobs:
       - name: Build
         run: cargo build --release
       - name: Run benchmark against Valkey
-        run: ./target/release/cachecannon config/redis-ci.toml
+        run: ./target/release/cachecannon config/valkey-ci.toml
 
   redis-tls:
     name: Redis TLS

@@ -40,8 +40,8 @@ endpoints = ["127.0.0.1:6379"]
 # endpoints = ["server1:6379", "server2:6379", "server3:6379"]
 
 # Protocol selection
-# "resp" - Redis RESP2 protocol
-# "resp3" - Redis RESP3 protocol
+# "resp" - Valkey/Redis RESP2 protocol
+# "resp3" - Valkey/Redis RESP3 protocol
 # "memcache" - Memcache ASCII protocol
 # "memcache_binary" - Memcache binary protocol
 # "momento" - Momento cache (cloud)
@@ -51,7 +51,7 @@ protocol = "resp"
 # Enable TLS encryption
 tls = false
 
-# Enable Redis Cluster mode (see guide.md for details)
+# Enable Valkey/Redis Cluster mode (see guide.md for details)
 cluster = false
 ```
 
@@ -289,7 +289,7 @@ Single-line summary only:
 
 ## Protocol Details
 
-### RESP (Redis)
+### RESP (Valkey/Redis)
 
 Supported commands:
 - `GET key` — Retrieve value

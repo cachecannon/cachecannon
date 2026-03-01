@@ -743,7 +743,7 @@ fn make_momento_callback() -> impl Fn(&ringline_momento::CommandResult) {
 
 // ── RESP connection task ─────────────────────────────────────────────────
 
-/// A single RESP (Redis) connection task that connects, drives workload, and reconnects.
+/// A single RESP (Valkey/Redis) connection task that connects, drives workload, and reconnects.
 async fn resp_connection_task(state: Arc<SharedWorkerState>, endpoint_idx: usize, seed: u64) {
     let endpoint = state.task_state.endpoints[endpoint_idx];
     let config = &state.task_state.config;
@@ -1017,7 +1017,7 @@ async fn drive_resp_workload(
 /// Marker bit for backfill SET user_data (high bit of u64).
 const BACKFILL_MARKER: u64 = 1 << 63;
 
-/// Map a ringline-redis CompletedOp to a RequestResult.
+/// Map a ringline-redis `CompletedOp` to a `RequestResult`.
 fn map_resp_op(op: ringline_redis::CompletedOp) -> RequestResult {
     match op {
         ringline_redis::CompletedOp::Get { result, user_data } => {
@@ -1097,7 +1097,7 @@ fn map_resp_op(op: ringline_redis::CompletedOp) -> RequestResult {
     }
 }
 
-/// Parse a Redis error message for MOVED/ASK redirect.
+/// Parse a Valkey/Redis error message for MOVED/ASK redirect.
 fn parse_resp_redirect(msg: &str) -> Option<resp_proto::Redirect> {
     let (kind, rest) = if let Some(rest) = msg.strip_prefix("MOVED ") {
         (resp_proto::RedirectKind::Moved, rest)

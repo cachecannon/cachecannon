@@ -85,8 +85,8 @@ pub struct Target {
     /// Set to false for self-signed certificates (e.g., CI testing).
     #[serde(default = "default_tls_verify")]
     pub tls_verify: bool,
-    /// Enable Redis Cluster mode: discover topology via CLUSTER SLOTS and route
-    /// by hash slot instead of ketama consistent hashing.
+    /// Enable Valkey/Redis Cluster mode: discover topology via CLUSTER SLOTS
+    /// and route by hash slot instead of ketama consistent hashing.
     #[serde(default)]
     pub cluster: bool,
 }
@@ -96,7 +96,7 @@ pub struct Target {
 pub enum Protocol {
     #[default]
     Resp,
-    /// RESP3 protocol (Redis 6+)
+    /// RESP3 protocol (Valkey / Redis 6+)
     Resp3,
     /// Memcache ASCII text protocol
     Memcache,

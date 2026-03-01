@@ -1,4 +1,4 @@
-//! Redis Cluster topology discovery.
+//! Valkey/Redis Cluster topology discovery.
 //!
 //! Sends `CLUSTER SLOTS` to seed nodes via blocking TCP before ringline launches,
 //! builds a slot table mapping each of 16384 slots to an endpoint index.
@@ -17,7 +17,7 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 /// Read timeout for CLUSTER SLOTS response.
 const READ_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// Discover Redis Cluster topology from seed nodes.
+/// Discover Valkey/Redis Cluster topology from seed nodes.
 ///
 /// Returns `(primary_endpoints, slot_table)` where `slot_table` maps each of
 /// 16384 hash slots to an index into `primary_endpoints`.

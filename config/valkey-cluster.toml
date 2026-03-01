@@ -1,4 +1,4 @@
-# Benchmark configuration for Valkey/Redis Cluster (see also valkey-cluster.toml).
+# Benchmark configuration for Valkey/Redis Cluster.
 #
 # Uses CLUSTER SLOTS to discover topology and routes keys by CRC16 hash slot.
 # Adapts to MOVED redirects during topology changes (failover, rebalance).

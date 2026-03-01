@@ -4,19 +4,19 @@ This guide walks through common benchmarking tasks — from first run to product
 
 ## End-to-End Walkthrough
 
-This walkthrough takes you from zero to analyzed results. It assumes you have a Redis-compatible server running on `127.0.0.1:6379`.
+This walkthrough takes you from zero to analyzed results. It assumes you have a Valkey or Redis-compatible server running on `127.0.0.1:6379`.
 
 ### 1. Start the server
 
 ```bash
-# Use any Redis-compatible server running on port 6379
-redis-server
+# Use any Valkey/Redis-compatible server running on port 6379
+valkey-server  # or: redis-server
 ```
 
 ### 2. Run a benchmark with Parquet output
 
 ```bash
-./target/release/cachecannon config/redis.toml \
+./target/release/cachecannon config/valkey.toml \
     --parquet results.parquet
 ```
 
@@ -66,7 +66,7 @@ rezolus record http://localhost:4241 server-rezolus.parquet &
 rezolus record http://localhost:4241 client-rezolus.parquet &
 
 # Terminal 3: Run the benchmark
-./target/release/cachecannon config/redis.toml \
+./target/release/cachecannon config/valkey.toml \
     --parquet results.parquet
 
 # View everything together
@@ -275,7 +275,7 @@ See `config/saturation.toml` for a ready-to-use configuration.
 
 ## Cluster Mode
 
-Cluster mode supports **Redis Cluster** by discovering topology via `CLUSTER SLOTS` and routing keys to the correct shard by hash slot.
+Cluster mode supports **Valkey/Redis Cluster** by discovering topology via `CLUSTER SLOTS` and routing keys to the correct shard by hash slot.
 
 ### Enabling Cluster Mode
 
@@ -321,7 +321,7 @@ cluster = true
 prefill = true
 ```
 
-See `config/redis-cluster.toml` for a ready-to-use configuration.
+See `config/valkey-cluster.toml` for a ready-to-use configuration.
 
 ## TLS
 
@@ -470,7 +470,7 @@ Ensure the target server is running and listening on the configured endpoint.
 ### Prefill Stalls or Times Out
 
 If prefill appears stuck:
-1. Check that the server is accepting writes — verify with `redis-cli SET test value`
+1. Check that the server is accepting writes — verify with `valkey-cli SET test value` (or `redis-cli`)
 2. Ensure the server has enough memory for the full keyspace (`keyspace.count × (key_length + value_length)`)
 3. Increase the timeout for very large keyspaces: `prefill_timeout = "600s"`
 4. Check the diagnostic output for connection failures or zero bytes received
