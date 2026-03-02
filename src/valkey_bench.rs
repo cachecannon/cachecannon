@@ -7,7 +7,7 @@ use cachecannon::viewer;
 use cachecannon::{parse_cpu_list, run_benchmark_full};
 
 use clap::{Parser, Subcommand, ValueEnum};
-use std::net::SocketAddr;
+use std::net::{SocketAddr, ToSocketAddrs};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -21,7 +21,12 @@ use std::time::Duration;
 #[command(name = "valkey-bench")]
 #[command(version)]
 #[command(args_conflicts_with_subcommands = true)]
+#[command(disable_help_flag = true)]
 struct Cli {
+    /// Print help information.
+    #[arg(long, action = clap::ArgAction::Help)]
+    help: Option<bool>,
+
     #[command(subcommand)]
     command: Option<Command>,
 
@@ -336,9 +341,7 @@ fn load_base_config(args: &BenchArgs) -> Result<Config, Box<dyn std::error::Erro
         // No config file — build defaults matching CLI help text.
         let host = args.host.as_deref().unwrap_or("127.0.0.1");
         let port = args.port.unwrap_or(6379);
-        let addr: SocketAddr = format!("{host}:{port}")
-            .parse()
-            .map_err(|e| format!("invalid host:port '{host}:{port}': {e}"))?;
+        let addr = resolve_host(host, port)?;
 
         Ok(Config {
             general: General {
@@ -379,9 +382,7 @@ fn apply_bench_flags(
     if args.host.is_some() || args.port.is_some() {
         let host = args.host.as_deref().unwrap_or("127.0.0.1");
         let port = args.port.unwrap_or(6379);
-        let addr: SocketAddr = format!("{host}:{port}")
-            .parse()
-            .map_err(|e| format!("invalid host:port '{host}:{port}': {e}"))?;
+        let addr = resolve_host(host, port)?;
         config.target.endpoints = vec![addr];
     }
 
@@ -521,6 +522,14 @@ fn parse_duration(s: &str) -> Result<Duration, String> {
         "h" | "hr" | "hrs" => Ok(Duration::from_secs(value * 3600)),
         other => Err(format!("unknown time unit '{}' in duration", other)),
     }
+}
+
+/// Resolve a hostname (or IP literal) and port to a `SocketAddr`.
+fn resolve_host(host: &str, port: u16) -> Result<SocketAddr, Box<dyn std::error::Error>> {
+    (host, port)
+        .to_socket_addrs()?
+        .next()
+        .ok_or_else(|| format!("could not resolve host '{host}'").into())
 }
 
 #[cfg(test)]
