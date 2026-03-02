@@ -117,7 +117,21 @@ impl SaturationSearchState {
         let throughput_ok = throughput_ratio >= self.config.min_throughput_ratio;
 
         // Check SLO compliance (latency + throughput)
-        let slo_passed = throughput_ok && self.check_slo(p50, p99, p999);
+        let latency_reason = self.slo_fail_reason(p50, p99, p999);
+        let slo_passed = throughput_ok && latency_reason.is_none();
+
+        // Build failure reason
+        let fail_reason = if slo_passed {
+            String::new()
+        } else if !throughput_ok {
+            format!(
+                "Throughput: {:.0}% (need {:.0}%)",
+                throughput_ratio * 100.0,
+                self.config.min_throughput_ratio * 100.0
+            )
+        } else {
+            latency_reason.unwrap_or_default()
+        };
 
         // Record step
         let step = SaturationStep {
@@ -127,6 +141,9 @@ impl SaturationSearchState {
             p99_us: p99,
             p999_us: p999,
             slo_passed,
+            fail_reason,
+            slo_display: self.slo_display(),
+            slo_threshold_us: self.slo_threshold_us(),
         };
         formatter.print_saturation_step(&step);
         self.results.push(step);
@@ -164,35 +181,65 @@ impl SaturationSearchState {
         true
     }
 
-    /// Check if SLO is met for the given latencies (in microseconds).
-    fn check_slo(&self, p50_us: f64, p99_us: f64, p999_us: f64) -> bool {
+    /// Return the reason the SLO failed, or None if it passed.
+    fn slo_fail_reason(&self, p50_us: f64, p99_us: f64, p999_us: f64) -> Option<String> {
         let slo = &self.config.slo;
 
-        // Check p50 threshold if specified
         if let Some(threshold) = slo.p50 {
             let threshold_us = threshold.as_micros() as f64;
             if p50_us > threshold_us {
-                return false;
+                return Some(format!(
+                    "Latency: p50 {:.0}us > {:.0}us SLO",
+                    p50_us, threshold_us
+                ));
             }
         }
 
-        // Check p99 threshold if specified
         if let Some(threshold) = slo.p99 {
             let threshold_us = threshold.as_micros() as f64;
             if p99_us > threshold_us {
-                return false;
+                return Some(format!(
+                    "Latency: p99 {:.0}us > {:.0}us SLO",
+                    p99_us, threshold_us
+                ));
             }
         }
 
-        // Check p99.9 threshold if specified
         if let Some(threshold) = slo.p999 {
             let threshold_us = threshold.as_micros() as f64;
             if p999_us > threshold_us {
-                return false;
+                return Some(format!(
+                    "Latency: p999 {:.0}us > {:.0}us SLO",
+                    p999_us, threshold_us
+                ));
             }
         }
 
-        true
+        None
+    }
+
+    /// Build a display string for the configured SLO (e.g. "p999 ≤ 1ms").
+    fn slo_display(&self) -> String {
+        let slo = &self.config.slo;
+        // Show the highest percentile SLO configured
+        if let Some(threshold) = slo.p999 {
+            format!("p999 \u{2264} {}", format_duration_short(threshold))
+        } else if let Some(threshold) = slo.p99 {
+            format!("p99 \u{2264} {}", format_duration_short(threshold))
+        } else if let Some(threshold) = slo.p50 {
+            format!("p50 \u{2264} {}", format_duration_short(threshold))
+        } else {
+            String::new()
+        }
+    }
+
+    /// Get the SLO threshold in microseconds (highest configured percentile).
+    fn slo_threshold_us(&self) -> Option<f64> {
+        let slo = &self.config.slo;
+        slo.p999
+            .or(slo.p99)
+            .or(slo.p50)
+            .map(|t| t.as_micros() as f64)
     }
 
     /// Whether the search has completed.
@@ -211,6 +258,26 @@ impl SaturationSearchState {
             max_compliant_rate: self.last_good_rate,
             steps: self.results.clone(),
         }
+    }
+}
+
+/// Format a Duration as a compact human-readable string (e.g. "1ms", "1.5ms", "500us").
+fn format_duration_short(d: Duration) -> String {
+    let us = d.as_micros();
+    if us >= 1_000_000 {
+        if us.is_multiple_of(1_000_000) {
+            format!("{}s", us / 1_000_000)
+        } else {
+            format!("{:.1}s", us as f64 / 1_000_000.0)
+        }
+    } else if us >= 1_000 {
+        if us.is_multiple_of(1_000) {
+            format!("{}ms", us / 1_000)
+        } else {
+            format!("{:.1}ms", us as f64 / 1_000.0)
+        }
+    } else {
+        format!("{}us", us)
     }
 }
 
@@ -250,12 +317,27 @@ mod tests {
         let state = SaturationSearchState::new(config, rl);
 
         // Under thresholds - should pass
-        assert!(state.check_slo(50.0, 500.0, 800.0));
+        assert!(state.slo_fail_reason(50.0, 500.0, 800.0).is_none());
 
         // p50 over threshold - should fail
-        assert!(!state.check_slo(150.0, 500.0, 800.0));
+        assert!(state.slo_fail_reason(150.0, 500.0, 800.0).is_some());
 
         // p999 over threshold - should fail
-        assert!(!state.check_slo(50.0, 500.0, 1500.0));
+        assert!(state.slo_fail_reason(50.0, 500.0, 1500.0).is_some());
+    }
+
+    #[test]
+    fn test_format_duration_short() {
+        // Exact boundaries
+        assert_eq!(format_duration_short(Duration::from_micros(500)), "500us");
+        assert_eq!(format_duration_short(Duration::from_millis(1)), "1ms");
+        assert_eq!(format_duration_short(Duration::from_secs(1)), "1s");
+
+        // Sub-unit precision preserved
+        assert_eq!(format_duration_short(Duration::from_micros(1500)), "1.5ms");
+        assert_eq!(
+            format_duration_short(Duration::from_micros(1_500_000)),
+            "1.5s"
+        );
     }
 }

@@ -1,7 +1,7 @@
 # Example configuration — all available options shown
 #
 # This is a comprehensive reference. For quick-start configs, see:
-#   redis.toml, memcache.toml, momento.toml, ping.toml
+#   valkey.toml, memcache.toml, momento.toml, ping.toml
 
 [general]
 duration = "60s"
@@ -14,9 +14,9 @@ threads = 1
 endpoints = ["127.0.0.1:6379"]
 protocol = "resp"         # "resp", "resp3", "memcache", "memcache_binary", "momento", "ping"
 # tls = false             # Enable TLS encryption for connections
-# tls_hostname = "redis.example.com"  # Explicit SNI hostname (defaults to endpoint IP)
+# tls_hostname = "cache.example.com"  # Explicit SNI hostname (defaults to endpoint IP)
 # tls_verify = true       # Verify server certificate (set false for self-signed certs)
-# cluster = false         # Enable Redis Cluster mode (topology discovery via CLUSTER SLOTS)
+# cluster = false         # Enable Valkey/Redis Cluster mode (topology discovery via CLUSTER SLOTS)
 
 [connection]
 connections = 4           # Total connections distributed across threads

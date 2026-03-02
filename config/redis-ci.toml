@@ -1,4 +1,4 @@
-# CI configuration for plain Redis/Valkey integration tests
+# CI configuration for Valkey/Redis integration tests (see also valkey-ci.toml)
 
 [general]
 duration = "5s"

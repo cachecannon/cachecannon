@@ -53,26 +53,26 @@ Requires Rust 1.76+ and Linux 6.0+ (for io_uring support).
 ## Quick Start
 
 ```bash
-# Run against a local Redis server
-cachecannon config/redis.toml
+# Run against a local Valkey or Redis server
+cachecannon config/valkey.toml
 
 # Run against a local Memcached server
 cachecannon config/memcache.toml
 
 # Save results to Parquet and view in the web dashboard
-cachecannon config/redis.toml --parquet results.parquet
+cachecannon config/valkey.toml --parquet results.parquet
 cachecannon view results.parquet
 ```
 
 ## Features
 
-- **Multiple protocols** — Redis RESP2/RESP3, Memcache ASCII/binary, Momento gRPC, Ping
+- **Multiple protocols** — Valkey/Redis RESP2/RESP3, Memcache ASCII/binary, Momento gRPC, Ping
 - **io_uring I/O** — Same high-performance krio framework as the server (Linux 6.0+)
 - **Request pipelining** — Configurable pipeline depth per connection
 - **Latency histograms** — p50, p90, p99, p99.9, p99.99 with userspace or kernel timestamps
 - **[Prefill and backfill](docs/guide.md#prefill)** — Pre-populate the cache or auto-SET on miss (cache-aside)
 - **[Saturation search](docs/guide.md#saturation-search)** — Automatically find max throughput that meets your latency SLO
-- **[Redis Cluster](docs/guide.md#cluster-mode)** — Topology discovery, hash slot routing, MOVED redirect handling
+- **[Valkey/Redis Cluster](docs/guide.md#cluster-mode)** — Topology discovery, hash slot routing, MOVED redirect handling
 - **[Parquet output](docs/reference.md#parquet-output)** — Record all metrics for post-hoc analysis
 - **[Web dashboard](docs/reference.md#results-viewer)** — Interactive viewer with throughput, latency, cache, and connection charts
 - **[Rezolus correlation](docs/guide.md#correlating-with-rezolus)** — Overlay system telemetry (CPU, network, scheduler) on benchmark results
@@ -111,19 +111,19 @@ Options:
 
 ## Choosing a Configuration
 
-**First time?** Start with `quick-test.toml` to verify connectivity, then move to `redis.toml` or `memcache.toml` for a real benchmark:
+**First time?** Start with `quick-test.toml` to verify connectivity, then move to `valkey.toml` or `memcache.toml` for a real benchmark:
 
 ```bash
 # Verify everything works (5 seconds)
 cachecannon config/quick-test.toml
 
 # Run a full benchmark
-cachecannon config/redis.toml
+cachecannon config/valkey.toml
 ```
 
 **Measuring capacity?** Use `saturation.toml` to automatically find the maximum throughput that meets your latency SLO.
 
-**Testing a specific server feature?** Use `eviction-test.toml` (eviction behavior), `desync-test.toml` (protocol correctness under high concurrency), or `redis-cluster.toml` (cluster topology).
+**Testing a specific server feature?** Use `eviction-test.toml` (eviction behavior), `desync-test.toml` (protocol correctness under high concurrency), or `valkey-cluster.toml` (cluster topology).
 
 **Need to customize?** Copy `example.toml` — it has every available option with comments.
 
@@ -132,19 +132,19 @@ cachecannon config/redis.toml
 | Config | Description |
 |--------|-------------|
 | `quick-test.toml` | 5-second smoke test — start here to verify connectivity |
-| `redis.toml` | Standard Redis RESP protocol benchmark |
+| `valkey.toml` | Standard Valkey/Redis RESP protocol benchmark |
 | `memcache.toml` | Memcache protocol benchmark (ASCII; binary protocol shown as comment) |
 | `momento.toml` | Momento cloud cache (requires `MOMENTO_API_KEY`) |
 | `ping.toml` | Simple PING/PONG baseline latency test |
 | `example.toml` | Reference config with all available options commented |
-| `redis-cluster.toml` | Redis Cluster with topology discovery and prefill |
+| `valkey-cluster.toml` | Valkey/Redis Cluster with topology discovery and prefill |
 | `saturation.toml` | Automated saturation search to find max SLO-compliant throughput |
 | `eviction-test.toml` | High write rate to trigger eviction cycles |
 | `desync-test.toml` | High concurrency stress test for protocol correctness (128 connections) |
 
 ## Comparison with Other Tools
 
-| Feature | cachecannon | redis-benchmark | memtier_benchmark |
+| Feature | cachecannon | valkey-benchmark | memtier_benchmark |
 |---------|-------------------|-----------------|-------------------|
 | io_uring support | Yes | No | No |
 | Zero-copy send | Yes | No | No |

@@ -1,4 +1,4 @@
-# CI configuration for Valkey/Redis TLS integration tests (self-signed certs, see also valkey-tls-ci.toml)
+# CI configuration for Valkey/Redis integration tests
 
 [general]
 duration = "5s"
@@ -6,10 +6,8 @@ warmup = "2s"
 threads = 2
 
 [target]
-endpoints = ["127.0.0.1:6380"]
+endpoints = ["127.0.0.1:6379"]
 protocol = "resp"
-tls = true
-tls_verify = false
 
 [connection]
 connections = 4

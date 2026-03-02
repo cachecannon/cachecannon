@@ -1,4 +1,4 @@
-# CI configuration for Valkey/Redis TLS integration tests (self-signed certs, see also valkey-tls-ci.toml)
+# CI configuration for Valkey/Redis TLS integration tests (self-signed certs)
 
 [general]
 duration = "5s"
