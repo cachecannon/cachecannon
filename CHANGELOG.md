@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.6] - 2026-03-02
+
+### Added
+- Add `valkey-bench` CLI binary as an alias for `cachecannon`
+- Add separate `valkey-bench` DEB/RPM packages for standalone installation
+
 ## [0.0.5] - 2026-02-26
 
 ### Fixed
