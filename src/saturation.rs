@@ -261,13 +261,21 @@ impl SaturationSearchState {
     }
 }
 
-/// Format a Duration as a compact human-readable string (e.g. "1ms", "500us").
+/// Format a Duration as a compact human-readable string (e.g. "1ms", "1.5ms", "500us").
 fn format_duration_short(d: Duration) -> String {
     let us = d.as_micros();
     if us >= 1_000_000 {
-        format!("{}s", us / 1_000_000)
+        if us.is_multiple_of(1_000_000) {
+            format!("{}s", us / 1_000_000)
+        } else {
+            format!("{:.1}s", us as f64 / 1_000_000.0)
+        }
     } else if us >= 1_000 {
-        format!("{}ms", us / 1_000)
+        if us.is_multiple_of(1_000) {
+            format!("{}ms", us / 1_000)
+        } else {
+            format!("{:.1}ms", us as f64 / 1_000.0)
+        }
     } else {
         format!("{}us", us)
     }
@@ -316,5 +324,20 @@ mod tests {
 
         // p999 over threshold - should fail
         assert!(state.slo_fail_reason(50.0, 500.0, 1500.0).is_some());
+    }
+
+    #[test]
+    fn test_format_duration_short() {
+        // Exact boundaries
+        assert_eq!(format_duration_short(Duration::from_micros(500)), "500us");
+        assert_eq!(format_duration_short(Duration::from_millis(1)), "1ms");
+        assert_eq!(format_duration_short(Duration::from_secs(1)), "1s");
+
+        // Sub-unit precision preserved
+        assert_eq!(format_duration_short(Duration::from_micros(1500)), "1.5ms");
+        assert_eq!(
+            format_duration_short(Duration::from_micros(1_500_000)),
+            "1.5s"
+        );
     }
 }
