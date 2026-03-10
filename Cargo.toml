@@ -29,7 +29,7 @@ ringline-ping = { git = "https://github.com/ringline-rs/ringline.git", rev = "c0
 # Metrics
 metriken = "0.7"
 metriken-exposition = { version = "0.12", features = ["parquet"] }
-metriken-query = { version = "0.1.2", features = ["http"] }
+metriken-query = { version = "0.2.0", features = ["http"] }
 
 # Configuration
 toml = "0.8"
