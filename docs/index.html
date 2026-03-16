@@ -124,21 +124,18 @@
       </p>
     </div>
 
-    <div class="bento-grid" style="grid-template-columns: 1fr; gap: 12px; margin-top: 2rem;">
-      <div class="bento-card numbered-card fade-up">
-        <div class="card-number">1</div>
-        <div><h3>Bold what matters</h3>
-        <p><strong>req/s</strong> and <strong>p999</strong> are bold white. Time, p50, p90, p99, p9999, max, hit% are all dimmed. Your eye goes straight to throughput and the latency percentile that usually trips SLOs.</p></div>
+    <div class="step-timeline fade-up">
+      <div class="step-item" data-step="1">
+        <h3>Bold what matters</h3>
+        <p><strong>req/s</strong> and <strong>p999</strong> are bold white. Time, p50, p90, p99, p9999, max, hit% are all dimmed. Your eye goes straight to throughput and the latency percentile that usually trips SLOs.</p>
       </div>
-      <div class="bento-card numbered-card fade-up">
-        <div class="card-number">2</div>
-        <div><h3>Color-coded signals</h3>
-        <p>Cyan for config labels. Green for PASS. Red for FAIL and errors. Yellow for throughput warnings. Dim for separators and low-signal columns. Every color has a reason.</p></div>
+      <div class="step-item" data-step="2">
+        <h3>Color-coded signals</h3>
+        <p>Cyan for config labels. Green for PASS. Red for FAIL and errors. Yellow for throughput warnings. Dim for separators and low-signal columns. Every color has a reason.</p>
       </div>
-      <div class="bento-card numbered-card fade-up">
-        <div class="card-number">3</div>
-        <div><h3>Per-second streaming</h3>
-        <p>One row per second with full p50 through p9999 and max. Spikes that disappear in aggregate percentiles show up as individual rows in the time series.</p></div>
+      <div class="step-item" data-step="3">
+        <h3>Per-second streaming</h3>
+        <p>One row per second with full p50 through p9999 and max. Spikes that disappear in aggregate percentiles show up as individual rows in the time series.</p>
       </div>
     </div>
 

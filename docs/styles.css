@@ -247,26 +247,54 @@ a:hover { text-decoration: none; }
   color: var(--text-secondary); font-size: 14px; line-height: 1.6;
 }
 
-/* ---- Numbered cards ---- */
-.numbered-card {
+/* ---- Timeline steps ---- */
+.step-timeline {
   position: relative;
-  padding-left: 64px;
+  padding-left: 36px;
+  margin-top: 24px;
 }
-.numbered-card .card-number {
+.step-timeline::before {
+  content: '';
   position: absolute;
-  top: 24px;
-  left: 20px;
-  font-weight: 700;
-  width: 28px;
-  height: 28px;
+  left: 14px;
+  top: 8px;
+  bottom: 8px;
+  width: 2px;
+  background: linear-gradient(180deg, var(--gradient-1), var(--gradient-2));
+  border-radius: 1px;
+}
+.step-item {
+  position: relative;
+  padding: 0 0 28px 24px;
+}
+.step-item:last-child { padding-bottom: 0; }
+.step-item::before {
+  content: attr(data-step);
+  position: absolute;
+  left: -28px;
+  top: 2px;
+  width: 26px;
+  height: 26px;
   display: flex;
   align-items: center;
   justify-content: center;
-  border-radius: 8px;
+  border-radius: 50%;
   background: linear-gradient(135deg, var(--gradient-1), var(--gradient-2));
   color: #fff;
-  font-size: 13px;
+  font-size: 12px;
+  font-weight: 700;
   line-height: 1;
+  z-index: 1;
+}
+.step-item h3 {
+  font-size: 15px;
+  font-weight: 600;
+  margin-bottom: 4px;
+}
+.step-item p {
+  color: var(--text-secondary);
+  font-size: 14px;
+  line-height: 1.6;
 }
 
 /* ---- Scenario picker cards ---- */
