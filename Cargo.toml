@@ -92,8 +92,8 @@ name = "cachecannon"
 path = "src/main.rs"
 
 [[bin]]
-name = "valkey-bench"
-path = "src/valkey_bench.rs"
+name = "valkey-lab"
+path = "src/valkey_lab.rs"
 
 [package.metadata.deb]
 name = "cachecannon"

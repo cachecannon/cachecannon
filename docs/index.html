@@ -1,0 +1,304 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>valkey-lab — SLO-Compliant Valkey/Redis Benchmarking</title>
+  <meta name="description" content="High-performance Valkey/Redis benchmark tool with io_uring, saturation search, and SLO-compliant latency testing. Powered by cachecannon." />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+
+<!-- ============ Nav ============ -->
+<nav>
+  <div class="container">
+    <a href="#" class="nav-logo"><span>valkey</span>-lab</a>
+    <div class="nav-links">
+      <a href="#problem">Problem</a>
+      <a href="#features">Features</a>
+      <a href="#saturate">Saturate</a>
+      <a href="#quickstart">Quick Start</a>
+      <button id="theme-toggle" aria-label="Toggle theme">&#9790;</button>
+      <a href="https://github.com/cachecannon/cachecannon" class="btn-sm" target="_blank" rel="noopener">GitHub</a>
+    </div>
+  </div>
+</nav>
+
+<!-- ============ Hero ============ -->
+<section class="hero" id="top">
+  <div class="container">
+    <h1 class="gradient-text">valkey-lab</h1>
+    <p class="hero-sub">
+      Find the maximum throughput your Valkey server can sustain under
+      latency SLOs. Powered by io_uring and the cachecannon engine.
+    </p>
+    <div class="hero-badges">
+      <span class="badge"><span class="dot dot-green"></span> io_uring</span>
+      <span class="badge"><span class="dot dot-cyan"></span> Saturation search</span>
+      <span class="badge"><span class="dot dot-accent"></span> SLO-compliant</span>
+    </div>
+    <div class="hero-cta">
+      <a href="#quickstart" class="btn btn-primary">Get Started</a>
+      <a href="https://github.com/cachecannon/cachecannon" class="btn btn-secondary" target="_blank" rel="noopener">View on GitHub</a>
+    </div>
+  </div>
+</section>
+
+<!-- ============ The Problem ============ -->
+<section id="problem">
+  <div class="container">
+    <span class="section-tag fade-up">The Problem</span>
+    <h2 class="section-title fade-up">valkey-benchmark leaves gaps</h2>
+    <p class="section-desc fade-up">
+      The built-in valkey-benchmark is great for quick smoke tests, but falls short
+      for production capacity planning.
+    </p>
+    <div class="cards-grid">
+      <div class="card fade-up">
+        <div class="card-icon">&#x1F500;</div>
+        <h3>No Mixed Workloads</h3>
+        <p>
+          valkey-benchmark runs one command type at a time. Real workloads are a mix of
+          GETs and SETs that contend for CPU, memory, and network differently.
+        </p>
+      </div>
+      <div class="card fade-up">
+        <div class="card-icon">&#x1F6A6;</div>
+        <h3>No Rate Limiting</h3>
+        <p>
+          Without rate control you always run at max throughput, which tells you nothing
+          about latency at your actual production request rate.
+        </p>
+      </div>
+      <div class="card fade-up">
+        <div class="card-icon">&#x1F50D;</div>
+        <h3>No Saturation Search</h3>
+        <p>
+          Finding "the max throughput where p999 stays under 1 ms" requires dozens of
+          manual runs. valkey-lab automates it in one command.
+        </p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============ Features ============ -->
+<section id="features" style="background: var(--bg-alt);">
+  <div class="container">
+    <span class="section-tag fade-up">Features</span>
+    <h2 class="section-title fade-up">How valkey-lab compares</h2>
+
+    <div class="table-wrapper fade-up">
+      <table>
+        <thead>
+          <tr>
+            <th>Capability</th>
+            <th>valkey-lab</th>
+            <th>valkey-benchmark</th>
+            <th>memtier_benchmark</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr><td>Mixed GET/SET workload</td>          <td class="check">&#10003;</td><td class="cross">&#10005;</td><td class="check">&#10003;</td></tr>
+          <tr><td>Rate limiting</td>                   <td class="check">&#10003;</td><td class="cross">&#10005;</td><td class="check">&#10003;</td></tr>
+          <tr><td>Automatic saturation search</td>     <td class="check">&#10003;</td><td class="cross">&#10005;</td><td class="cross">&#10005;</td></tr>
+          <tr><td>io_uring kernel-bypassed I/O</td>    <td class="check">&#10003;</td><td class="cross">&#10005;</td><td class="cross">&#10005;</td></tr>
+          <tr><td>Kernel SO_TIMESTAMPING</td>          <td class="check">&#10003;</td><td class="cross">&#10005;</td><td class="cross">&#10005;</td></tr>
+          <tr><td>Per-connection pipelining</td>       <td class="check">&#10003;</td><td class="check">&#10003;</td><td class="check">&#10003;</td></tr>
+          <tr><td>Cluster mode</td>                    <td class="check">&#10003;</td><td class="check">&#10003;</td><td class="check">&#10003;</td></tr>
+          <tr><td>TLS</td>                             <td class="check">&#10003;</td><td class="check">&#10003;</td><td class="check">&#10003;</td></tr>
+          <tr><td>Parquet output</td>                  <td class="check">&#10003;</td><td class="cross">&#10005;</td><td class="cross">&#10005;</td></tr>
+          <tr><td>Built-in web viewer</td>             <td class="check">&#10003;</td><td class="cross">&#10005;</td><td class="cross">&#10005;</td></tr>
+          <tr><td>Zero-config defaults</td>            <td class="check">&#10003;</td><td class="check">&#10003;</td><td class="cross">&#10005;</td></tr>
+          <tr><td>Prefill / backfill</td>              <td class="check">&#10003;</td><td class="cross">&#10005;</td><td class="cross">&#10005;</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="cards-grid" style="margin-top: 3rem;">
+      <div class="card fade-up">
+        <div class="card-icon">&#x26A1;</div>
+        <h3>io_uring Engine</h3>
+        <p>Kernel-bypassed I/O via ringline keeps the benchmark out of the kernel path, reducing measurement overhead.</p>
+      </div>
+      <div class="card fade-up">
+        <div class="card-icon">&#x23F1;</div>
+        <h3>SO_TIMESTAMPING</h3>
+        <p>Kernel-level timestamps on every packet eliminate userspace jitter from latency measurements.</p>
+      </div>
+      <div class="card fade-up">
+        <div class="card-icon">&#x1F4CA;</div>
+        <h3>Parquet + Web Viewer</h3>
+        <p>Export results to Parquet for analysis, or view them instantly in the built-in web dashboard.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============ Saturation Search ============ -->
+<section id="saturate">
+  <div class="container">
+    <span class="section-tag fade-up">Saturation Search</span>
+    <h2 class="section-title fade-up">Find your server's limit — automatically</h2>
+    <p class="section-desc fade-up">
+      One command ramps request rate until your latency SLO breaks, then reports the
+      maximum compliant throughput.
+    </p>
+
+    <div class="code-block fade-up">
+      <div class="code-block-header"><span>bash</span></div>
+      <pre><code><span class="cmd">valkey-lab</span> <span class="flag">saturate</span> <span class="flag">--slo-p999</span> <span class="value">1ms</span> <span class="flag">-c</span> <span class="value">16</span> <span class="flag">-P</span> <span class="value">32</span></code></pre>
+    </div>
+
+    <div class="sat-output fade-up">
+<span class="sat-bar">&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;</span>
+<span class="sat-pass">STEP 1 &#8212; PASS</span>
+
+<span class="sat-label">SLO:</span>    <span class="sat-value">500K @ p999 &#8804; 1ms</span>
+<span class="sat-label">Result:</span> <span class="sat-value">498K @ p999=312 &#181;s</span>
+<span class="sat-label">Headroom:</span> <span class="sat-pass">69%</span>
+<span class="sat-bar">&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;</span>
+
+<span class="sat-bar">&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;</span>
+<span class="sat-fail-thr">STEP 5 &#8212; FAIL &#8212; Throughput Limited</span>
+
+<span class="sat-label">SLO:</span>    <span class="sat-value">551K @ p999 &#8804; 1ms</span>
+<span class="sat-label">Result:</span> <span class="sat-value">412K @ p999=845 &#181;s</span>
+<span class="sat-label">Throughput:</span> <span class="sat-fail-thr">75% (need 90%)</span>
+<span class="sat-bar">&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;</span>
+
+<span class="sat-bar">&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;</span>
+<span class="sat-fail-lat">STEP 6 &#8212; FAIL &#8212; Latency Exceeded</span>
+
+<span class="sat-label">SLO:</span>    <span class="sat-value">579K @ p999 &#8804; 1ms</span>
+<span class="sat-label">Result:</span> <span class="sat-value">401K @ p999=3.40 ms</span>
+<span class="sat-label">Latency:</span> <span class="sat-fail-lat">p999 3400us &gt; 1000us SLO</span>
+<span class="sat-bar">&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;&#9473;</span>
+
+<span class="sat-bar">&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;</span>
+<span class="sat-final">MAX COMPLIANT THROUGHPUT: 525K req/s</span>
+    </div>
+  </div>
+</section>
+
+<!-- ============ Quick Start ============ -->
+<section id="quickstart" style="background: var(--bg-alt);">
+  <div class="container">
+    <span class="section-tag fade-up">Quick Start</span>
+    <h2 class="section-title fade-up">Up and running in 60 seconds</h2>
+
+    <div class="code-block fade-up">
+      <div class="code-block-header"><span>Install</span></div>
+      <pre><code><span class="comment"># Build from source (requires Linux with io_uring)</span>
+<span class="cmd">git clone</span> <span class="value">https://github.com/cachecannon/cachecannon.git</span>
+<span class="cmd">cd</span> cachecannon
+<span class="cmd">cargo install</span> <span class="flag">--path</span> . <span class="flag">--bin</span> <span class="value">valkey-lab</span></code></pre>
+    </div>
+
+    <div class="code-block fade-up">
+      <div class="code-block-header"><span>Basic Usage</span></div>
+      <pre><code><span class="comment"># Benchmark localhost:6379 for 60s (defaults)</span>
+<span class="cmd">valkey-lab</span>
+
+<span class="comment"># Custom host, 16 connections, pipeline depth 32</span>
+<span class="cmd">valkey-lab</span> <span class="flag">-h</span> <span class="value">10.0.0.1</span> <span class="flag">-c</span> <span class="value">16</span> <span class="flag">-P</span> <span class="value">32</span>
+
+<span class="comment"># 30-second run, GET-only workload</span>
+<span class="cmd">valkey-lab</span> <span class="flag">-d</span> <span class="value">30s</span> <span class="flag">-r</span> <span class="value">100:0</span>
+
+<span class="comment"># Find max throughput under p999 &lt; 1ms SLO</span>
+<span class="cmd">valkey-lab</span> <span class="flag">saturate</span> <span class="flag">--slo-p999</span> <span class="value">1ms</span></code></pre>
+    </div>
+  </div>
+</section>
+
+<!-- ============ CLI Reference ============ -->
+<section id="cli">
+  <div class="container">
+    <span class="section-tag fade-up">CLI Reference</span>
+    <h2 class="section-title fade-up">Flags</h2>
+
+    <h3 class="fade-up" style="margin-top: 2rem; font-size: 1.1rem; color: var(--text-dim);">Tier 1 &#8212; Common</h3>
+    <div class="table-wrapper fade-up">
+      <table>
+        <thead><tr><th>Flag</th><th>Short</th><th>Default</th><th>Description</th></tr></thead>
+        <tbody>
+          <tr><td><code>--host</code></td>       <td><code>-h</code></td><td>127.0.0.1</td><td>Server hostname or IP</td></tr>
+          <tr><td><code>--port</code></td>       <td><code>-p</code></td><td>6379</td>     <td>Server port</td></tr>
+          <tr><td><code>--duration</code></td>   <td><code>-d</code></td><td>60s</td>      <td>Test duration</td></tr>
+          <tr><td><code>--connections</code></td><td><code>-c</code></td><td>1</td>        <td>Number of connections</td></tr>
+          <tr><td><code>--pipeline</code></td>   <td><code>-P</code></td><td>1</td>        <td>Pipeline depth per connection</td></tr>
+          <tr><td><code>--threads</code></td>    <td><code>-t</code></td><td>CPU count</td><td>Worker threads</td></tr>
+          <tr><td><code>--ratio</code></td>      <td><code>-r</code></td><td>80:20</td>    <td>GET:SET ratio</td></tr>
+          <tr><td><code>--keyspace</code></td>   <td><code>-n</code></td><td>1000000</td>  <td>Unique keys</td></tr>
+          <tr><td><code>--data-size</code></td>  <td><code>-s</code></td><td>64</td>       <td>Value size in bytes</td></tr>
+          <tr><td><code>--cluster</code></td>    <td></td>              <td>off</td>       <td>Enable Cluster mode</td></tr>
+          <tr><td><code>--tls</code></td>        <td></td>              <td>off</td>       <td>Enable TLS</td></tr>
+          <tr><td><code>--output</code></td>     <td><code>-o</code></td><td>clean</td>    <td>Output format</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h3 class="fade-up" style="margin-top: 2rem; font-size: 1.1rem; color: var(--text-dim);">Tier 2 &#8212; Power User</h3>
+    <div class="table-wrapper fade-up">
+      <table>
+        <thead><tr><th>Flag</th><th>Default</th><th>Description</th></tr></thead>
+        <tbody>
+          <tr><td><code>--warmup</code></td>          <td>10s</td>        <td>Warmup before recording</td></tr>
+          <tr><td><code>--key-size</code></td>        <td>16</td>         <td>Key size in bytes</td></tr>
+          <tr><td><code>--distribution</code></td>    <td>uniform</td>    <td>Key distribution: uniform or zipf</td></tr>
+          <tr><td><code>--rate-limit</code></td>      <td>unlimited</td>  <td>Max req/s</td></tr>
+          <tr><td><code>--prefill</code></td>         <td>off</td>        <td>Prefill all keys before benchmark</td></tr>
+          <tr><td><code>--backfill</code></td>        <td>off</td>        <td>SET on GET miss</td></tr>
+          <tr><td><code>--parquet</code></td>         <td>none</td>       <td>Parquet output file</td></tr>
+          <tr><td><code>--cpu-list</code></td>        <td>none</td>       <td>Pin threads to CPUs</td></tr>
+          <tr><td><code>--resp3</code></td>           <td>off</td>        <td>Use RESP3 protocol</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h3 class="fade-up" style="margin-top: 2rem; font-size: 1.1rem; color: var(--text-dim);">Saturate Flags</h3>
+    <div class="table-wrapper fade-up">
+      <table>
+        <thead><tr><th>Flag</th><th>Default</th><th>Description</th></tr></thead>
+        <tbody>
+          <tr><td><code>--slo-p50</code></td>         <td>none</td>      <td>p50 latency SLO</td></tr>
+          <tr><td><code>--slo-p99</code></td>         <td>none</td>      <td>p99 latency SLO</td></tr>
+          <tr><td><code>--slo-p999</code></td>        <td>none</td>      <td>p999 latency SLO</td></tr>
+          <tr><td><code>--start-rate</code></td>      <td>1000</td>      <td>Starting req/s</td></tr>
+          <tr><td><code>--step</code></td>            <td>1.05</td>      <td>Rate multiplier per step</td></tr>
+          <tr><td><code>--sample-window</code></td>   <td>5</td>         <td>Seconds at each rate</td></tr>
+          <tr><td><code>--max-rate</code></td>        <td>100000000</td> <td>Absolute rate ceiling</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</section>
+
+<!-- ============ CTA ============ -->
+<section class="cta-section">
+  <div class="container">
+    <h2 class="section-title fade-up">Ready to find your server's limit?</h2>
+    <div class="cta-buttons fade-up">
+      <a href="https://github.com/cachecannon/cachecannon" class="btn btn-primary" target="_blank" rel="noopener">View on GitHub</a>
+      <a href="https://github.com/cachecannon/cachecannon/blob/main/VALKEY-LAB.md" class="btn btn-secondary" target="_blank" rel="noopener">Read the Docs</a>
+    </div>
+  </div>
+</section>
+
+<!-- ============ Footer ============ -->
+<footer>
+  <div class="container">
+    <p>
+      valkey-lab is part of <a href="https://github.com/cachecannon/cachecannon">cachecannon</a>.
+      MIT / Apache-2.0 license.
+    </p>
+  </div>
+</footer>
+
+<script src="script.js"></script>
+</body>
+</html>

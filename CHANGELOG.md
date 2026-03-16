@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- Rename valkey-bench binary to valkey-lab
+- Add product page (docs/index.html)
+
 ## [0.0.7] - 2026-03-10
 
 ### Fixed

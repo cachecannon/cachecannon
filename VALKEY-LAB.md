@@ -1,4 +1,4 @@
-# valkey-bench
+# valkey-lab
 
 A high-performance Valkey/Redis benchmark tool powered by [cachecannon](https://github.com/cachecannon/cachecannon).
 
@@ -8,22 +8,22 @@ Uses `io_uring` for kernel-bypassed I/O, per-connection pipelining, and multi-th
 
 ```bash
 # Benchmark localhost:6379 for 60 seconds (defaults)
-valkey-bench
+valkey-lab
 
 # Custom host, 16 connections, pipeline depth 32
-valkey-bench -h 10.0.0.1 -c 16 -P 32
+valkey-lab -h 10.0.0.1 -c 16 -P 32
 
 # 30-second run, 100:0 GET-only workload, 1M keys
-valkey-bench -d 30s -r 100:0 -n 1000000
+valkey-lab -d 30s -r 100:0 -n 1000000
 
 # Find maximum throughput under a p99.9 < 1ms SLO
-valkey-bench saturate --slo-p999 1ms --start-rate 100000
+valkey-lab saturate --slo-p999 1ms --start-rate 100000
 ```
 
 ## Installation
 
 ```bash
-cargo install --path . --bin valkey-bench
+cargo install --path . --bin valkey-lab
 ```
 
 Requires Linux (io_uring). Tested on kernel 5.10+.
@@ -74,9 +74,9 @@ Flag | Default | Description
 Automatically ramps request rate until latency SLOs are breached, then reports the maximum compliant throughput.
 
 ```bash
-valkey-bench saturate --slo-p999 1ms
-valkey-bench saturate --slo-p99 500us --slo-p999 2ms --start-rate 50000
-valkey-bench saturate --slo-p999 1ms -c 16 -P 32 --start-rate 500000 --step 1.1
+valkey-lab saturate --slo-p999 1ms
+valkey-lab saturate --slo-p99 500us --slo-p999 2ms --start-rate 50000
+valkey-lab saturate --slo-p999 1ms -c 16 -P 32 --start-rate 500000 --step 1.1
 ```
 
 Flag | Default | Description
@@ -125,40 +125,40 @@ MAX COMPLIANT THROUGHPUT: 525K req/s
 View Parquet benchmark results in a browser.
 
 ```bash
-valkey-bench view results.parquet
+valkey-lab view results.parquet
 ```
 
 ## Examples
 
 ```bash
 # Quick sanity check
-valkey-bench -d 10s
+valkey-lab -d 10s
 
 # High-throughput test
-valkey-bench -c 32 -P 64 -t 8
+valkey-lab -c 32 -P 64 -t 8
 
 # Cluster mode with TLS
-valkey-bench --cluster --tls -h cluster.example.com
+valkey-lab --cluster --tls -h cluster.example.com
 
 # Write-heavy workload with Zipfian distribution
-valkey-bench -r 20:80 --distribution zipf -s 512
+valkey-lab -r 20:80 --distribution zipf -s 512
 
 # Prefill cache, then benchmark GETs only
-valkey-bench --prefill -r 100:0
+valkey-lab --prefill -r 100:0
 
 # Rate-limited test for consistent results
-valkey-bench --rate-limit 50000 -c 4
+valkey-lab --rate-limit 50000 -c 4
 
 # Save results for later analysis
-valkey-bench --parquet results.parquet -d 5m
+valkey-lab --parquet results.parquet -d 5m
 
 # Saturation search with high starting rate
-valkey-bench saturate --slo-p999 1ms --start-rate 100000 --step 1.1 -c 16 -P 32
+valkey-lab saturate --slo-p999 1ms --start-rate 100000 --step 1.1 -c 16 -P 32
 ```
 
 ## Relationship to cachecannon
 
-valkey-bench is an additive companion binary that ships alongside cachecannon. It provides a streamlined CLI for the most common use case — benchmarking Valkey/Redis servers — while cachecannon remains the full-featured tool supporting TOML configs, Memcache, Momento, and advanced workflow options.
+valkey-lab is an additive companion binary that ships alongside cachecannon. It provides a streamlined CLI for the most common use case — benchmarking Valkey/Redis servers — while cachecannon remains the full-featured tool supporting TOML configs, Memcache, Momento, and advanced workflow options.
 
 Both binaries share the same engine: io_uring workers, latency histograms, cluster discovery, prefill/backfill, saturation search, and Parquet output.
 

@@ -55,7 +55,7 @@ pub fn run_benchmark(config: Config) -> Result<(), Box<dyn std::error::Error>> {
 /// Run the full benchmark with the given configuration and pre-built
 /// components.
 ///
-/// This is the shared core used by both the `cachecannon` and `valkey-bench`
+/// This is the shared core used by both the `cachecannon` and `valkey-lab`
 /// binaries.  It handles cluster discovery, worker spawning, the
 /// prefill/warmup/run lifecycle, periodic reporting, saturation search, and
 /// final results output.

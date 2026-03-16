@@ -18,7 +18,7 @@ use std::time::Duration;
 /// A drop-in benchmarking CLI compatible with valkey-benchmark conventions,
 /// powered by the cachecannon engine with io_uring and per-connection pipelining.
 #[derive(Parser, Debug)]
-#[command(name = "valkey-bench")]
+#[command(name = "valkey-lab")]
 #[command(version)]
 #[command(args_conflicts_with_subcommands = true)]
 #[command(disable_help_flag = true)]
@@ -261,7 +261,7 @@ fn launch_benchmark(config: Config) -> Result<(), Box<dyn std::error::Error>> {
     let formatter = create_formatter_with_banner(
         config.admin.format,
         config.admin.color,
-        "valkey-bench, powered by cachecannon".to_string(),
+        "valkey-lab, powered by cachecannon".to_string(),
     );
 
     // Print config using the formatter
