@@ -147,19 +147,25 @@
         <span class="terminal-title">valkey-lab -c 16 -P 32 -r 80:20</span>
       </div>
       <div class="terminal-body">
-<span class="line"><span class="t-dim">─────────────────────────────────────────────────────────────────────────────────────</span></span>
-<span class="line"><span class="t-bold">RESULTS (60s)</span></span>
-<span class="line"><span class="t-dim">─────────────────────────────────────────────────────────────────────────────────────</span></span>
-<span class="line"><span class="t-cyan">throughput</span>   531K req/s, 0% errors</span>
-<span class="line"><span class="t-cyan">bandwidth</span>    684 Mbps RX, 312 Mbps TX</span>
-<span class="line"></span>
-<span class="line"><span class="t-cyan">hit rate</span>     79.3% (25.2M hit, 6.6M miss)</span>
-<span class="line"></span>
-<span class="line"><span class="t-cyan">latency       p50       p90       p99      p999     p9999       max</span></span>
-<span class="line"><span class="t-cyan">GET</span>        47 µs     87 µs    154 µs    301 µs    756 µs   1.12 ms</span>
-<span class="line"><span class="t-cyan">SET</span>        52 µs     94 µs    167 µs    334 µs    891 µs   1.45 ms</span>
-<span class="line"></span>
-<span class="line"><span class="t-cyan">connections</span>  16 active, 0 failed</span>
+<span class="line med"><span class="t-cyan">time UTC  req/s      p50      p90      p99     p999    p9999      max  err/s  hit%</span></span>
+<span class="line med"><span class="t-dim">────────  ─────  ───────  ───────  ───────  ───────  ───────  ───────  ─────  ────</span></span>
+<span class="line med"><span class="t-dim">14:30:11</span>  <span class="t-bold">524K</span>  <span class="t-dim">  48 µs</span>  <span class="t-dim">  89 µs</span>  <span class="t-dim"> 156 µs</span>  <span class="t-bold"> 312 µs</span>  <span class="t-dim"> 891 µs</span>  <span class="t-dim">1.24 ms</span>  <span class="t-dim">    0</span>  <span class="t-dim"> 79%</span></span>
+<span class="line med"><span class="t-dim">14:30:12</span>  <span class="t-bold">531K</span>  <span class="t-dim">  47 µs</span>  <span class="t-dim">  87 µs</span>  <span class="t-dim"> 152 µs</span>  <span class="t-bold"> 298 µs</span>  <span class="t-dim"> 756 µs</span>  <span class="t-dim">1.12 ms</span>  <span class="t-dim">    0</span>  <span class="t-dim"> 79%</span></span>
+<span class="line med"><span class="t-dim">14:30:13</span>  <span class="t-bold">528K</span>  <span class="t-dim">  47 µs</span>  <span class="t-dim">  88 µs</span>  <span class="t-dim"> 154 µs</span>  <span class="t-bold"> 305 µs</span>  <span class="t-dim"> 812 µs</span>  <span class="t-dim">1.18 ms</span>  <span class="t-dim">    0</span>  <span class="t-dim"> 79%</span></span>
+<span class="line med"></span>
+<span class="line slow"><span class="t-dim">─────────────────────────────────────────────────────────────────────────────────────</span></span>
+<span class="line slow"><span class="t-bold">RESULTS (60s)</span></span>
+<span class="line slow"><span class="t-dim">─────────────────────────────────────────────────────────────────────────────────────</span></span>
+<span class="line slow"><span class="t-cyan">throughput</span>   <span class="t-bold">531K req/s</span>, 0% errors</span>
+<span class="line slow"><span class="t-cyan">bandwidth</span>    <span class="t-dim">684 Mbps RX, 312 Mbps TX</span></span>
+<span class="line slow"></span>
+<span class="line slow"><span class="t-cyan">hit rate</span>     <span class="t-dim">79.3% (25.2M hit, 6.6M miss)</span></span>
+<span class="line slow"></span>
+<span class="line slow"><span class="t-cyan">latency       p50       p90       p99      p999     p9999       max</span></span>
+<span class="line slow"><span class="t-cyan">GET</span>        <span class="t-dim">47 µs</span>     <span class="t-dim">87 µs</span>    <span class="t-dim">154 µs</span>    <span class="t-bold">301 µs</span>    <span class="t-dim">756 µs</span>   <span class="t-dim">1.12 ms</span></span>
+<span class="line slow"><span class="t-cyan">SET</span>        <span class="t-dim">52 µs</span>     <span class="t-dim">94 µs</span>    <span class="t-dim">167 µs</span>    <span class="t-bold">334 µs</span>    <span class="t-dim">891 µs</span>   <span class="t-dim">1.45 ms</span></span>
+<span class="line slow"></span>
+<span class="line slow"><span class="t-cyan">connections</span>  <span class="t-dim">16 active, 0 failed</span></span>
       </div>
     </div>
   </div>
