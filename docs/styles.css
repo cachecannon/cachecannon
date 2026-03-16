@@ -247,6 +247,20 @@ a:hover { text-decoration: none; }
   color: var(--text-secondary); font-size: 14px; line-height: 1.6;
 }
 
+/* ---- Scenario picker cards ---- */
+.scenario-card {
+  cursor: pointer;
+  user-select: none;
+  padding: 16px 20px;
+}
+.scenario-card h3 { font-size: 14px; margin-bottom: 4px; }
+.scenario-card p { font-size: 13px; }
+.scenario-card.active {
+  border-color: var(--accent);
+  background: rgba(99,102,241,0.08);
+}
+.scenario-card.active h3 { color: var(--accent-light); }
+
 /* ---- Terminal window ---- */
 .terminal {
   background: #0a0a0a;

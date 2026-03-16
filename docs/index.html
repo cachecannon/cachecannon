@@ -50,68 +50,43 @@
     <span class="section-tag fade-up">Get Started</span>
     <h2 class="section-title fade-up">Install, run, analyze</h2>
 
-    <!-- Full animated session: install → run → streaming output -->
-    <div class="terminal fade-up" data-animate style="margin-top: 2rem;">
+    <!-- Scenario picker cards -->
+    <div class="bento-grid scenario-grid" style="margin-top: 2rem;">
+      <div class="bento-card scenario-card active fade-up" data-scenario="default">
+        <h3>Quick start</h3>
+        <p>16 connections, pipeline 32, 80:20 GET:SET</p>
+      </div>
+      <div class="bento-card scenario-card fade-up" data-scenario="zipf">
+        <h3>Realistic workload</h3>
+        <p>Write-heavy with Zipfian hot-key skew</p>
+      </div>
+      <div class="bento-card scenario-card fade-up" data-scenario="prefill">
+        <h3>Warm cache, GETs only</h3>
+        <p>Prefill every key, then benchmark reads</p>
+      </div>
+      <div class="bento-card scenario-card fade-up" data-scenario="ratelimit">
+        <h3>Fixed-rate latency</h3>
+        <p>Pin load to 500K req/s, measure latency</p>
+      </div>
+      <div class="bento-card scenario-card fade-up" data-scenario="saturate">
+        <h3>Saturation search</h3>
+        <p>Find max rate where p999 stays under SLO</p>
+      </div>
+      <div class="bento-card scenario-card fade-up" data-scenario="export">
+        <h3>Export + view</h3>
+        <p>Save time-series to Parquet, open dashboard</p>
+      </div>
+    </div>
+
+    <!-- Interactive terminal (content swapped by JS) -->
+    <div class="terminal fade-up" id="scenario-terminal" style="margin-top: 1.5rem;">
       <div class="terminal-bar">
         <span class="terminal-dot r"></span>
         <span class="terminal-dot y"></span>
         <span class="terminal-dot g"></span>
-        <span class="terminal-title">~/bench</span>
+        <span class="terminal-title" id="scenario-title">~/bench</span>
       </div>
-      <div class="terminal-body">
-<span class="line"><span class="t-dim">$</span> <span class="t-cyan">cargo install</span> --path . --bin valkey-lab</span>
-<span class="line"><span class="t-dim">  Installing valkey-lab v0.0.6</span></span>
-<span class="line"><span class="t-dim">  Installed to ~/.cargo/bin/valkey-lab</span></span>
-<span class="line"></span>
-<span class="line"><span class="t-dim">$</span> <span class="t-cyan">valkey-lab</span> -c 16 -P 32 -r 80:20</span>
-<span class="line"></span>
-<span class="line"><span class="t-bold"><span class="t-cyan">valkey-lab, powered by cachecannon</span></span></span>
-<span class="line"><span class="t-dim">──────────────────</span></span>
-<span class="line"><span class="t-cyan">target</span>     127.0.0.1:6379 (Resp)</span>
-<span class="line"><span class="t-cyan">workload</span>   1M keys, 16B key, 64B value, 80:20 GET:SET</span>
-<span class="line"><span class="t-cyan">threads</span>    8</span>
-<span class="line"><span class="t-cyan">conns</span>      16, pipeline 32</span>
-<span class="line med"></span>
-<span class="line med">[precheck ok 12ms]</span>
-<span class="line med">[warmup 10s]</span>
-<span class="line med">[running 60s]</span>
-<span class="line med"></span>
-<span class="line med"><span class="t-cyan">time UTC  req/s      p50      p90      p99     p999    p9999      max  err/s  hit%</span></span>
-<span class="line med"><span class="t-dim">────────  ─────  ───────  ───────  ───────  ───────  ───────  ───────  ─────  ────</span></span>
-<span class="line med"><span class="t-dim">14:30:11</span>  <span class="t-bold">524K</span>  <span class="t-dim">  48 µs</span>  <span class="t-dim">  89 µs</span>  <span class="t-dim"> 156 µs</span>  <span class="t-bold"> 312 µs</span>  <span class="t-dim"> 891 µs</span>  <span class="t-dim">1.24 ms</span>  <span class="t-dim">    0</span>  <span class="t-dim"> 79%</span></span>
-<span class="line med"><span class="t-dim">14:30:12</span>  <span class="t-bold">531K</span>  <span class="t-dim">  47 µs</span>  <span class="t-dim">  87 µs</span>  <span class="t-dim"> 152 µs</span>  <span class="t-bold"> 298 µs</span>  <span class="t-dim"> 756 µs</span>  <span class="t-dim">1.12 ms</span>  <span class="t-dim">    0</span>  <span class="t-dim"> 79%</span></span>
-<span class="line med"><span class="t-dim">14:30:13</span>  <span class="t-bold">528K</span>  <span class="t-dim">  47 µs</span>  <span class="t-dim">  88 µs</span>  <span class="t-dim"> 154 µs</span>  <span class="t-bold"> 305 µs</span>  <span class="t-dim"> 812 µs</span>  <span class="t-dim">1.18 ms</span>  <span class="t-dim">    0</span>  <span class="t-dim"> 79%</span></span>
-<span class="line med"><span class="t-dim">14:30:14</span>  <span class="t-bold">530K</span>  <span class="t-dim">  47 µs</span>  <span class="t-dim">  87 µs</span>  <span class="t-dim"> 153 µs</span>  <span class="t-bold"> 301 µs</span>  <span class="t-dim"> 778 µs</span>  <span class="t-dim">1.15 ms</span>  <span class="t-dim">    0</span>  <span class="t-dim"> 79%</span></span>
-<span class="line med terminal-cursor"></span>
-      </div>
-    </div>
-
-    <!-- Compact scenario list -->
-    <div class="bento-grid" style="margin-top: 1.5rem;">
-      <div class="bento-card fade-up">
-        <h3>Realistic workload</h3>
-        <p><code>valkey-lab -r 20:80 --distribution zipf</code><br/>Write-heavy with hot-key skew</p>
-      </div>
-      <div class="bento-card fade-up">
-        <h3>Warm cache, GETs only</h3>
-        <p><code>valkey-lab --prefill -r 100:0</code><br/>Prefill every key, then benchmark reads</p>
-      </div>
-      <div class="bento-card fade-up">
-        <h3>Fixed-rate latency</h3>
-        <p><code>valkey-lab --rate-limit 500000</code><br/>Pin load to 500K req/s, measure latency</p>
-      </div>
-      <div class="bento-card fade-up">
-        <h3>Saturation search</h3>
-        <p><code>valkey-lab saturate --slo-p999 1ms</code><br/>Find max rate where p999 stays under SLO</p>
-      </div>
-      <div class="bento-card fade-up">
-        <h3>Export + view</h3>
-        <p><code>valkey-lab --parquet results.parquet</code><br/>Save time-series, open web dashboard</p>
-      </div>
-      <div class="bento-card fade-up">
-        <h3>Cluster + TLS</h3>
-        <p><code>valkey-lab --cluster --tls</code><br/>Auto-discover slots, encrypt connections</p>
-      </div>
+      <div class="terminal-body" id="scenario-body"></div>
     </div>
 
     <div class="prose fade-up" style="margin-top: 1.25rem;">
