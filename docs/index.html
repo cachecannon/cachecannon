@@ -7,45 +7,130 @@
   <meta name="description" content="Find the maximum throughput your Valkey server can sustain under latency SLOs." />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet" />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet" />
   <link rel="stylesheet" href="styles.css" />
 </head>
 <body>
 
 <!-- Nav -->
-<nav>
-  <div class="container">
-    <a href="#" class="nav-logo"><span>valkey</span>-lab</a>
+<nav class="nav" id="nav">
+  <div class="nav-inner">
+    <a href="#" class="nav-logo"><span class="accent">valkey</span>-lab</a>
     <div class="nav-links">
       <a href="#why">Why</a>
       <a href="#how">How It Works</a>
       <a href="#saturate">Saturate</a>
       <a href="#start">Get Started</a>
       <button id="theme-toggle" aria-label="Toggle theme">&#9790;</button>
-      <a href="https://github.com/cachecannon/cachecannon" class="btn-sm" target="_blank" rel="noopener">GitHub</a>
+      <a href="https://github.com/cachecannon/cachecannon" class="nav-github" target="_blank" rel="noopener">GitHub</a>
     </div>
   </div>
 </nav>
 
 <!-- ============ Hero ============ -->
-<section class="hero" id="top">
-  <div class="container">
-    <h1><span>valkey</span>-lab</h1>
-    <p class="hero-sub">
-      What's the maximum throughput your Valkey server can sustain
-      without breaking your latency SLO? One command to find out.
+<section class="hero">
+  <div class="hero-gradient"></div>
+  <div class="hero-content">
+    <div class="hero-badge fade-up">Benchmarking &middot; Capacity Planning &middot; SLO Validation</div>
+    <h1 class="fade-up">Know your<br><span class="gradient-text">server's limit.</span></h1>
+    <p class="hero-subtitle fade-up">
+      valkey-lab finds the maximum throughput your Valkey server can sustain
+      without breaking your latency SLO. One command. One answer.
     </p>
-    <div class="hero-cta">
+    <div class="hero-actions fade-up">
       <a href="#start" class="btn btn-primary">Get Started</a>
       <a href="#how" class="btn btn-secondary">See It Run</a>
     </div>
   </div>
 </section>
 
-<!-- ============ Hero terminal — live benchmark output ============ -->
-<section style="padding-top: 0; padding-bottom: 2rem;">
+<!-- ============ Why We Built This ============ -->
+<section class="section" id="why">
   <div class="container">
-    <div class="terminal fade-up" data-animate>
+    <span class="section-tag fade-up">Why We Built This</span>
+    <h2 class="section-title fade-up">Benchmarking is broken<br>for capacity planning.</h2>
+
+    <div class="prose fade-up" style="margin-top: 1.5rem;">
+      <p>
+        Every production Valkey deployment has a throughput ceiling &mdash; the point
+        where tail latency spikes and your SLOs break. Knowing that number
+        <strong>before you ship</strong> is the difference between capacity planning
+        and firefighting at 2&nbsp;AM.
+      </p>
+      <p>
+        The built-in <code>valkey-benchmark</code> can't answer this question. It runs
+        one command type at a time, has no rate control, and gives you a single
+        max-throughput number that tells you nothing about what happens to latency
+        at your actual production load.
+      </p>
+      <p>
+        To find out "what's the highest request rate where my p999 stays under 1&nbsp;ms?",
+        you'd need to run <code>valkey-benchmark</code> dozens of times, manually
+        adjusting the rate limit each time, recording latency at each step, and
+        hoping nothing drifts between runs. Nobody does this.
+      </p>
+      <p>
+        <strong>valkey-lab automates it in one command.</strong> It starts at a low
+        request rate, ramps up by 5% each step, and stops after three consecutive
+        SLO violations. The result is the maximum compliant throughput &mdash; the
+        number you actually need for capacity planning.
+      </p>
+    </div>
+
+    <div class="bento-grid" style="margin-top: 3rem;">
+      <div class="bento-card fade-up">
+        <h3>Mixed workloads</h3>
+        <p>Real traffic is GETs and SETs together. valkey-lab runs them concurrently at your chosen ratio so you measure how they actually contend.</p>
+      </div>
+      <div class="bento-card fade-up">
+        <h3>Rate control</h3>
+        <p>Set a target request rate and measure latency at that specific load &mdash; not just flat-out max throughput.</p>
+      </div>
+      <div class="bento-card fade-up">
+        <h3>Saturation search</h3>
+        <p>Define your latency SLO. valkey-lab finds the exact throughput ceiling automatically.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<div class="divider"></div>
+
+<!-- ============ How It Works ============ -->
+<section class="section" id="how">
+  <div class="container">
+    <span class="section-tag fade-up">How It Works</span>
+    <h2 class="section-title fade-up">Five phases.<br>Zero guesswork.</h2>
+    <p class="section-subtitle fade-up">
+      Every benchmark run follows the same disciplined sequence. Each phase is
+      visible in the output so you always know where you are.
+    </p>
+
+    <div class="bento-grid" style="grid-template-columns: repeat(5, 1fr); margin-top: 2.5rem;">
+      <div class="bento-card fade-up" style="padding: 18px;">
+        <h3 style="font-size: 14px;">1. Precheck</h3>
+        <p style="font-size: 13px;">Verify the server is reachable.</p>
+      </div>
+      <div class="bento-card fade-up" style="padding: 18px;">
+        <h3 style="font-size: 14px;">2. Prefill</h3>
+        <p style="font-size: 13px;">Write every key for a warm cache.</p>
+      </div>
+      <div class="bento-card fade-up" style="padding: 18px;">
+        <h3 style="font-size: 14px;">3. Warmup</h3>
+        <p style="font-size: 13px;">Let caches stabilize unrecorded.</p>
+      </div>
+      <div class="bento-card fade-up" style="padding: 18px;">
+        <h3 style="font-size: 14px;">4. Running</h3>
+        <p style="font-size: 13px;">Record per-second metrics.</p>
+      </div>
+      <div class="bento-card fade-up" style="padding: 18px;">
+        <h3 style="font-size: 14px;">5. Results</h3>
+        <p style="font-size: 13px;">Latency breakdowns and summary.</p>
+      </div>
+    </div>
+
+    <!-- Live output terminal -->
+    <div class="terminal fade-up" data-animate style="margin-top: 2.5rem;">
       <div class="terminal-bar">
         <span class="terminal-dot r"></span>
         <span class="terminal-dot y"></span>
@@ -53,7 +138,7 @@
         <span class="terminal-title">valkey-lab -h 10.0.0.1 -c 16 -P 32 -d 60s</span>
       </div>
       <div class="terminal-body">
-<span class="line"><span class="t-bold t-cyan">valkey-lab, powered by cachecannon</span></span>
+<span class="line"><span class="t-bold"><span class="t-cyan">valkey-lab, powered by cachecannon</span></span></span>
 <span class="line"><span class="t-dim">──────────────────</span></span>
 <span class="line"><span class="t-cyan">target</span>     10.0.0.1:6379 (Resp)</span>
 <span class="line"><span class="t-cyan">workload</span>   1M keys, 16B key, 64B value, 80:20 GET:SET</span>
@@ -74,79 +159,9 @@
 <span class="line med terminal-cursor"></span>
       </div>
     </div>
-  </div>
-</section>
-
-<!-- ============ Why ============ -->
-<section id="why">
-  <div class="container">
-    <span class="section-tag fade-up">The Question</span>
-    <h2 class="section-title fade-up">How many requests can your server actually handle?</h2>
-    <p class="section-desc fade-up">
-      Every production Valkey deployment has a throughput ceiling &mdash; the point where
-      tail latency spikes and SLOs break. Knowing that number before you ship is the
-      difference between capacity planning and firefighting at 2 AM.
-    </p>
-    <p class="section-desc fade-up" style="margin-top: 1rem;">
-      The built-in <code>valkey-benchmark</code> can't answer this question. It runs one command
-      type at a time, has no rate control, and gives you max-throughput numbers that tell you
-      nothing about behavior at your actual production load.
-    </p>
-
-    <div class="cards-grid">
-      <div class="card fade-up">
-        <h3>Mixed workloads</h3>
-        <p>Real traffic is GETs and SETs together. valkey-lab runs them concurrently at your chosen ratio so you see how they contend.</p>
-      </div>
-      <div class="card fade-up">
-        <h3>Rate control</h3>
-        <p>Set a target request rate to measure latency at a specific load point &mdash; not just flat-out max throughput.</p>
-      </div>
-      <div class="card fade-up">
-        <h3>Saturation search</h3>
-        <p>Automatically ramp load until your SLO breaks. One command finds the exact ceiling.</p>
-      </div>
-    </div>
-  </div>
-</section>
-
-<div class="divider"></div>
-
-<!-- ============ How It Works ============ -->
-<section id="how">
-  <div class="container">
-    <span class="section-tag fade-up">How It Works</span>
-    <h2 class="section-title fade-up">Five phases, zero guesswork</h2>
-    <p class="section-desc fade-up">
-      Every benchmark run follows the same disciplined sequence. Phases are visible in the output
-      so you always know where you are.
-    </p>
-
-    <div class="cards-grid" style="grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); margin-top: 2rem;">
-      <div class="card fade-up">
-        <h3>1. Precheck</h3>
-        <p>Verify the server is reachable before committing to a long run.</p>
-      </div>
-      <div class="card fade-up">
-        <h3>2. Prefill</h3>
-        <p>Optionally write every key so GETs start from a warm cache.</p>
-      </div>
-      <div class="card fade-up">
-        <h3>3. Warmup</h3>
-        <p>Run the workload without recording. Let caches and JIT stabilize.</p>
-      </div>
-      <div class="card fade-up">
-        <h3>4. Running</h3>
-        <p>Record per-second samples &mdash; throughput, latency percentiles, errors, hit rate.</p>
-      </div>
-      <div class="card fade-up">
-        <h3>5. Results</h3>
-        <p>Final summary with GET/SET latency breakdowns and bandwidth.</p>
-      </div>
-    </div>
 
     <!-- Results terminal -->
-    <div class="terminal fade-up" data-animate style="margin-top: 2.5rem;">
+    <div class="terminal fade-up" data-animate style="margin-top: 1.5rem;">
       <div class="terminal-bar">
         <span class="terminal-dot r"></span>
         <span class="terminal-dot y"></span>
@@ -175,21 +190,26 @@
 <div class="divider"></div>
 
 <!-- ============ Saturation Search ============ -->
-<section id="saturate">
+<section class="section" id="saturate">
   <div class="container">
     <span class="section-tag fade-up">Saturation Search</span>
-    <h2 class="section-title fade-up">Find the ceiling automatically</h2>
-    <p class="section-desc fade-up">
-      Define your latency SLO. valkey-lab starts at a low request rate, increases by 5%
-      each step, and stops after three consecutive failures. The result is the maximum
-      throughput that stays within your SLO.
+    <h2 class="section-title fade-up">Find the ceiling<br><span class="gradient-text">automatically.</span></h2>
+    <p class="section-subtitle fade-up">
+      Define your latency SLO. valkey-lab starts at a low request rate, increases
+      geometrically, and stops after three consecutive failures. The result is the
+      maximum throughput that stays within your SLO.
     </p>
 
-    <div class="code-block fade-up">
+    <div class="code-block fade-up" style="margin-top: 2rem;">
       <pre><code><span class="cmd">valkey-lab</span> <span class="flag">saturate</span> <span class="flag">--slo-p999</span> <span class="value">1ms</span> <span class="flag">-c</span> <span class="value">16</span> <span class="flag">-P</span> <span class="value">32</span></code></pre>
     </div>
 
-    <!-- Saturation terminal — matches clean.rs output exactly -->
+    <!-- Saturation terminal — colors match clean.rs exactly:
+         verdict header: green for PASS, red for ALL fails
+         fail_reason line: yellow for throughput, red for latency
+         SLO/Result: plain text, bold on numbers
+         Headroom: dim
+         MAX COMPLIANT: green -->
     <div class="terminal fade-up" data-animate style="margin-top: 1.5rem;">
       <div class="terminal-bar">
         <span class="terminal-dot r"></span>
@@ -216,7 +236,7 @@
 <span class="line slow"><span class="t-dim">━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</span></span>
 <span class="line slow"></span>
 <span class="line slow"><span class="t-dim">━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</span></span>
-<span class="line slow"><span class="t-yellow">STEP 3 — FAIL — Throughput Limited</span></span>
+<span class="line slow"><span class="t-red">STEP 3 — FAIL — Throughput Limited</span></span>
 <span class="line slow"></span>
 <span class="line slow">SLO:    551K @ p999 ≤ 1ms</span>
 <span class="line slow">Result: <span class="t-bold">412K</span> @ p999=<span class="t-bold">845 µs</span></span>
@@ -241,7 +261,7 @@
 <div class="divider"></div>
 
 <!-- ============ Comparison ============ -->
-<section id="compare">
+<section class="section" id="compare">
   <div class="container">
     <span class="section-tag fade-up">Comparison</span>
     <h2 class="section-title fade-up">valkey-lab vs. existing tools</h2>
@@ -249,12 +269,7 @@
     <div class="table-wrapper fade-up">
       <table>
         <thead>
-          <tr>
-            <th>Capability</th>
-            <th>valkey-lab</th>
-            <th>valkey-benchmark</th>
-            <th>memtier</th>
-          </tr>
+          <tr><th>Capability</th><th>valkey-lab</th><th>valkey-benchmark</th><th>memtier</th></tr>
         </thead>
         <tbody>
           <tr><td>Mixed GET/SET workload</td>          <td class="check">&#10003;</td><td class="cross">&#10005;</td><td class="check">&#10003;</td></tr>
@@ -275,7 +290,7 @@
 <div class="divider"></div>
 
 <!-- ============ Get Started ============ -->
-<section id="start">
+<section class="section" id="start">
   <div class="container">
     <span class="section-tag fade-up">Get Started</span>
     <h2 class="section-title fade-up">Install and run</h2>
@@ -298,19 +313,22 @@
 <span class="cmd">valkey-lab</span> <span class="flag">view</span> <span class="value">results.parquet</span></code></pre>
     </div>
 
-    <p class="fade-up" style="margin-top: 1.5rem; color: var(--text-dim); font-size: 0.9rem;">
-      Flags mirror <code>valkey-benchmark</code> conventions: <code>-h</code>, <code>-p</code>,
-      <code>-c</code>, <code>-P</code>, <code>-d</code>, <code>-t</code>.
-      Full reference in <a href="https://github.com/cachecannon/cachecannon/blob/main/VALKEY-LAB.md">VALKEY-LAB.md</a>.
-    </p>
+    <div class="prose fade-up" style="margin-top: 1.5rem;">
+      <p>
+        Flags mirror <code>valkey-benchmark</code> conventions: <code>-h</code>,
+        <code>-p</code>, <code>-c</code>, <code>-P</code>, <code>-d</code>,
+        <code>-t</code>. Full reference in
+        <a href="https://github.com/cachecannon/cachecannon/blob/main/VALKEY-LAB.md" style="color: var(--accent-light);">VALKEY-LAB.md</a>.
+      </p>
+    </div>
   </div>
 </section>
 
 <!-- ============ CTA ============ -->
-<section class="cta-section">
+<section class="section cta-section">
   <div class="container">
-    <h2 class="section-title fade-up">Stop guessing. Find the number.</h2>
-    <div class="cta-buttons fade-up">
+    <h2 class="section-title fade-up">Stop guessing.<br><span class="gradient-text">Find the number.</span></h2>
+    <div class="cta-actions fade-up">
       <a href="https://github.com/cachecannon/cachecannon" class="btn btn-primary" target="_blank" rel="noopener">GitHub</a>
       <a href="https://github.com/cachecannon/cachecannon/blob/main/VALKEY-LAB.md" class="btn btn-secondary" target="_blank" rel="noopener">Documentation</a>
     </div>
