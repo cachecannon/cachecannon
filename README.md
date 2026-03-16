@@ -69,7 +69,7 @@ cachecannon view results.parquet
 ## Features
 
 - **Multiple protocols** — Valkey/Redis RESP2/RESP3, Memcache ASCII/binary, Momento gRPC, Ping
-- **io_uring I/O** — Same high-performance krio framework as the server (Linux 6.0+)
+- **io_uring I/O** — Same high-performance ringline framework as the server (Linux 6.0+)
 - **Request pipelining** — Configurable pipeline depth per connection
 - **Latency histograms** — p50, p90, p99, p99.9, p99.99 with userspace or kernel timestamps
 - **[Prefill and backfill](docs/guide.md#prefill)** — Pre-populate the cache or auto-SET on miss (cache-aside)

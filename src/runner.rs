@@ -220,7 +220,7 @@ pub fn run_benchmark_full(
         None
     };
 
-    let krio_config = ringline::Config {
+    let ringline_config = ringline::Config {
         recv_buffer: ringline::RecvBufferConfig {
             // Use 256KB buffers for io_uring to reduce CQE overhead with large values.
             ring_size: 1024u16.next_power_of_two(),
@@ -241,7 +241,7 @@ pub fn run_benchmark_full(
     // Launch ringline workers (client-only, no bind)
     tracing::debug!(num_threads, "launching ringline workers");
     let (shutdown_handle, handles) =
-        RinglineBuilder::new(krio_config).launch::<crate::worker::BenchHandler>()?;
+        RinglineBuilder::new(ringline_config).launch::<crate::worker::BenchHandler>()?;
     tracing::debug!(workers = handles.len(), "ringline workers launched");
 
     // Start in precheck phase
