@@ -123,12 +123,61 @@ a:hover { text-decoration: none; }
 }
 #theme-toggle:hover { border-color: var(--border-hover); color: var(--text-primary); }
 
+/* ---- Install banner ---- */
+.install-banner {
+  position: fixed;
+  top: 60px;
+  left: 0;
+  right: 0;
+  z-index: 999;
+  background: rgba(99,102,241,0.08);
+  border-bottom: 1px solid rgba(99,102,241,0.2);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  padding: 8px 24px;
+  text-align: center;
+}
+[data-theme="light"] .install-banner {
+  background: rgba(99,102,241,0.06);
+}
+.install-inner {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+}
+.install-inner code {
+  font-family: var(--mono);
+  font-size: 13px;
+  color: var(--text-primary);
+  letter-spacing: -0.01em;
+}
+.copy-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  color: var(--text-secondary);
+  border-radius: 6px;
+  padding: 4px 8px;
+  cursor: pointer;
+  transition: all var(--transition);
+}
+.copy-btn:hover {
+  border-color: var(--border-hover);
+  color: var(--text-primary);
+}
+.copy-btn.copied {
+  color: var(--green);
+  border-color: var(--green);
+}
+
 /* ---- Hero ---- */
 .hero {
   position: relative;
   min-height: 70vh;
   display: flex; align-items: center; justify-content: center;
-  padding: 120px 24px 40px;
+  padding: 140px 24px 40px;
   text-align: center;
   overflow: hidden;
 }
