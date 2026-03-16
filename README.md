@@ -5,7 +5,7 @@ A high-performance load generator for cache servers with support for multiple pr
 ## Installation
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/cachecannon/cachecannon/main/scripts/install.sh | bash
+curl -fsSL https://cachecannon.cc/install.sh | bash
 ```
 
 This configures the package repository for your OS and installs cachecannon. Future updates come through `apt upgrade` or `dnf upgrade`. Supports Debian/Ubuntu and RHEL/Fedora on amd64 and arm64.
