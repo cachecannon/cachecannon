@@ -327,6 +327,14 @@
     }
   };
 
+  /* ---- Nav scroll ---- */
+  var nav = document.querySelector(".nav");
+  if (nav) {
+    window.addEventListener("scroll", function () {
+      nav.classList.toggle("scrolled", window.scrollY > 10);
+    });
+  }
+
   /* ---- Theme toggle ---- */
   var toggle = document.getElementById("theme-toggle");
   var root = document.documentElement;
