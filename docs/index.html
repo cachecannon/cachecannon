@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>valkey-lab</title>
-  <meta name="description" content="Benchmark tool for Valkey/Redis with mixed workloads, rate limiting, saturation search, and per-second tail latency visibility." />
+  <meta name="description" content="Deep-dive benchmarking tool for Valkey and Redis. Mixed workloads, rate control, saturation search, per-second tail latency, and exportable results." />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet" />
@@ -17,7 +17,7 @@
   <div class="nav-inner">
     <a href="#" class="nav-logo"><span class="accent">valkey</span>-lab</a>
     <div class="nav-links">
-      <a href="#gaps">Gaps</a>
+      <a href="#gaps">Why a lab?</a>
       <a href="#features">Features</a>
       <a href="#saturate">Saturate</a>
       <a href="#start">Get Started</a>
@@ -31,11 +31,11 @@
 <section class="hero">
   <div class="hero-gradient"></div>
   <div class="hero-content">
-    <h1 class="fade-up"><span class="accent">valkey</span>-lab</h1>
+    <h1 class="fade-up"><span class="gradient-text">valkey-lab</span></h1>
     <p class="hero-subtitle fade-up">
-      A benchmark CLI for Valkey and Redis that fills the gaps
-      in <code>valkey-benchmark</code> &mdash; mixed workloads, rate control,
-      prefill, tail latency per second, and automatic saturation search.
+      A deep-dive benchmarking tool for Valkey and Redis.
+      Go beyond quick throughput checks. Mix workloads, control rate,
+      watch tail latency per second, and find your server's saturation point.
     </p>
     <div class="hero-actions fade-up">
       <a href="#start" class="btn btn-primary">Get Started</a>
@@ -47,30 +47,30 @@
 <!-- ============ Motivation ============ -->
 <section class="section" id="gaps">
   <div class="container">
-    <span class="section-tag fade-up">Motivation</span>
-    <h2 class="section-title fade-up">What valkey-benchmark doesn't do</h2>
+    <span class="section-tag fade-up">Why a lab?</span>
+    <h2 class="section-title fade-up">Go deeper than a quick benchmark</h2>
 
     <div class="prose fade-up" style="margin-top: 1.25rem;">
       <p>
-        <code>valkey-benchmark</code> is great for quick throughput checks. But it runs
-        one command type at a time, has no rate limiter, no warmup phase, no cache prefill,
-        and no way to answer "what's the max rate where p999 stays under X?"
-        For capacity planning, you need more control.
+        <code>valkey-benchmark</code> is a solid tool for quick throughput checks.
+        valkey-lab builds on that foundation with controls for the questions that
+        come next: what happens under mixed traffic, at a controlled rate,
+        with realistic key distributions, over time?
       </p>
     </div>
 
     <div class="bento-grid" style="margin-top: 2rem;">
       <div class="bento-card fade-up">
         <h3>Mixed GET/SET</h3>
-        <p><code>valkey-benchmark</code> benchmarks one command at a time. valkey-lab runs GETs and SETs concurrently at any ratio (<code>-r 80:20</code>) so you see real contention.</p>
+        <p>Run GETs and SETs concurrently at any ratio (<code>-r 80:20</code>) to see how your server handles real contention patterns.</p>
       </div>
       <div class="bento-card fade-up">
         <h3>Rate limiting</h3>
-        <p>Without rate control you only measure max throughput. <code>--rate-limit 500000</code> lets you measure latency at a specific load level.</p>
+        <p>Pin the load to a specific request rate (<code>--rate-limit 500000</code>) and measure latency under controlled conditions.</p>
       </div>
       <div class="bento-card fade-up">
         <h3>Prefill &amp; warmup</h3>
-        <p><code>--prefill</code> writes every key before benchmarking so GETs hit a warm cache. <code>--warmup</code> discards the first N seconds of data.</p>
+        <p><code>--prefill</code> populates the keyspace before benchmarking. <code>--warmup</code> discards early samples so you measure steady state.</p>
       </div>
       <div class="bento-card fade-up">
         <h3>Per-second tail latency</h3>
@@ -78,7 +78,7 @@
       </div>
       <div class="bento-card fade-up">
         <h3>Key distribution</h3>
-        <p><code>--distribution zipf</code> generates a realistic hot-key pattern. Uniform is the default, but real workloads are skewed.</p>
+        <p><code>--distribution zipf</code> models a realistic hot-key pattern. Uniform is the default; Zipfian reflects production skew.</p>
       </div>
       <div class="bento-card fade-up">
         <h3>Exportable results</h3>
