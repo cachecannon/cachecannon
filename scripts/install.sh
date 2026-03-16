@@ -1,9 +1,10 @@
 #!/bin/bash
 set -euo pipefail
 
-BINARY="cachecannon"
+PACKAGES="cachecannon valkey-lab"
 APT_URL="https://apt.cachecannon.cc"
 YUM_URL="https://yum.cachecannon.cc"
+README_URL="https://github.com/cachecannon/cachecannon"
 
 # --- helpers ----------------------------------------------------------------
 
@@ -14,6 +15,15 @@ need() {
 }
 
 # --- detect platform --------------------------------------------------------
+
+require_linux() {
+    case "$(uname -s)" in
+        Linux) ;;
+        *)
+            die "$(uname -s) is not supported. cachecannon requires Linux (io_uring)."
+            ;;
+    esac
+}
 
 detect_arch() {
     case "$(uname -m)" in
@@ -39,7 +49,7 @@ detect_os() {
             elif command -v dnf >/dev/null 2>&1 || command -v yum >/dev/null 2>&1; then
                 PKG_TYPE="rpm"
             else
-                die "unsupported distribution: ${ID:-unknown}"
+                die "unsupported distribution: ${ID:-unknown}. See ${README_URL} for manual installation instructions."
             fi
             ;;
     esac
@@ -57,9 +67,9 @@ setup_apt() {
     echo "deb [signed-by=/usr/share/keyrings/cachecannon-archive-keyring.gpg] ${APT_URL} stable main" \
         | sudo tee /etc/apt/sources.list.d/cachecannon.list > /dev/null
 
-    echo "Installing ${BINARY}..."
+    echo "Installing ${PACKAGES}..."
     sudo apt-get update -qq
-    sudo apt-get install -y "${BINARY}"
+    sudo apt-get install -y ${PACKAGES}
 }
 
 setup_yum() {
@@ -75,27 +85,29 @@ gpgkey=${YUM_URL}/RPM-GPG-KEY-cachecannon
 enabled=1
 EOF
 
-    echo "Installing ${BINARY}..."
+    echo "Installing ${PACKAGES}..."
     if command -v dnf >/dev/null 2>&1; then
-        sudo dnf install -y "${BINARY}"
+        sudo dnf install -y ${PACKAGES}
     else
-        sudo yum install -y "${BINARY}"
+        sudo yum install -y ${PACKAGES}
     fi
 }
 
 # --- main -------------------------------------------------------------------
 
 main() {
-    echo "Installing ${BINARY}..."
+    require_linux
     detect_arch
     detect_os
+
+    echo "Installing ${PACKAGES}..."
 
     case "$PKG_TYPE" in
         deb) setup_apt ;;
         rpm) setup_yum ;;
     esac
 
-    echo "Done — ${BINARY} installed successfully."
+    echo "Done — ${PACKAGES} installed successfully."
     echo "Future updates are available via your package manager."
 }
 
