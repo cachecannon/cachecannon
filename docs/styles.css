@@ -312,7 +312,9 @@ a:hover { text-decoration: none; }
 .terminal-body .line {
   display: block;
   opacity: 0;
-  min-height: 1.7em;
+}
+.terminal-body .line:empty {
+  min-height: 0.85em;
 }
 .terminal-body .line.visible { opacity: 1; }
 
