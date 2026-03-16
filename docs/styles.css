@@ -126,9 +126,9 @@ a:hover { text-decoration: none; }
 /* ---- Hero ---- */
 .hero {
   position: relative;
-  min-height: 80vh;
+  min-height: 70vh;
   display: flex; align-items: center; justify-content: center;
-  padding: 140px 24px 60px;
+  padding: 120px 24px 40px;
   text-align: center;
   overflow: hidden;
 }
