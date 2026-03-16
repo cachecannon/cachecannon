@@ -123,53 +123,42 @@ a:hover { text-decoration: none; }
 }
 #theme-toggle:hover { border-color: var(--border-hover); color: var(--text-primary); }
 
-/* ---- Install banner ---- */
-.install-banner {
-  position: fixed;
-  top: 60px;
-  left: 0;
-  right: 0;
-  z-index: 999;
-  background: rgba(99,102,241,0.08);
-  border-bottom: 1px solid rgba(99,102,241,0.2);
-  backdrop-filter: blur(12px);
-  -webkit-backdrop-filter: blur(12px);
-  padding: 8px 24px;
-  text-align: center;
-}
-[data-theme="light"] .install-banner {
-  background: rgba(99,102,241,0.06);
-}
-.install-inner {
+/* ---- Install pill (in nav) ---- */
+.install-pill {
   display: inline-flex;
   align-items: center;
-  gap: 10px;
+  gap: 8px;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 100px;
+  padding: 5px 12px 5px 14px;
+  transition: all var(--transition);
 }
-.install-inner code {
+.install-pill:hover {
+  border-color: var(--border-hover);
+}
+.install-pill code {
   font-family: var(--mono);
-  font-size: 13px;
-  color: var(--text-primary);
-  letter-spacing: -0.01em;
+  font-size: 12px;
+  color: var(--text-secondary);
+  white-space: nowrap;
 }
 .copy-btn {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  background: var(--bg-card);
-  border: 1px solid var(--border);
-  color: var(--text-secondary);
-  border-radius: 6px;
-  padding: 4px 8px;
+  background: none;
+  border: none;
+  color: var(--text-tertiary);
   cursor: pointer;
-  transition: all var(--transition);
+  padding: 2px;
+  transition: color var(--transition);
 }
 .copy-btn:hover {
-  border-color: var(--border-hover);
   color: var(--text-primary);
 }
 .copy-btn.copied {
   color: var(--green);
-  border-color: var(--green);
 }
 
 /* ---- Hero ---- */
@@ -177,7 +166,7 @@ a:hover { text-decoration: none; }
   position: relative;
   min-height: 70vh;
   display: flex; align-items: center; justify-content: center;
-  padding: 140px 24px 40px;
+  padding: 120px 24px 40px;
   text-align: center;
   overflow: hidden;
 }
@@ -487,6 +476,7 @@ footer a:hover { color: var(--accent-light); }
 @media (max-width: 768px) {
   .section { padding: 56px 0; }
   .nav-links a:not(.nav-github):not(#theme-toggle) { display: none; }
+  .install-pill { display: none; }
   .bento-grid { grid-template-columns: 1fr; }
   .terminal-body { font-size: 11px; padding: 14px 16px; }
   .hero { min-height: 60vh; padding-top: 100px; }
