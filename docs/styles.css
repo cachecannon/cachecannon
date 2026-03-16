@@ -247,6 +247,28 @@ a:hover { text-decoration: none; }
   color: var(--text-secondary); font-size: 14px; line-height: 1.6;
 }
 
+/* ---- Numbered cards ---- */
+.numbered-card {
+  position: relative;
+  padding-left: 64px;
+}
+.numbered-card .card-number {
+  position: absolute;
+  top: 24px;
+  left: 20px;
+  font-weight: 700;
+  width: 28px;
+  height: 28px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 8px;
+  background: linear-gradient(135deg, var(--gradient-1), var(--gradient-2));
+  color: #fff;
+  font-size: 13px;
+  line-height: 1;
+}
+
 /* ---- Scenario picker cards ---- */
 .scenario-card {
   cursor: pointer;
