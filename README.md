@@ -4,24 +4,26 @@ A high-performance load generator for cache servers with support for multiple pr
 
 ## Installation
 
-### APT (Debian/Ubuntu)
-
 ```bash
-# Import the signing key
-curl -fsSL https://apt.cachecannon.cc/gpg-key.asc | sudo gpg --dearmor -o /usr/share/keyrings/cachecannon-archive-keyring.gpg
-
-# Add the repository
-echo "deb [signed-by=/usr/share/keyrings/cachecannon-archive-keyring.gpg] https://apt.cachecannon.cc stable main" | sudo tee /etc/apt/sources.list.d/cachecannon.list
-
-# Install
-sudo apt update
-sudo apt install cachecannon
+curl -fsSL https://cachecannon.cc/install.sh | bash
 ```
 
-### YUM/DNF (RHEL/Fedora)
+This configures the package repository for your OS and installs cachecannon. Future updates come through `apt upgrade` or `dnf upgrade`. Supports Debian/Ubuntu and RHEL/Fedora on amd64 and arm64.
+
+<details>
+<summary>Other installation methods</summary>
+
+#### APT (Debian/Ubuntu)
 
 ```bash
-# Add the repository
+curl -fsSL https://apt.cachecannon.cc/gpg-key.asc | sudo gpg --dearmor -o /usr/share/keyrings/cachecannon-archive-keyring.gpg
+echo "deb [signed-by=/usr/share/keyrings/cachecannon-archive-keyring.gpg] https://apt.cachecannon.cc stable main" | sudo tee /etc/apt/sources.list.d/cachecannon.list
+sudo apt update && sudo apt install cachecannon
+```
+
+#### YUM/DNF (RHEL/Fedora)
+
+```bash
 sudo tee /etc/yum.repos.d/cachecannon.repo << 'EOF'
 [cachecannon-x86_64]
 name=Cachecannon
@@ -30,18 +32,16 @@ gpgcheck=1
 gpgkey=https://yum.cachecannon.cc/RPM-GPG-KEY-cachecannon
 enabled=1
 EOF
-
-# Install
 sudo yum install cachecannon    # or: sudo dnf install cachecannon
 ```
 
 For arm64/aarch64, replace `x86_64` with `aarch64` in the baseurl.
 
-### GitHub Releases
+#### GitHub Releases
 
-Pre-built `.deb` and `.rpm` packages are also available from [GitHub Releases](https://github.com/cachecannon/cachecannon/releases). Packages are available for both amd64 and arm64 architectures. Each package includes a detached GPG signature (`.asc`) for verification.
+Pre-built `.deb` and `.rpm` packages are available from [GitHub Releases](https://github.com/cachecannon/cachecannon/releases) for amd64 and arm64. Each package includes a detached GPG signature (`.asc`).
 
-### Build from source
+#### Build from source
 
 ```bash
 cargo build --release
@@ -49,6 +49,8 @@ cargo build --release
 ```
 
 Requires Rust 1.76+ and Linux 6.0+ (for io_uring support).
+
+</details>
 
 ## Quick Start
 
