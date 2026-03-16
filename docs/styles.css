@@ -144,6 +144,9 @@ a:hover { text-decoration: none; }
   color: var(--text-secondary);
   white-space: nowrap;
 }
+.install-pill .cmd   { color: var(--cyan); }
+.install-pill .flag  { color: var(--accent-light); }
+.install-pill .value { color: var(--green); }
 .copy-btn {
   display: inline-flex;
   align-items: center;
