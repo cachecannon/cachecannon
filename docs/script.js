@@ -49,9 +49,9 @@
       ]
     },
     "zipf": {
-      title: "valkey-lab -c 16 -P 32 --distribution zipf",
+      title: "valkey-lab --connections 16 --pipeline 32 --distribution zipf",
       lines: [
-        ["", D("$") + " " + C("valkey-lab") + " -c 16 -P 32 --distribution zipf"],
+        ["", D("$") + " " + C("valkey-lab") + " --connections 16 --pipeline 32 --distribution zipf"],
         ["", ""],
         ["", B(C("valkey-lab, powered by cachecannon"))],
         ["", D("──────────────────")],
@@ -74,9 +74,9 @@
       ]
     },
     "prefill": {
-      title: "valkey-lab --prefill -r 100:0",
+      title: "valkey-lab --prefill --ratio 100:0",
       lines: [
-        ["", D("$") + " " + C("valkey-lab") + " --prefill -r 100:0"],
+        ["", D("$") + " " + C("valkey-lab") + " --prefill --ratio 100:0"],
         ["", ""],
         ["", B(C("valkey-lab, powered by cachecannon"))],
         ["", D("──────────────────")],
@@ -99,9 +99,9 @@
       ]
     },
     "ratelimit": {
-      title: "valkey-lab --rate-limit 500000 -c 16 -P 32",
+      title: "valkey-lab --rate-limit 500000 --connections 16 --pipeline 32",
       lines: [
-        ["", D("$") + " " + C("valkey-lab") + " --rate-limit 500000 -c 16 -P 32"],
+        ["", D("$") + " " + C("valkey-lab") + " --rate-limit 500000 --connections 16 --pipeline 32"],
         ["", ""],
         ["", B(C("valkey-lab, powered by cachecannon"))],
         ["", D("──────────────────")],
@@ -126,7 +126,7 @@
     "saturate": {
       title: "valkey-lab saturate --slo-p999 1ms",
       lines: [
-        ["", D("$") + " " + C("valkey-lab") + " saturate --slo-p999 1ms -c 16 -P 32"],
+        ["", D("$") + " " + C("valkey-lab") + " saturate --slo-p999 1ms --connections 16 --pipeline 32"],
         ["", ""],
         ["", B(C("valkey-lab, powered by cachecannon"))],
         ["", D("──────────────────")],
@@ -156,7 +156,7 @@
     "export": {
       title: "valkey-lab --parquet results.parquet",
       lines: [
-        ["", D("$") + " " + C("valkey-lab") + " --parquet results.parquet -d 5m -c 16 -P 32"],
+        ["", D("$") + " " + C("valkey-lab") + " --parquet results.parquet --duration 5m --connections 16 --pipeline 32"],
         ["", ""],
         ["", B(C("valkey-lab, powered by cachecannon"))],
         ["", D("──────────────────")],
@@ -187,9 +187,9 @@
   /* ---- Feature deep-dive scenarios ---- */
   var features = {
     "mixed": {
-      title: "valkey-lab -c 16 -P 32 -r 80:20",
+      title: "valkey-lab --connections 16 --pipeline 32 --ratio 80:20",
       lines: [
-        ["", D("$") + " " + C("valkey-lab") + " -c 16 -P 32 -r 80:20"],
+        ["", D("$") + " " + C("valkey-lab") + " --connections 16 --pipeline 32 --ratio 80:20"],
         ["", ""],
         ["", B(C("valkey-lab, powered by cachecannon"))],
         ["", D("──────────────────")],
@@ -209,9 +209,9 @@
       ]
     },
     "ratelimit": {
-      title: "valkey-lab --rate-limit 500000 -c 16 -P 32",
+      title: "valkey-lab --rate-limit 500000 --connections 16 --pipeline 32",
       lines: [
-        ["", D("$") + " " + C("valkey-lab") + " --rate-limit 500000 -c 16 -P 32"],
+        ["", D("$") + " " + C("valkey-lab") + " --rate-limit 500000 --connections 16 --pipeline 32"],
         ["", ""],
         ["", B(C("valkey-lab, powered by cachecannon"))],
         ["", D("──────────────────")],
@@ -232,9 +232,9 @@
       ]
     },
     "prefill": {
-      title: "valkey-lab --prefill -r 100:0",
+      title: "valkey-lab --prefill --ratio 100:0",
       lines: [
-        ["", D("$") + " " + C("valkey-lab") + " --prefill -r 100:0"],
+        ["", D("$") + " " + C("valkey-lab") + " --prefill --ratio 100:0"],
         ["", ""],
         ["", B(C("valkey-lab, powered by cachecannon"))],
         ["", D("──────────────────")],
@@ -256,9 +256,9 @@
       ]
     },
     "taillatency": {
-      title: "valkey-lab -c 16 -P 32 -d 60s",
+      title: "valkey-lab --connections 16 --pipeline 32 --duration 60s",
       lines: [
-        ["", D("$") + " " + C("valkey-lab") + " -c 16 -P 32 -d 60s"],
+        ["", D("$") + " " + C("valkey-lab") + " --connections 16 --pipeline 32 --duration 60s"],
         ["", ""],
         ["", B(C("valkey-lab, powered by cachecannon"))],
         ["", D("──────────────────")],
@@ -279,9 +279,9 @@
       ]
     },
     "zipf": {
-      title: "valkey-lab -c 16 -P 32 --distribution zipf",
+      title: "valkey-lab --connections 16 --pipeline 32 --distribution zipf",
       lines: [
-        ["", D("$") + " " + C("valkey-lab") + " -c 16 -P 32 --distribution zipf"],
+        ["", D("$") + " " + C("valkey-lab") + " --connections 16 --pipeline 32 --distribution zipf"],
         ["", ""],
         ["", B(C("valkey-lab, powered by cachecannon"))],
         ["", D("──────────────────")],
@@ -303,7 +303,7 @@
     "parquet": {
       title: "valkey-lab --parquet results.parquet",
       lines: [
-        ["", D("$") + " " + C("valkey-lab") + " --parquet results.parquet -d 5m -c 16 -P 32"],
+        ["", D("$") + " " + C("valkey-lab") + " --parquet results.parquet --duration 5m --connections 16 --pipeline 32"],
         ["", ""],
         ["", B(C("valkey-lab, powered by cachecannon"))],
         ["", D("──────────────────")],

@@ -78,9 +78,9 @@
 
     <div class="prose fade-up" style="margin-top: 1.25rem;">
       <p>
-        Flags follow <code>valkey-benchmark</code> conventions: <code>-h</code>,
-        <code>-p</code>, <code>-c</code>, <code>-P</code>, <code>-d</code>,
-        <code>-t</code>. Full reference in
+        Short flags are compatible with <code>valkey-benchmark</code> (<code>-c</code>,
+        <code>-P</code>, <code>-d</code>, etc.), but examples here use
+        <code>--named-arguments</code> so you can read them. Full reference in
         <a href="https://github.com/ksmotiv8/cachecannon/blob/rename-valkey-lab/VALKEY-LAB.md" style="color: var(--accent-light);">VALKEY-LAB.md</a>.
       </p>
     </div>
@@ -131,7 +131,7 @@
         <span class="terminal-dot r"></span>
         <span class="terminal-dot y"></span>
         <span class="terminal-dot g"></span>
-        <span class="terminal-title">valkey-lab -c 16 -P 32 -r 80:20</span>
+        <span class="terminal-title">valkey-lab --connections 16 --pipeline 32 --ratio 80:20</span>
       </div>
       <div class="terminal-body">
 <span class="line med"><span class="t-cyan">time UTC  req/s      p50      p90      p99     p999    p9999      max  err/s  hit%</span></span>
@@ -208,7 +208,7 @@
         <span class="terminal-dot r"></span>
         <span class="terminal-dot y"></span>
         <span class="terminal-dot g"></span>
-        <span class="terminal-title" id="feature-title">valkey-lab -c 16 -P 32 -r 80:20</span>
+        <span class="terminal-title" id="feature-title">valkey-lab --connections 16 --pipeline 32 --ratio 80:20</span>
       </div>
       <div class="terminal-body" id="feature-body"></div>
     </div>
@@ -229,7 +229,7 @@
     </p>
 
     <div class="code-block fade-up" style="margin-top: 1.5rem;">
-      <pre><code><span class="cmd">valkey-lab</span> <span class="flag">saturate</span> <span class="flag">--slo-p999</span> <span class="value">1ms</span> <span class="flag">-c</span> <span class="value">16</span> <span class="flag">-P</span> <span class="value">32</span></code></pre>
+      <pre><code><span class="cmd">valkey-lab</span> <span class="flag">saturate</span> <span class="flag">--slo-p999</span> <span class="value">1ms</span> <span class="flag">--connections</span> <span class="value">16</span> <span class="flag">--pipeline</span> <span class="value">32</span></code></pre>
     </div>
 
     <div class="terminal fade-up" data-animate style="margin-top: 1.25rem;">
