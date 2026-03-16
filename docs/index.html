@@ -182,31 +182,42 @@
       </p>
     </div>
 
-    <div class="bento-grid" style="margin-top: 2rem;">
-      <div class="bento-card fade-up">
+    <div class="bento-grid scenario-grid" style="margin-top: 2rem;">
+      <div class="bento-card scenario-card active fade-up" data-feature="mixed">
         <h3>Mixed GET/SET</h3>
-        <p>Run GETs and SETs concurrently at any ratio (<code>-r 80:20</code>) to see how your server handles real contention patterns.</p>
+        <p>Concurrent GETs and SETs at any ratio</p>
       </div>
-      <div class="bento-card fade-up">
+      <div class="bento-card scenario-card fade-up" data-feature="ratelimit">
         <h3>Rate limiting</h3>
-        <p>Pin the load to a specific request rate (<code>--rate-limit 500000</code>) and measure latency under controlled conditions.</p>
+        <p>Measure latency at a fixed request rate</p>
       </div>
-      <div class="bento-card fade-up">
+      <div class="bento-card scenario-card fade-up" data-feature="prefill">
         <h3>Prefill &amp; warmup</h3>
-        <p><code>--prefill</code> populates the keyspace before benchmarking. <code>--warmup</code> discards early samples so you measure steady state.</p>
+        <p>Warm cache and discard early samples</p>
       </div>
-      <div class="bento-card fade-up">
+      <div class="bento-card scenario-card fade-up" data-feature="taillatency">
         <h3>Per-second tail latency</h3>
-        <p>p50 through p9999 and max, every second. Spikes that hide in aggregate percentiles show up in the time series.</p>
+        <p>Catch spikes that hide in aggregates</p>
       </div>
-      <div class="bento-card fade-up">
+      <div class="bento-card scenario-card fade-up" data-feature="zipf">
         <h3>Key distribution</h3>
-        <p><code>--distribution zipf</code> models a realistic hot-key pattern. Uniform is the default; Zipfian reflects production skew.</p>
+        <p>Zipfian hot-key patterns</p>
       </div>
-      <div class="bento-card fade-up">
+      <div class="bento-card scenario-card fade-up" data-feature="parquet">
         <h3>Exportable results</h3>
-        <p><code>--parquet results.parquet</code> saves full time-series data. <code>valkey-lab view</code> opens an interactive web dashboard.</p>
+        <p>Parquet time-series + web dashboard</p>
       </div>
+    </div>
+
+    <!-- Interactive terminal for features -->
+    <div class="terminal fade-up" id="feature-terminal" style="margin-top: 1.5rem;">
+      <div class="terminal-bar">
+        <span class="terminal-dot r"></span>
+        <span class="terminal-dot y"></span>
+        <span class="terminal-dot g"></span>
+        <span class="terminal-title" id="feature-title">valkey-lab -c 16 -P 32 -r 80:20</span>
+      </div>
+      <div class="terminal-body" id="feature-body"></div>
     </div>
   </div>
 </section>
