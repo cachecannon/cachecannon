@@ -17,10 +17,10 @@
   <div class="nav-inner">
     <a href="#" class="nav-logo"><span class="accent">valkey</span>-lab</a>
     <div class="nav-links">
-      <a href="#gaps">Why a lab?</a>
-      <a href="#features">Features</a>
+      <a href="#try-it">Try it</a>
+      <a href="#output">Output</a>
+      <a href="#deep-dive">Deep dive</a>
       <a href="#saturate">Saturate</a>
-      <a href="#start">Get Started</a>
       <button id="theme-toggle" aria-label="Toggle theme">&#9790;</button>
       <a href="https://github.com/cachecannon/cachecannon" class="nav-github" target="_blank" rel="noopener">GitHub</a>
     </div>
@@ -38,67 +38,143 @@
       watch tail latency per second, and find your server's saturation point.
     </p>
     <div class="hero-actions fade-up">
-      <a href="#start" class="btn btn-primary">Get Started</a>
+      <a href="#try-it" class="btn btn-primary">Get Started</a>
       <a href="https://github.com/cachecannon/cachecannon" class="btn btn-secondary" target="_blank" rel="noopener">GitHub</a>
     </div>
   </div>
 </section>
 
-<!-- ============ Motivation ============ -->
-<section class="section" id="gaps">
+<!-- ============ Try It ============ -->
+<section class="section" id="try-it">
   <div class="container">
-    <span class="section-tag fade-up">Why a lab?</span>
-    <h2 class="section-title fade-up">Go deeper than a quick benchmark</h2>
+    <span class="section-tag fade-up">Get Started</span>
+    <h2 class="section-title fade-up">Install and explore</h2>
+    <p class="section-subtitle fade-up">
+      One cargo install, then pick a scenario. Each terminal below is a
+      real command you can run.
+    </p>
+
+    <!-- Install -->
+    <div class="terminal fade-up" data-animate style="margin-top: 2rem;">
+      <div class="terminal-bar">
+        <span class="terminal-dot r"></span>
+        <span class="terminal-dot y"></span>
+        <span class="terminal-dot g"></span>
+        <span class="terminal-title">install</span>
+      </div>
+      <div class="terminal-body">
+<span class="line"><span class="t-dim"># build from source (requires Linux, io_uring)</span></span>
+<span class="line"><span class="t-cyan">cargo install</span> --path . --bin valkey-lab</span>
+<span class="line"></span>
+<span class="line"><span class="t-dim"># or from the APT / YUM repo</span></span>
+<span class="line"><span class="t-cyan">apt install</span> cachecannon</span>
+      </div>
+    </div>
+
+    <!-- Basic run -->
+    <div class="terminal fade-up" data-animate style="margin-top: 1.25rem;">
+      <div class="terminal-bar">
+        <span class="terminal-dot r"></span>
+        <span class="terminal-dot y"></span>
+        <span class="terminal-dot g"></span>
+        <span class="terminal-title">quick start: just run it</span>
+      </div>
+      <div class="terminal-body">
+<span class="line"><span class="t-dim"># zero-config defaults: localhost:6379, 60s, 80:20 GET:SET</span></span>
+<span class="line"><span class="t-cyan">valkey-lab</span></span>
+<span class="line"></span>
+<span class="line"><span class="t-dim"># custom host, 16 connections, pipeline depth 32</span></span>
+<span class="line"><span class="t-cyan">valkey-lab</span> -h 10.0.0.1 -c 16 -P 32</span>
+      </div>
+    </div>
+
+    <!-- Realistic workload -->
+    <div class="terminal fade-up" data-animate style="margin-top: 1.25rem;">
+      <div class="terminal-bar">
+        <span class="terminal-dot r"></span>
+        <span class="terminal-dot y"></span>
+        <span class="terminal-dot g"></span>
+        <span class="terminal-title">realistic workloads</span>
+      </div>
+      <div class="terminal-body">
+<span class="line"><span class="t-dim"># Zipfian hot-key distribution, write-heavy</span></span>
+<span class="line"><span class="t-cyan">valkey-lab</span> -r 20:80 --distribution zipf -s 512</span>
+<span class="line"></span>
+<span class="line"><span class="t-dim"># prefill the cache, then benchmark GETs only</span></span>
+<span class="line"><span class="t-cyan">valkey-lab</span> --prefill -r 100:0</span>
+<span class="line"></span>
+<span class="line"><span class="t-dim"># measure latency at exactly 500K req/s</span></span>
+<span class="line"><span class="t-cyan">valkey-lab</span> --rate-limit 500000 -c 16 -P 32</span>
+      </div>
+    </div>
+
+    <!-- Saturation + export -->
+    <div class="terminal fade-up" data-animate style="margin-top: 1.25rem;">
+      <div class="terminal-bar">
+        <span class="terminal-dot r"></span>
+        <span class="terminal-dot y"></span>
+        <span class="terminal-dot g"></span>
+        <span class="terminal-title">saturation search + export</span>
+      </div>
+      <div class="terminal-body">
+<span class="line"><span class="t-dim"># find the max rate where p999 stays under 1ms</span></span>
+<span class="line"><span class="t-cyan">valkey-lab</span> saturate --slo-p999 1ms -c 16 -P 32</span>
+<span class="line"></span>
+<span class="line"><span class="t-dim"># save full time-series to Parquet, then view in browser</span></span>
+<span class="line"><span class="t-cyan">valkey-lab</span> --parquet results.parquet -d 5m</span>
+<span class="line"><span class="t-cyan">valkey-lab</span> view results.parquet</span>
+      </div>
+    </div>
 
     <div class="prose fade-up" style="margin-top: 1.25rem;">
       <p>
-        <code>valkey-benchmark</code> is a solid tool for quick throughput checks.
-        valkey-lab builds on that foundation with controls for the questions that
-        come next: what happens under mixed traffic, at a controlled rate,
-        with realistic key distributions, over time?
+        Flags follow <code>valkey-benchmark</code> conventions: <code>-h</code>,
+        <code>-p</code>, <code>-c</code>, <code>-P</code>, <code>-d</code>,
+        <code>-t</code>. Full reference in
+        <a href="https://github.com/cachecannon/cachecannon/blob/main/VALKEY-LAB.md" style="color: var(--accent-light);">VALKEY-LAB.md</a>.
       </p>
-    </div>
-
-    <div class="bento-grid" style="margin-top: 2rem;">
-      <div class="bento-card fade-up">
-        <h3>Mixed GET/SET</h3>
-        <p>Run GETs and SETs concurrently at any ratio (<code>-r 80:20</code>) to see how your server handles real contention patterns.</p>
-      </div>
-      <div class="bento-card fade-up">
-        <h3>Rate limiting</h3>
-        <p>Pin the load to a specific request rate (<code>--rate-limit 500000</code>) and measure latency under controlled conditions.</p>
-      </div>
-      <div class="bento-card fade-up">
-        <h3>Prefill &amp; warmup</h3>
-        <p><code>--prefill</code> populates the keyspace before benchmarking. <code>--warmup</code> discards early samples so you measure steady state.</p>
-      </div>
-      <div class="bento-card fade-up">
-        <h3>Per-second tail latency</h3>
-        <p>p50 through p9999 and max, every second. Spikes that hide in aggregate percentiles show up in the time series.</p>
-      </div>
-      <div class="bento-card fade-up">
-        <h3>Key distribution</h3>
-        <p><code>--distribution zipf</code> models a realistic hot-key pattern. Uniform is the default; Zipfian reflects production skew.</p>
-      </div>
-      <div class="bento-card fade-up">
-        <h3>Exportable results</h3>
-        <p><code>--parquet results.parquet</code> saves full time-series data. <code>valkey-lab view</code> opens an interactive web dashboard.</p>
-      </div>
     </div>
   </div>
 </section>
 
 <div class="divider"></div>
 
-<!-- ============ Live Output ============ -->
-<section class="section" id="features">
+<!-- ============ Output: Designed to Read ============ -->
+<section class="section" id="output">
   <div class="container">
     <span class="section-tag fade-up">Output</span>
-    <h2 class="section-title fade-up">What you see when it runs</h2>
-    <p class="section-subtitle fade-up">
-      Config summary, phase indicators, then per-second samples with color-coded latency columns.
-      Bold: req/s and p999. Dim: everything else.
-    </p>
+    <h2 class="section-title fade-up">Designed to read, not to parse</h2>
+
+    <div class="prose fade-up" style="margin-top: 1.25rem;">
+      <p>
+        Benchmark output is something you stare at. valkey-lab uses a deliberate
+        color hierarchy so the numbers you care about stand out and the rest stays
+        quiet. <strong>req/s</strong> and <strong>p999</strong> are bold white.
+        Everything else is dimmed. Errors turn red the instant they appear.
+        The header reprints every 25 rows so you never lose context during a long run.
+      </p>
+      <p>
+        This is not cosmetic. When you're watching a 5-minute saturation search or
+        debugging a latency spike in production, the difference between scanning
+        a wall of monochrome numbers and seeing the one column that matters bolded
+        is the difference between catching the problem and scrolling past it.
+      </p>
+    </div>
+
+    <div class="bento-grid" style="margin-top: 2rem;">
+      <div class="bento-card fade-up">
+        <h3>Bold what matters</h3>
+        <p><strong>req/s</strong> and <strong>p999</strong> are bold white. Time, p50, p90, p99, p9999, max, hit% are all dimmed. Your eye goes straight to throughput and the latency percentile that usually trips SLOs.</p>
+      </div>
+      <div class="bento-card fade-up">
+        <h3>Color-coded signals</h3>
+        <p>Cyan for config labels. Green for PASS. Red for FAIL and errors. Yellow for throughput warnings. Dim for separators and low-signal columns. Every color has a reason.</p>
+      </div>
+      <div class="bento-card fade-up">
+        <h3>Per-second streaming</h3>
+        <p>One row per second with full p50 through p9999 and max. Spikes that disappear in aggregate percentiles show up as individual rows in the time series.</p>
+      </div>
+    </div>
 
     <div class="terminal fade-up" data-animate style="margin-top: 2rem;">
       <div class="terminal-bar">
@@ -135,7 +211,7 @@
         <span class="terminal-dot r"></span>
         <span class="terminal-dot y"></span>
         <span class="terminal-dot g"></span>
-        <span class="terminal-title">results</span>
+        <span class="terminal-title">results summary</span>
       </div>
       <div class="terminal-body">
 <span class="line"><span class="t-dim">─────────────────────────────────────────────────────────────────────────────────────</span></span>
@@ -151,6 +227,52 @@
 <span class="line"><span class="t-cyan">SET</span>        52 µs     94 µs    167 µs    334 µs    891 µs   1.45 ms</span>
 <span class="line"></span>
 <span class="line"><span class="t-cyan">connections</span>  16 active, 0 failed</span>
+      </div>
+    </div>
+  </div>
+</section>
+
+<div class="divider"></div>
+
+<!-- ============ Deep Dive Capabilities ============ -->
+<section class="section" id="deep-dive">
+  <div class="container">
+    <span class="section-tag fade-up">Why a lab?</span>
+    <h2 class="section-title fade-up">Go deeper than a quick benchmark</h2>
+
+    <div class="prose fade-up" style="margin-top: 1.25rem;">
+      <p>
+        <code>valkey-benchmark</code> is good for quick throughput checks.
+        valkey-lab builds on that foundation with controls for the questions that
+        come next: what happens under mixed traffic, at a controlled rate,
+        with realistic key distributions, over time?
+      </p>
+    </div>
+
+    <div class="bento-grid" style="margin-top: 2rem;">
+      <div class="bento-card fade-up">
+        <h3>Mixed GET/SET</h3>
+        <p>Run GETs and SETs concurrently at any ratio (<code>-r 80:20</code>) to see how your server handles real contention patterns.</p>
+      </div>
+      <div class="bento-card fade-up">
+        <h3>Rate limiting</h3>
+        <p>Pin the load to a specific request rate (<code>--rate-limit 500000</code>) and measure latency under controlled conditions.</p>
+      </div>
+      <div class="bento-card fade-up">
+        <h3>Prefill &amp; warmup</h3>
+        <p><code>--prefill</code> populates the keyspace before benchmarking. <code>--warmup</code> discards early samples so you measure steady state.</p>
+      </div>
+      <div class="bento-card fade-up">
+        <h3>Per-second tail latency</h3>
+        <p>p50 through p9999 and max, every second. Spikes that hide in aggregate percentiles show up in the time series.</p>
+      </div>
+      <div class="bento-card fade-up">
+        <h3>Key distribution</h3>
+        <p><code>--distribution zipf</code> models a realistic hot-key pattern. Uniform is the default; Zipfian reflects production skew.</p>
+      </div>
+      <div class="bento-card fade-up">
+        <h3>Exportable results</h3>
+        <p><code>--parquet results.parquet</code> saves full time-series data. <code>valkey-lab view</code> opens an interactive web dashboard.</p>
       </div>
     </div>
   </div>
@@ -241,56 +363,14 @@
           <tr><td>Prefill / backfill</td>              <td class="check">&#10003;</td><td class="cross">&#10005;</td><td class="cross">&#10005;</td></tr>
           <tr><td>Per-second p9999 + max</td>          <td class="check">&#10003;</td><td class="cross">&#10005;</td><td class="cross">&#10005;</td></tr>
           <tr><td>Zipfian key distribution</td>        <td class="check">&#10003;</td><td class="cross">&#10005;</td><td class="check">&#10003;</td></tr>
-          <tr><td>Parquet export + web viewer</td>     <td class="check">&#10003;</td><td class="cross">&#10005;</td><td class="cross">&#10005;</td></tr>
+          <tr><td>Structured data export</td>          <td class="check">&#10003;</td><td class="check">&#10003;</td><td class="check">&#10003;</td></tr>
           <tr><td>Per-connection pipelining</td>       <td class="check">&#10003;</td><td class="check">&#10003;</td><td class="check">&#10003;</td></tr>
           <tr><td>Cluster mode</td>                    <td class="check">&#10003;</td><td class="check">&#10003;</td><td class="check">&#10003;</td></tr>
           <tr><td>TLS</td>                             <td class="check">&#10003;</td><td class="check">&#10003;</td><td class="check">&#10003;</td></tr>
           <tr><td>Zero-config defaults</td>            <td class="check">&#10003;</td><td class="check">&#10003;</td><td class="cross">&#10005;</td></tr>
+          <tr><td>Color-coded output</td>              <td class="check">&#10003;</td><td class="cross">&#10005;</td><td class="cross">&#10005;</td></tr>
         </tbody>
       </table>
-    </div>
-  </div>
-</section>
-
-<div class="divider"></div>
-
-<!-- ============ Get Started ============ -->
-<section class="section" id="start">
-  <div class="container">
-    <span class="section-tag fade-up">Get Started</span>
-    <h2 class="section-title fade-up">Install and run</h2>
-
-    <div class="code-block fade-up">
-      <pre><code><span class="comment"># build from source (requires Linux)</span>
-<span class="cmd">cargo install</span> <span class="flag">--path</span> . <span class="flag">--bin</span> <span class="value">valkey-lab</span>
-
-<span class="comment"># benchmark localhost:6379, 60s, 80:20 GET:SET</span>
-<span class="cmd">valkey-lab</span>
-
-<span class="comment"># 16 connections, pipeline 32, Zipfian keys</span>
-<span class="cmd">valkey-lab</span> <span class="flag">-c</span> <span class="value">16</span> <span class="flag">-P</span> <span class="value">32</span> <span class="flag">--distribution</span> <span class="value">zipf</span>
-
-<span class="comment"># prefill cache, then benchmark GETs only</span>
-<span class="cmd">valkey-lab</span> <span class="flag">--prefill</span> <span class="flag">-r</span> <span class="value">100:0</span>
-
-<span class="comment"># measure latency at exactly 500K req/s</span>
-<span class="cmd">valkey-lab</span> <span class="flag">--rate-limit</span> <span class="value">500000</span> <span class="flag">-c</span> <span class="value">16</span> <span class="flag">-P</span> <span class="value">32</span>
-
-<span class="comment"># find max SLO-compliant throughput</span>
-<span class="cmd">valkey-lab</span> <span class="flag">saturate</span> <span class="flag">--slo-p999</span> <span class="value">1ms</span>
-
-<span class="comment"># save to parquet, view in browser</span>
-<span class="cmd">valkey-lab</span> <span class="flag">--parquet</span> <span class="value">results.parquet</span> <span class="flag">-d</span> <span class="value">5m</span>
-<span class="cmd">valkey-lab</span> <span class="flag">view</span> <span class="value">results.parquet</span></code></pre>
-    </div>
-
-    <div class="prose fade-up" style="margin-top: 1.25rem;">
-      <p>
-        Flags follow <code>valkey-benchmark</code> conventions: <code>-h</code>,
-        <code>-p</code>, <code>-c</code>, <code>-P</code>, <code>-d</code>,
-        <code>-t</code>. Full reference in
-        <a href="https://github.com/cachecannon/cachecannon/blob/main/VALKEY-LAB.md" style="color: var(--accent-light);">VALKEY-LAB.md</a>.
-      </p>
     </div>
   </div>
 </section>
