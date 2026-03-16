@@ -50,10 +50,6 @@
     <span class="section-tag fade-up">Get Started</span>
     <h2 class="section-title fade-up">Install, run, analyze</h2>
 
-    <div class="code-block fade-up" style="margin-top: 1.5rem;">
-      <pre><code><span class="cmd">cargo install</span> <span class="flag">--path</span> . <span class="flag">--bin</span> <span class="value">valkey-lab</span></code></pre>
-    </div>
-
     <!-- Scenario picker cards -->
     <div class="bento-grid scenario-grid" style="margin-top: 2rem;">
       <div class="bento-card scenario-card active fade-up" data-scenario="default">
@@ -280,37 +276,6 @@
   </div>
 </section>
 
-<div class="divider"></div>
-
-<!-- ============ Comparison ============ -->
-<section class="section" id="compare">
-  <div class="container">
-    <span class="section-tag fade-up">Comparison</span>
-    <h2 class="section-title fade-up">Feature matrix</h2>
-
-    <div class="table-wrapper fade-up">
-      <table>
-        <thead>
-          <tr><th>Capability</th><th>valkey-lab</th><th>valkey-benchmark</th><th>memtier</th></tr>
-        </thead>
-        <tbody>
-          <tr><td>Mixed GET/SET workload</td>          <td class="check">&#10003;</td><td class="cross">&#10005;</td><td class="check">&#10003;</td></tr>
-          <tr><td>Rate limiting</td>                   <td class="check">&#10003;</td><td class="cross">&#10005;</td><td class="check">&#10003;</td></tr>
-          <tr><td>Automatic saturation search</td>     <td class="check">&#10003;</td><td class="cross">&#10005;</td><td class="cross">&#10005;</td></tr>
-          <tr><td>Prefill / backfill</td>              <td class="check">&#10003;</td><td class="cross">&#10005;</td><td class="cross">&#10005;</td></tr>
-          <tr><td>Per-second p9999 + max</td>          <td class="check">&#10003;</td><td class="cross">&#10005;</td><td class="cross">&#10005;</td></tr>
-          <tr><td>Zipfian key distribution</td>        <td class="check">&#10003;</td><td class="cross">&#10005;</td><td class="check">&#10003;</td></tr>
-          <tr><td>Structured data export</td>          <td class="check">&#10003;</td><td class="check">&#10003;</td><td class="check">&#10003;</td></tr>
-          <tr><td>Per-connection pipelining</td>       <td class="check">&#10003;</td><td class="check">&#10003;</td><td class="check">&#10003;</td></tr>
-          <tr><td>Cluster mode</td>                    <td class="check">&#10003;</td><td class="check">&#10003;</td><td class="check">&#10003;</td></tr>
-          <tr><td>TLS</td>                             <td class="check">&#10003;</td><td class="check">&#10003;</td><td class="check">&#10003;</td></tr>
-          <tr><td>Zero-config defaults</td>            <td class="check">&#10003;</td><td class="check">&#10003;</td><td class="cross">&#10005;</td></tr>
-          <tr><td>Color-coded output</td>              <td class="check">&#10003;</td><td class="cross">&#10005;</td><td class="cross">&#10005;</td></tr>
-        </tbody>
-      </table>
-    </div>
-  </div>
-</section>
 
 <!-- Footer -->
 <footer>
