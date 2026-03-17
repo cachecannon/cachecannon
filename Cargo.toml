@@ -105,10 +105,10 @@ assets = [
     ["config/example.toml", "etc/cachecannon/benchmark.toml.example", "644"],
 ]
 
-[package.metadata.deb.variants.valkey-bench]
-name = "valkey-bench"
+[package.metadata.deb.variants.valkey-lab]
+name = "valkey-lab"
 assets = [
-    ["target/release/valkey-bench", "usr/bin/", "755"],
+    ["target/release/valkey-lab", "usr/bin/", "755"],
 ]
 
 [package.metadata.generate-rpm]

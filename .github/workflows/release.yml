@@ -27,8 +27,8 @@ jobs:
         run: cargo build --release
       - name: Build cachecannon .deb package
         run: cargo deb --no-build
-      - name: Build valkey-bench .deb package
-        run: cargo deb --no-build --variant valkey-bench
+      - name: Build valkey-lab .deb package
+        run: cargo deb --no-build --variant valkey-lab
       - name: Upload .deb artifacts
         uses: actions/upload-artifact@v4
         with:
@@ -55,8 +55,8 @@ jobs:
         run: cross build --release --target aarch64-unknown-linux-gnu
       - name: Build cachecannon .deb package
         run: cargo deb --no-build --no-strip --target aarch64-unknown-linux-gnu
-      - name: Build valkey-bench .deb package
-        run: cargo deb --no-build --no-strip --target aarch64-unknown-linux-gnu --variant valkey-bench
+      - name: Build valkey-lab .deb package
+        run: cargo deb --no-build --no-strip --target aarch64-unknown-linux-gnu --variant valkey-lab
       - name: Upload .deb artifacts
         uses: actions/upload-artifact@v4
         with:
@@ -79,8 +79,8 @@ jobs:
         run: cargo build --release
       - name: Build cachecannon .rpm package
         run: cargo generate-rpm
-      - name: Build valkey-bench .rpm package
-        run: cargo generate-rpm -s 'name = "valkey-bench"' -s 'assets = [{source = "target/release/valkey-bench", dest = "/usr/bin/valkey-bench", mode = "0755"}]'
+      - name: Build valkey-lab .rpm package
+        run: cargo generate-rpm -s 'name = "valkey-lab"' -s 'assets = [{source = "target/release/valkey-lab", dest = "/usr/bin/valkey-lab", mode = "0755"}]'
       - name: Upload .rpm artifacts
         uses: actions/upload-artifact@v4
         with:
@@ -107,8 +107,8 @@ jobs:
         run: cross build --release --target aarch64-unknown-linux-gnu
       - name: Build cachecannon .rpm package
         run: cargo generate-rpm --target aarch64-unknown-linux-gnu
-      - name: Build valkey-bench .rpm package
-        run: cargo generate-rpm --target aarch64-unknown-linux-gnu -s 'name = "valkey-bench"' -s 'assets = [{source = "target/aarch64-unknown-linux-gnu/release/valkey-bench", dest = "/usr/bin/valkey-bench", mode = "0755"}]'
+      - name: Build valkey-lab .rpm package
+        run: cargo generate-rpm --target aarch64-unknown-linux-gnu -s 'name = "valkey-lab"' -s 'assets = [{source = "target/aarch64-unknown-linux-gnu/release/valkey-lab", dest = "/usr/bin/valkey-lab", mode = "0755"}]'
       - name: Upload .rpm artifacts
         uses: actions/upload-artifact@v4
         with:

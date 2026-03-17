@@ -19,7 +19,7 @@ REPO_DIR=$(mktemp -d)
 trap "rm -rf $REPO_DIR" EXIT
 
 mkdir -p "$REPO_DIR/pool/$COMPONENT/c/cachecannon"
-mkdir -p "$REPO_DIR/pool/$COMPONENT/v/valkey-bench"
+mkdir -p "$REPO_DIR/pool/$COMPONENT/v/valkey-lab"
 
 for arch in $ARCHITECTURES; do
     mkdir -p "$REPO_DIR/dists/$DIST/$COMPONENT/binary-$arch"
@@ -34,8 +34,8 @@ for deb in debs/*.deb; do
         basename_deb=$(basename "$deb")
         if [[ "$basename_deb" == cachecannon* ]]; then
             cp "$deb" "$REPO_DIR/pool/$COMPONENT/c/cachecannon/"
-        elif [[ "$basename_deb" == valkey-bench* ]]; then
-            cp "$deb" "$REPO_DIR/pool/$COMPONENT/v/valkey-bench/"
+        elif [[ "$basename_deb" == valkey-lab* ]]; then
+            cp "$deb" "$REPO_DIR/pool/$COMPONENT/v/valkey-lab/"
         else
             echo "Warning: Unknown package $basename_deb, skipping"
             continue
