@@ -13,6 +13,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Rename valkey-bench binary to valkey-lab
 - Rename krio references to ringline
 
+### Fixed
+- Bump lz4_flex 0.11.5 → 0.11.6 to address RUSTSEC-2026-0041
+  (information leak from invalid decompression input)
+
 ### Added
 - Add product page (docs/index.html)
 - Add curl|bash install script
