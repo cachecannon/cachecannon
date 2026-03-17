@@ -7,9 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.8] - 2026-03-17
+
 ### Changed
 - Rename valkey-bench binary to valkey-lab
+- Rename krio references to ringline
+
+### Added
 - Add product page (docs/index.html)
+- Add curl|bash install script
+- Add valkey-lab to install script
 
 ## [0.0.7] - 2026-03-10
 
