@@ -472,7 +472,7 @@ impl OutputFormatter for CleanFormatter {
         use super::format::{format_count, format_pct, format_rate_padded};
 
         let count = self.prefill_sample_count.fetch_add(1, Ordering::Relaxed);
-        if count > 0 && count % HEADER_REPEAT_INTERVAL == 0 {
+        if count > 0 && count.is_multiple_of(HEADER_REPEAT_INTERVAL) {
             println!();
             self.print_prefill_header();
         }
