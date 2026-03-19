@@ -4,8 +4,8 @@ use super::format::{
     format_bandwidth_bps, format_count, format_latency_padded, format_pct, format_rate_padded,
 };
 use super::{
-    ColorMode, LatencyStats, OutputFormatter, PrefillDiagnostics, PrefillStallCause, Results,
-    Sample, SaturationResults, SaturationStep,
+    ColorMode, LatencyStats, OutputFormatter, PrefillDiagnostics, PrefillSample, PrefillStallCause,
+    Results, Sample, SaturationResults, SaturationStep,
 };
 use crate::config::{Config, Protocol};
 use std::io::{self, IsTerminal, Write};
@@ -30,6 +30,7 @@ mod ansi {
 pub struct CleanFormatter {
     use_color: bool,
     sample_count: AtomicU64,
+    prefill_sample_count: AtomicU64,
     results_step_count: AtomicU64,
     banner: String,
 }
@@ -51,6 +52,7 @@ impl CleanFormatter {
         Self {
             use_color,
             sample_count: AtomicU64::new(0),
+            prefill_sample_count: AtomicU64::new(0),
             results_step_count: AtomicU64::new(0),
             banner,
         }
@@ -241,6 +243,7 @@ impl OutputFormatter for CleanFormatter {
     fn print_prefill(&self, key_count: usize) {
         use super::format::format_count;
         println!("[prefill {} keys]", format_count(key_count as u64));
+        println!();
     }
 
     fn print_warmup(&self, duration: Duration) {
@@ -453,25 +456,72 @@ impl OutputFormatter for CleanFormatter {
         println!("{}  {}", self.cyan("connections"), conn_str);
     }
 
-    fn print_prefill_progress(&self, confirmed: usize, total: usize, elapsed: Duration) {
-        use super::format::format_count;
-
-        let pct = if total > 0 {
-            (confirmed as f64 / total as f64) * 100.0
-        } else {
-            0.0
-        };
-        let rate = if elapsed.as_secs_f64() > 0.0 {
-            confirmed as f64 / elapsed.as_secs_f64()
-        } else {
-            0.0
-        };
+    fn print_prefill_header(&self) {
         println!(
-            "[prefill] {}/{} ({:.1}%) @ {} SET/s",
-            format_count(confirmed as u64),
-            format_count(total as u64),
-            pct,
-            format_count(rate as u64),
+            "{}",
+            self.cyan("elapsed    set/s   err/s  conns  reconn  progress")
+        );
+        println!(
+            "{}",
+            self.dim("───────  ───────  ──────  ─────  ──────  ────────────────")
+        );
+        let _ = io::stdout().flush();
+    }
+
+    fn print_prefill_sample(&self, sample: &PrefillSample) {
+        use super::format::{format_count, format_pct, format_rate_padded};
+
+        let count = self.prefill_sample_count.fetch_add(1, Ordering::Relaxed);
+        if count > 0 && count % HEADER_REPEAT_INTERVAL == 0 {
+            println!();
+            self.print_prefill_header();
+        }
+
+        let secs = sample.elapsed.as_secs();
+        let elapsed = if secs < 60 {
+            format!("{:>6}s", secs)
+        } else {
+            format!("{:>3}m{:02}s", secs / 60, secs % 60)
+        };
+
+        let set_rate = self.bold(&format_rate_padded(sample.set_per_sec, 7));
+
+        let err_str = format_rate_padded(sample.err_per_sec, 6);
+        let err_display = if sample.err_per_sec > 0.0 {
+            self.red(&err_str)
+        } else {
+            self.dim(&err_str)
+        };
+
+        let conns_str = format!("{:>5}", sample.conns_active);
+
+        let reconn_str = format!("{:>6}", sample.reconnects);
+        let reconn_display = if sample.reconnects > 0 {
+            self.yellow(&reconn_str)
+        } else {
+            self.dim(&reconn_str)
+        };
+
+        let pct = if sample.total > 0 {
+            (sample.confirmed as f64 / sample.total as f64) * 100.0
+        } else {
+            0.0
+        };
+        let progress = format!(
+            "{}/{}  {:>5}%",
+            format_count(sample.confirmed as u64),
+            format_count(sample.total as u64),
+            format_pct(pct),
+        );
+
+        println!(
+            "{}  {}  {}  {}  {}  {}",
+            self.dim(&elapsed),
+            set_rate,
+            err_display,
+            conns_str,
+            reconn_display,
+            self.dim(&progress),
         );
         let _ = io::stdout().flush();
     }

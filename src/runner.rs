@@ -1,6 +1,6 @@
 use crate::config::{Config, Protocol as CacheProtocol, TimestampMode};
 use crate::metrics;
-use crate::output::{PrefillDiagnostics, PrefillStallCause};
+use crate::output::{PrefillDiagnostics, PrefillSample, PrefillStallCause};
 use crate::ratelimit::DynamicRateLimiter;
 use crate::saturation::SaturationSearchState;
 use crate::worker::{BenchWorkerConfig, Phase, init_config_channel};
@@ -307,14 +307,18 @@ pub fn run_benchmark_full(
     let precheck_timeout = config.connection.connect_timeout;
 
     // Prefill progress tracking
-    let prefill_start = Instant::now();
+    let mut prefill_start = Instant::now();
     let mut last_prefill_confirmed: usize = 0;
     let mut last_prefill_progress_time = Instant::now();
     let mut last_prefill_progress_report = Instant::now();
     let prefill_timeout = config.workload.prefill_timeout;
     let prefill_stall_threshold = Duration::from_secs(30);
-    let prefill_progress_interval = Duration::from_secs(5);
+    let prefill_progress_interval = Duration::from_secs(1);
     let mut prefill_timeout_diag: Option<PrefillDiagnostics> = None;
+    // Delta tracking for prefill sample output
+    let mut last_prefill_confirmed_snapshot: usize = 0;
+    let mut last_prefill_errors: u64 = 0;
+    let mut last_prefill_conn_failures: u64 = 0;
 
     loop {
         std::thread::sleep(Duration::from_millis(100));
@@ -344,7 +348,13 @@ pub fn run_benchmark_full(
                 if prefill_enabled {
                     shared.set_phase(Phase::Prefill);
                     current_phase = Phase::Prefill;
+                    prefill_start = Instant::now();
+                    last_prefill_progress_time = Instant::now();
+                    last_prefill_confirmed_snapshot = 0;
+                    last_prefill_errors = metrics::REQUEST_ERRORS.value();
+                    last_prefill_conn_failures = metrics::CONNECTIONS_FAILED.value();
                     formatter.print_prefill(key_count);
+                    formatter.print_prefill_header();
                 } else {
                     shared.set_phase(Phase::Warmup);
                     current_phase = Phase::Warmup;
@@ -396,7 +406,31 @@ pub fn run_benchmark_full(
 
             // Progress reporting
             if last_prefill_progress_report.elapsed() >= prefill_progress_interval && total > 0 {
-                formatter.print_prefill_progress(confirmed, total, elapsed);
+                let report_secs = last_prefill_progress_report.elapsed().as_secs_f64();
+
+                let delta_confirmed = confirmed - last_prefill_confirmed_snapshot;
+                let set_per_sec = delta_confirmed as f64 / report_secs;
+                last_prefill_confirmed_snapshot = confirmed;
+
+                let errors = metrics::REQUEST_ERRORS.value();
+                let delta_errors = errors - last_prefill_errors;
+                let err_per_sec = delta_errors as f64 / report_secs;
+                last_prefill_errors = errors;
+
+                let conn_failures = metrics::CONNECTIONS_FAILED.value();
+                let reconnects = conn_failures - last_prefill_conn_failures;
+                last_prefill_conn_failures = conn_failures;
+
+                let sample = PrefillSample {
+                    elapsed,
+                    confirmed,
+                    total,
+                    set_per_sec,
+                    err_per_sec,
+                    conns_active: metrics::CONNECTIONS_ACTIVE.value(),
+                    reconnects,
+                };
+                formatter.print_prefill_sample(&sample);
                 last_prefill_progress_report = Instant::now();
             }
 
@@ -406,9 +440,8 @@ pub fn run_benchmark_full(
                 last_prefill_progress_time = Instant::now();
             }
 
-            // Stall detection: no progress for 30s after some progress was made
-            let stalled = last_prefill_confirmed > 0
-                && last_prefill_progress_time.elapsed() >= prefill_stall_threshold;
+            // Stall detection: no progress for 30s since prefill started
+            let stalled = last_prefill_progress_time.elapsed() >= prefill_stall_threshold;
 
             // Timeout detection (skip if timeout is zero = disabled)
             let timed_out = !prefill_timeout.is_zero() && elapsed >= prefill_timeout;

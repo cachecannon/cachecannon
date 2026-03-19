@@ -859,6 +859,7 @@ async fn drive_resp_workload(
     let backfill_on_miss = state.task_state.backfill_on_miss;
     let multi_endpoint = state.task_state.endpoints.len() > 1;
     let pipeline_depth = config.connection.pipeline_depth;
+    let mut prefill_in_flight: VecDeque<usize> = VecDeque::new();
 
     loop {
         let phase = state.task_state.shared.phase();
@@ -868,6 +869,7 @@ async fn drive_resp_workload(
 
         // Fill pipeline
         if phase == Phase::Prefill && !state.is_prefill_done() {
+            let mut skips = 0usize;
             while client.pending_count() < pipeline_depth {
                 let key_id = {
                     let mut queue = state.task_state.prefill_queue.lock().unwrap();
@@ -878,12 +880,28 @@ async fn drive_resp_workload(
                 };
 
                 write_key(key_buf, key_id);
+
+                // Route key to correct endpoint in multi-endpoint setups
+                if multi_endpoint {
+                    let routed = route_key(&state.task_state, key_buf);
+                    if routed != endpoint_idx {
+                        let mut queue = state.task_state.prefill_queue.lock().unwrap();
+                        queue.push_back(key_id);
+                        skips += 1;
+                        if skips >= pipeline_depth * 2 {
+                            break;
+                        }
+                        continue;
+                    }
+                }
+
                 let guard =
                     make_value_guard(rng, &state.task_state.value_pool, value_len, pool_len);
 
                 match client.fire_set_with_guard(key_buf, guard, 0) {
                     Ok(_) => {
                         metrics::REQUESTS_SENT.increment();
+                        prefill_in_flight.push_back(key_id);
                     }
                     Err(_) => {
                         let mut queue = state.task_state.prefill_queue.lock().unwrap();
@@ -970,9 +988,21 @@ async fn drive_resp_workload(
         let op = match client.recv().await {
             Ok(op) => op,
             Err(ringline_redis::Error::ConnectionClosed) => {
+                if !prefill_in_flight.is_empty() {
+                    let mut queue = state.task_state.prefill_queue.lock().unwrap();
+                    for key_id in prefill_in_flight.drain(..) {
+                        queue.push_back(key_id);
+                    }
+                }
                 return Err(DisconnectReason::Eof);
             }
             Err(_) => {
+                if !prefill_in_flight.is_empty() {
+                    let mut queue = state.task_state.prefill_queue.lock().unwrap();
+                    for key_id in prefill_in_flight.drain(..) {
+                        queue.push_back(key_id);
+                    }
+                }
                 return Err(DisconnectReason::RecvError);
             }
         };
@@ -980,13 +1010,16 @@ async fn drive_resp_workload(
         // Map CompletedOp to RequestResult
         let result = map_resp_op(op);
 
-        // Handle prefill tracking
-        if phase == Phase::Prefill
-            && !state.is_prefill_done()
-            && result.request_type == RequestType::Set
-            && result.success
-        {
-            confirm_prefill_key(state);
+        // Handle prefill tracking via in-flight deque
+        if !prefill_in_flight.is_empty() {
+            let key_id = prefill_in_flight.pop_front().unwrap();
+            if result.success {
+                confirm_prefill_key(state);
+            } else {
+                // Retry failed prefill SET
+                let mut queue = state.task_state.prefill_queue.lock().unwrap();
+                queue.push_back(key_id);
+            }
         }
 
         // Handle backfill-on-miss
@@ -1262,6 +1295,7 @@ async fn drive_memcache_workload(
     let backfill_on_miss = state.task_state.backfill_on_miss;
     let multi_endpoint = state.task_state.endpoints.len() > 1;
     let pipeline_depth = config.connection.pipeline_depth;
+    let mut prefill_in_flight: VecDeque<usize> = VecDeque::new();
 
     loop {
         let phase = state.task_state.shared.phase();
@@ -1271,6 +1305,7 @@ async fn drive_memcache_workload(
 
         // Fill pipeline
         if phase == Phase::Prefill && !state.is_prefill_done() {
+            let mut skips = 0usize;
             while client.pending_count() < pipeline_depth {
                 let key_id = {
                     let mut queue = state.task_state.prefill_queue.lock().unwrap();
@@ -1281,12 +1316,28 @@ async fn drive_memcache_workload(
                 };
 
                 write_key(key_buf, key_id);
+
+                // Route key to correct endpoint in multi-endpoint setups
+                if multi_endpoint {
+                    let routed = route_key(&state.task_state, key_buf);
+                    if routed != endpoint_idx {
+                        let mut queue = state.task_state.prefill_queue.lock().unwrap();
+                        queue.push_back(key_id);
+                        skips += 1;
+                        if skips >= pipeline_depth * 2 {
+                            break;
+                        }
+                        continue;
+                    }
+                }
+
                 let guard =
                     make_value_guard(rng, &state.task_state.value_pool, value_len, pool_len);
 
                 match client.fire_set_with_guard(key_buf, guard, 0, 0, 0) {
                     Ok(_) => {
                         metrics::REQUESTS_SENT.increment();
+                        prefill_in_flight.push_back(key_id);
                     }
                     Err(_) => {
                         let mut queue = state.task_state.prefill_queue.lock().unwrap();
@@ -1371,9 +1422,21 @@ async fn drive_memcache_workload(
         let op = match client.recv().await {
             Ok(op) => op,
             Err(ringline_memcache::Error::ConnectionClosed) => {
+                if !prefill_in_flight.is_empty() {
+                    let mut queue = state.task_state.prefill_queue.lock().unwrap();
+                    for key_id in prefill_in_flight.drain(..) {
+                        queue.push_back(key_id);
+                    }
+                }
                 return Err(DisconnectReason::Eof);
             }
             Err(_) => {
+                if !prefill_in_flight.is_empty() {
+                    let mut queue = state.task_state.prefill_queue.lock().unwrap();
+                    for key_id in prefill_in_flight.drain(..) {
+                        queue.push_back(key_id);
+                    }
+                }
                 return Err(DisconnectReason::RecvError);
             }
         };
@@ -1381,13 +1444,16 @@ async fn drive_memcache_workload(
         // Map CompletedOp to RequestResult
         let result = map_memcache_op(op);
 
-        // Handle prefill tracking
-        if phase == Phase::Prefill
-            && !state.is_prefill_done()
-            && result.request_type == RequestType::Set
-            && result.success
-        {
-            confirm_prefill_key(state);
+        // Handle prefill tracking via in-flight deque
+        if !prefill_in_flight.is_empty() {
+            let key_id = prefill_in_flight.pop_front().unwrap();
+            if result.success {
+                confirm_prefill_key(state);
+            } else {
+                // Retry failed prefill SET
+                let mut queue = state.task_state.prefill_queue.lock().unwrap();
+                queue.push_back(key_id);
+            }
         }
 
         // Handle backfill-on-miss
@@ -1720,6 +1786,7 @@ async fn drive_momento_session(
     let pipeline_depth = config.connection.pipeline_depth;
     let cache_name = &config.momento.cache_name;
     let ttl_ms = config.momento.ttl_seconds * 1000;
+    let mut prefill_in_flight: VecDeque<usize> = VecDeque::new();
 
     loop {
         let phase = state.task_state.shared.phase();
@@ -1744,6 +1811,7 @@ async fn drive_momento_session(
                 match client.fire_set(cache_name, key_buf, value_buf, ttl_ms) {
                     Ok(_) => {
                         metrics::REQUESTS_SENT.increment();
+                        prefill_in_flight.push_back(key_id);
                     }
                     Err(_) => {
                         let mut queue = state.task_state.prefill_queue.lock().unwrap();
@@ -1792,6 +1860,12 @@ async fn drive_momento_session(
         let op = match client.recv().await {
             Ok(op) => op,
             Err(_) => {
+                if !prefill_in_flight.is_empty() {
+                    let mut queue = state.task_state.prefill_queue.lock().unwrap();
+                    for key_id in prefill_in_flight.drain(..) {
+                        queue.push_back(key_id);
+                    }
+                }
                 return Err(DisconnectReason::Eof);
             }
         };
@@ -1799,14 +1873,16 @@ async fn drive_momento_session(
         // Map CompletedOp to RequestResult
         let result = map_momento_op(op);
 
-        // Handle prefill tracking
-        if phase == Phase::Prefill
-            && !state.is_prefill_done()
-            && result.request_type == RequestType::Set
-            && result.success
-        {
-            let results = std::slice::from_ref(&result);
-            handle_momento_prefill_results(results, state);
+        // Handle prefill tracking via in-flight deque
+        if !prefill_in_flight.is_empty() {
+            let key_id = prefill_in_flight.pop_front().unwrap();
+            if result.success {
+                confirm_prefill_key(state);
+            } else {
+                // Retry failed prefill SET
+                let mut queue = state.task_state.prefill_queue.lock().unwrap();
+                queue.push_back(key_id);
+            }
         }
 
         // Record counter metrics (latency is recorded by the on_result callback)
@@ -1871,45 +1947,6 @@ fn map_momento_op(op: ringline_momento::CompletedOp) -> RequestResult {
                 backfill: false,
                 redirect: None,
             }
-        }
-    }
-}
-
-/// Handle Momento prefill response tracking.
-fn handle_momento_prefill_results(results: &[RequestResult], state: &Arc<SharedWorkerState>) {
-    if state.is_prefill_done() {
-        return;
-    }
-
-    let mut confirmed_batch = 0usize;
-    for result in results {
-        if result.request_type == RequestType::Set && result.success {
-            confirmed_batch += 1;
-        }
-    }
-
-    if confirmed_batch > 0 {
-        let new_total = state
-            .task_state
-            .shared
-            .prefill_keys_confirmed
-            .fetch_add(confirmed_batch, Ordering::AcqRel)
-            + confirmed_batch;
-
-        if new_total >= state.prefill_total
-            && state.prefill_total > 0
-            && state
-                .prefill_done
-                .compare_exchange(0, 1, Ordering::AcqRel, Ordering::Acquire)
-                .is_ok()
-        {
-            tracing::debug!(
-                worker_id = state.task_state.worker_id,
-                confirmed = new_total,
-                total = state.prefill_total,
-                "prefill complete (momento)"
-            );
-            state.task_state.shared.mark_prefill_complete();
         }
     }
 }

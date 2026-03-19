@@ -81,6 +81,18 @@ impl std::str::FromStr for ColorMode {
     }
 }
 
+/// A periodic sample of prefill metrics.
+#[derive(Debug, Clone)]
+pub struct PrefillSample {
+    pub elapsed: Duration,
+    pub confirmed: usize,
+    pub total: usize,
+    pub set_per_sec: f64,
+    pub err_per_sec: f64,
+    pub conns_active: i64,
+    pub reconnects: u64,
+}
+
 /// A periodic sample of benchmark metrics.
 #[derive(Debug, Clone)]
 pub struct Sample {
@@ -270,21 +282,25 @@ pub trait OutputFormatter: Send + Sync {
     /// Print the final results.
     fn print_results(&self, results: &Results);
 
-    /// Print prefill progress (called periodically during prefill).
-    fn print_prefill_progress(&self, confirmed: usize, total: usize, elapsed: Duration) {
-        let pct = if total > 0 {
-            (confirmed as f64 / total as f64) * 100.0
-        } else {
-            0.0
-        };
-        let rate = if elapsed.as_secs_f64() > 0.0 {
-            confirmed as f64 / elapsed.as_secs_f64()
+    /// Print the prefill table header (for formats that use one).
+    fn print_prefill_header(&self) {}
+
+    /// Print a periodic prefill sample.
+    fn print_prefill_sample(&self, sample: &PrefillSample) {
+        let pct = if sample.total > 0 {
+            (sample.confirmed as f64 / sample.total as f64) * 100.0
         } else {
             0.0
         };
         println!(
-            "[prefill] {}/{} ({:.1}%) @ {:.0} SET/s",
-            confirmed, total, pct, rate
+            "[prefill] {}/{} ({:.1}%) @ {:.0} SET/s  err/s={:.0}  conns={}  reconn={}",
+            sample.confirmed,
+            sample.total,
+            pct,
+            sample.set_per_sec,
+            sample.err_per_sec,
+            sample.conns_active,
+            sample.reconnects,
         );
     }
 

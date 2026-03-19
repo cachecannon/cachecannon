@@ -1,6 +1,6 @@
 //! JSON (NDJSON) formatter for machine-readable output.
 
-use super::{OutputFormatter, PrefillDiagnostics, Results, Sample};
+use super::{OutputFormatter, PrefillDiagnostics, PrefillSample, Results, Sample};
 use crate::config::{Config, Protocol};
 use serde::Serialize;
 use std::time::Duration;
@@ -166,7 +166,7 @@ impl OutputFormatter for JsonFormatter {
         }
     }
 
-    fn print_prefill_progress(&self, confirmed: usize, total: usize, elapsed: std::time::Duration) {
+    fn print_prefill_sample(&self, sample: &PrefillSample) {
         #[derive(Serialize)]
         struct PrefillProgress {
             #[serde(rename = "type")]
@@ -174,29 +174,29 @@ impl OutputFormatter for JsonFormatter {
             confirmed: usize,
             total: usize,
             pct: f64,
-            rate: f64,
+            set_per_sec: f64,
+            err_per_sec: f64,
+            conns_active: i64,
+            reconnects: u64,
             elapsed_secs: f64,
         }
 
-        let pct = if total > 0 {
-            (confirmed as f64 / total as f64) * 100.0
-        } else {
-            0.0
-        };
-        let secs = elapsed.as_secs_f64();
-        let rate = if secs > 0.0 {
-            confirmed as f64 / secs
+        let pct = if sample.total > 0 {
+            (sample.confirmed as f64 / sample.total as f64) * 100.0
         } else {
             0.0
         };
 
         let output = PrefillProgress {
             msg_type: "prefill_progress",
-            confirmed,
-            total,
+            confirmed: sample.confirmed,
+            total: sample.total,
             pct,
-            rate,
-            elapsed_secs: secs,
+            set_per_sec: sample.set_per_sec,
+            err_per_sec: sample.err_per_sec,
+            conns_active: sample.conns_active,
+            reconnects: sample.reconnects,
+            elapsed_secs: sample.elapsed.as_secs_f64(),
         };
 
         if let Ok(json) = serde_json::to_string(&output) {
