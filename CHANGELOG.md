@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.10] - 2026-03-19
+
+### Fixed
+- Fix in-flight prefill key loss on disconnect by tracking keys between
+  fire and recv and restoring them to the queue for retry
+- Retry failed prefill SETs (OOM, READONLY, MOVED, etc.) instead of
+  silently dropping them
+- Apply key routing during prefill for multi-endpoint setups so keys
+  land on the correct shard
+- Fix stall detector zero-progress blindspot that prevented detection
+  when prefill never made any progress
+
+### Changed
+- Replace minimal prefill progress line with full diagnostic table
+  (set/s, err/s, connections, reconnects, progress) reported every 1s
+- Prefill progress interval reduced from 5s to 1s for better diagnostic
+  resolution
+
 ## [0.0.9] - 2026-03-17
 
 ### Changed
