@@ -279,12 +279,16 @@ fn launch_benchmark(config: Config) -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn init_tracing() {
+    let (non_blocking, _guard) = tracing_appender::non_blocking(std::io::stderr());
     tracing_subscriber::fmt()
+        .with_writer(non_blocking)
         .with_env_filter(
             tracing_subscriber::EnvFilter::from_default_env()
                 .add_directive(tracing::Level::INFO.into()),
         )
         .init();
+    // Leak the guard so the non-blocking writer lives for the process lifetime
+    std::mem::forget(_guard);
 }
 
 // ---------------------------------------------------------------------------

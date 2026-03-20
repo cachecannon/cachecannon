@@ -78,7 +78,13 @@ pub fn run(config: Config) {
         _ => tracing::Level::TRACE,
     };
 
-    tracing_subscriber::fmt().with_max_level(level).init();
+    let (non_blocking, _guard) = tracing_appender::non_blocking(std::io::stderr());
+    tracing_subscriber::fmt()
+        .with_writer(non_blocking)
+        .with_max_level(level)
+        .init();
+    // Leak the guard so the non-blocking writer lives for the process lifetime
+    std::mem::forget(_guard);
 
     // initialize async runtime
     let rt = tokio::runtime::Builder::new_multi_thread()

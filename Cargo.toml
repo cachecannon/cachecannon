@@ -80,7 +80,7 @@ tower-livereload = "0.9"
 histogram = "0.11"
 include_dir = "0.7"
 open = "5"
-ringlog = "0.7"
+tracing-appender = "0.2"
 http = "1"
 
 # Jemalloc allocator
