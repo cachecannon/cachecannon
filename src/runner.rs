@@ -1,13 +1,13 @@
 use crate::config::{Config, Protocol as CacheProtocol, TimestampMode};
 use crate::metrics;
 use crate::output::{PrefillDiagnostics, PrefillSample, PrefillStallCause};
-use crate::ratelimit::DynamicRateLimiter;
 use crate::saturation::SaturationSearchState;
 use crate::worker::{BenchWorkerConfig, Phase, init_config_channel};
 use crate::{
     AdminServer, LatencyStats, OutputFormatter, Results, Sample, SharedState, create_formatter,
     parse_cpu_list,
 };
+use ratelimit::Ratelimiter;
 
 use chrono::Utc;
 use metriken::{AtomicHistogram, histogram::Histogram};
@@ -96,7 +96,12 @@ pub fn run_benchmark_full(
     };
 
     let ratelimiter = if initial_rate > 0 || config.workload.saturation_search.is_some() {
-        Some(Arc::new(DynamicRateLimiter::new(initial_rate)))
+        Some(Arc::new(
+            Ratelimiter::builder(initial_rate)
+                .initial_available(initial_rate)
+                .build()
+                .expect("failed to build ratelimiter"),
+        ))
     } else {
         None
     };

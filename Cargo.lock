@@ -497,6 +497,7 @@ dependencies = [
  "parquet",
  "rand 0.9.2",
  "rand_xoshiro",
+ "ratelimit",
  "resp-proto",
  "ringline",
  "ringline-memcache",
@@ -1874,6 +1875,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f703f4665700daf5512dcca5f43afa6af89f09db47fb56be587f80636bda2d41"
 dependencies = [
  "rand_core 0.9.5",
+]
+
+[[package]]
+name = "ratelimit"
+version = "1.0.0-alpha.0"
+source = "git+https://github.com/iopsystems/ratelimit#ffc4c9da482ad76ae764530a841c35f69d1ce6df"
+dependencies = [
+ "thiserror 2.0.18",
 ]
 
 [[package]]

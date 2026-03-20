@@ -46,6 +46,9 @@ clap = { version = "4", features = ["derive"] }
 rustls = { version = "0.23", default-features = false, features = ["std", "ring"] }
 webpki-roots = "0.26"
 
+# Rate limiting
+ratelimit = { git = "https://github.com/iopsystems/ratelimit", version = "1.0.0-alpha.0" }
+
 # Utilities
 bytes = "1.11.1"
 libc = "0.2"

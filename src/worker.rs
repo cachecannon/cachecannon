@@ -8,7 +8,7 @@
 use crate::client::{MomentoSetup, RequestResult, RequestType};
 use crate::config::{Config, Protocol as CacheProtocol, TimestampMode};
 use crate::metrics;
-use crate::ratelimit::DynamicRateLimiter;
+use ratelimit::Ratelimiter;
 
 use ringline::{AsyncEventHandler, ConnCtx, DriverCtx, RegionId, SendGuard};
 
@@ -181,7 +181,7 @@ pub struct BenchWorkerConfig {
     pub id: usize,
     pub config: Config,
     pub shared: Arc<SharedState>,
-    pub ratelimiter: Option<Arc<DynamicRateLimiter>>,
+    pub ratelimiter: Option<Arc<Ratelimiter>>,
     /// Whether to record metrics (only true during Running phase)
     pub recording: bool,
     /// Range of key IDs this worker should prefill (start..end).
@@ -267,7 +267,7 @@ fn make_value_guard(
 struct TaskSharedState {
     config: Config,
     shared: Arc<SharedState>,
-    ratelimiter: Option<Arc<DynamicRateLimiter>>,
+    ratelimiter: Option<Arc<Ratelimiter>>,
     value_pool: Arc<Vec<u8>>,
     endpoints: Vec<SocketAddr>,
     ring: ketama::Ring,
@@ -919,7 +919,7 @@ async fn drive_resp_workload(
                         make_value_guard(rng, &state.task_state.value_pool, value_len, pool_len);
 
                     if let Some(ref rl) = state.task_state.ratelimiter
-                        && !rl.try_acquire()
+                        && rl.try_wait().is_err()
                     {
                         backfill_queue.push(key_id);
                         break;
@@ -941,7 +941,7 @@ async fn drive_resp_workload(
 
                 // Rate limiting
                 if let Some(ref rl) = state.task_state.ratelimiter
-                    && !rl.try_acquire()
+                    && rl.try_wait().is_err()
                 {
                     break;
                 }
@@ -1355,7 +1355,7 @@ async fn drive_memcache_workload(
                         make_value_guard(rng, &state.task_state.value_pool, value_len, pool_len);
 
                     if let Some(ref rl) = state.task_state.ratelimiter
-                        && !rl.try_acquire()
+                        && rl.try_wait().is_err()
                     {
                         backfill_queue.push(key_id);
                         break;
@@ -1376,7 +1376,7 @@ async fn drive_memcache_workload(
 
                 // Rate limiting
                 if let Some(ref rl) = state.task_state.ratelimiter
-                    && !rl.try_acquire()
+                    && rl.try_wait().is_err()
                 {
                     break;
                 }
@@ -1658,7 +1658,7 @@ async fn drive_ping_workload(
 
         // Rate limiting
         if let Some(ref rl) = state.task_state.ratelimiter
-            && !rl.try_acquire()
+            && rl.try_wait().is_err()
         {
             continue;
         }
@@ -1823,7 +1823,7 @@ async fn drive_momento_session(
         } else if phase == Phase::Warmup || phase == Phase::Running {
             while client.pending_count() < pipeline_depth {
                 if let Some(ref rl) = state.task_state.ratelimiter
-                    && !rl.try_acquire()
+                    && rl.try_wait().is_err()
                 {
                     break;
                 }

@@ -6,7 +6,7 @@
 use crate::config::SaturationSearch;
 use crate::metrics;
 use crate::output::{OutputFormatter, SaturationResults, SaturationStep};
-use crate::ratelimit::DynamicRateLimiter;
+use ratelimit::Ratelimiter;
 
 use metriken::histogram::Histogram;
 use std::sync::Arc;
@@ -17,7 +17,7 @@ pub struct SaturationSearchState {
     /// Configuration for the search.
     config: SaturationSearch,
     /// Dynamic rate limiter (shared with workers).
-    ratelimiter: Arc<DynamicRateLimiter>,
+    ratelimiter: Arc<Ratelimiter>,
 
     /// Current target rate.
     current_rate: u64,
@@ -42,7 +42,7 @@ pub struct SaturationSearchState {
 
 impl SaturationSearchState {
     /// Create a new saturation search state.
-    pub fn new(config: SaturationSearch, ratelimiter: Arc<DynamicRateLimiter>) -> Self {
+    pub fn new(config: SaturationSearch, ratelimiter: Arc<Ratelimiter>) -> Self {
         let start_rate = config.start_rate;
 
         // Set initial rate
@@ -313,7 +313,12 @@ mod tests {
             min_throughput_ratio: 0.9,
         };
 
-        let rl = Arc::new(DynamicRateLimiter::new(1000));
+        let rl = Arc::new(
+            Ratelimiter::builder(1000)
+                .initial_available(1000)
+                .build()
+                .unwrap(),
+        );
         let state = SaturationSearchState::new(config, rl);
 
         // Under thresholds - should pass
