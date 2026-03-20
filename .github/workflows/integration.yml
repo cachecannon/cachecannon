@@ -54,6 +54,50 @@ jobs:
       - name: Run benchmark against Valkey
         run: ./target/release/cachecannon config/valkey-ci.toml
 
+  redis-ratelimit:
+    name: Redis (rate limited)
+    runs-on: ubuntu-latest
+    services:
+      redis:
+        image: redis:latest
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build
+        run: cargo build --release
+      - name: Run rate-limited benchmark against Redis
+        run: ./target/release/cachecannon config/redis-ratelimit-ci.toml
+
+  redis-saturation:
+    name: Redis (saturation search)
+    runs-on: ubuntu-latest
+    services:
+      redis:
+        image: redis:latest
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build
+        run: cargo build --release
+      - name: Run saturation search benchmark against Redis
+        run: ./target/release/cachecannon config/redis-saturation-ci.toml
+
   redis-tls:
     name: Redis TLS
     runs-on: ubuntu-latest

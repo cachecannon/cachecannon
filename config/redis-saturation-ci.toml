@@ -1,0 +1,34 @@
+# CI configuration for saturation search integration test
+
+[general]
+duration = "30s"
+warmup = "2s"
+threads = 2
+
+[target]
+endpoints = ["127.0.0.1:6379"]
+protocol = "resp"
+
+[connection]
+connections = 4
+pipeline_depth = 8
+
+[workload.keyspace]
+length = 16
+count = 10000
+
+[workload.commands]
+get = 80
+set = 20
+
+[workload.values]
+length = 64
+
+[workload.saturation_search]
+slo = { p999 = "10ms" }
+start_rate = 1000
+step_multiplier = 1.5
+sample_window = "3s"
+stop_after_failures = 2
+max_rate = 1000000
+min_throughput_ratio = 0.5
