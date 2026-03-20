@@ -199,10 +199,10 @@ fn generate_prometheus_output() -> String {
                     output.push_str(&format!("# TYPE {} histogram\n", name));
 
                     // Output percentiles as summary-style metrics
-                    let percentiles = [50.0, 90.0, 95.0, 99.0, 99.9, 99.99];
+                    let percentiles = [0.50, 0.90, 0.95, 0.99, 0.999, 0.9999];
                     if let Ok(Some(results)) = snapshot.percentiles(&percentiles) {
                         for (pct, bucket) in results {
-                            let quantile = pct / 100.0;
+                            let quantile = pct;
                             output.push_str(&format!(
                                 "{}{{quantile=\"{}\"}} {}\n",
                                 name,

@@ -27,9 +27,10 @@ ringline-memcache = { git = "https://github.com/ringline-rs/ringline.git", rev =
 ringline-ping = { git = "https://github.com/ringline-rs/ringline.git", rev = "c084d5c", features = ["timestamps"] }
 
 # Metrics
-metriken = "0.7"
-metriken-exposition = { version = "0.12", features = ["parquet"] }
-metriken-query = { version = "0.2.0", features = ["http"] }
+histogram = "1.0.0"
+metriken = "0.8"
+metriken-exposition = { version = "0.14", features = ["parquet"] }
+metriken-query = { version = "0.6", features = ["http"] }
 
 # Configuration
 toml = "0.8"
@@ -47,7 +48,7 @@ rustls = { version = "0.23", default-features = false, features = ["std", "ring"
 webpki-roots = "0.26"
 
 # Rate limiting
-ratelimit = { git = "https://github.com/iopsystems/ratelimit", version = "1.0.0-alpha.0" }
+ratelimit = { git = "https://github.com/iopsystems/ratelimit", version = "1.0.1-alpha.0" }
 
 # Utilities
 bytes = "1.11.1"
