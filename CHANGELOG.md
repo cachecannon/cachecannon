@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.11] - 2026-03-20
+
+### Changed
+- Upgrade to histogram 1.0.0 and metriken 0.8 — percentile queries now
+  use the 0.0–1.0 scale (e.g. 0.99 instead of 99.0)
+- Upgrade metriken-exposition to 0.14 and metriken-query to 0.6
+- Replace custom DynamicRateLimiter with the ratelimit crate (1.0.0-alpha.0)
+  from iopsystems/ratelimit
+- Replace ringlog with tracing-appender for non-blocking log output
+
+### Removed
+- Remove unused histogram direct dependency (now used through metriken)
+- Remove unused ringlog dependency
+
+### Added
+- Add CI integration tests for rate-limited and saturation search benchmarks
+  using Valkey
+- Switch TLS integration test from Redis to Valkey
+
 ## [0.0.10] - 2026-03-19
 
 ### Fixed
