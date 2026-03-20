@@ -54,16 +54,16 @@ jobs:
       - name: Run benchmark against Valkey
         run: ./target/release/cachecannon config/valkey-ci.toml
 
-  redis-ratelimit:
-    name: Redis (rate limited)
+  valkey-ratelimit:
+    name: Valkey (rate limited)
     runs-on: ubuntu-latest
     services:
-      redis:
-        image: redis:latest
+      valkey:
+        image: valkey/valkey:latest
         ports:
           - 6379:6379
         options: >-
-          --health-cmd "redis-cli ping"
+          --health-cmd "valkey-cli ping"
           --health-interval 5s
           --health-timeout 5s
           --health-retries 5
@@ -73,19 +73,19 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Build
         run: cargo build --release
-      - name: Run rate-limited benchmark against Redis
-        run: ./target/release/cachecannon config/redis-ratelimit-ci.toml
+      - name: Run rate-limited benchmark against Valkey
+        run: ./target/release/cachecannon config/valkey-ratelimit-ci.toml
 
-  redis-saturation:
-    name: Redis (saturation search)
+  valkey-saturation:
+    name: Valkey (saturation search)
     runs-on: ubuntu-latest
     services:
-      redis:
-        image: redis:latest
+      valkey:
+        image: valkey/valkey:latest
         ports:
           - 6379:6379
         options: >-
-          --health-cmd "redis-cli ping"
+          --health-cmd "valkey-cli ping"
           --health-interval 5s
           --health-timeout 5s
           --health-retries 5
@@ -95,57 +95,63 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Build
         run: cargo build --release
-      - name: Run saturation search benchmark against Redis
-        run: ./target/release/cachecannon config/redis-saturation-ci.toml
+      - name: Run saturation search benchmark against Valkey
+        run: ./target/release/cachecannon config/valkey-saturation-ci.toml
 
-  redis-tls:
-    name: Redis TLS
+  valkey-tls:
+    name: Valkey TLS
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
 
-      - name: Install Redis and generate TLS certificates
+      - name: Install Valkey and generate TLS certificates
         run: |
-          sudo apt-get update && sudo apt-get install -y redis-server
+          sudo apt-get update
+          sudo apt-get install -y valkey-server || {
+            # Fallback: install from Valkey PPA if not in default repos
+            curl -fsSL https://packages.valkey.io/gpg | sudo gpg --dearmor -o /usr/share/keyrings/valkey.gpg
+            echo "deb [signed-by=/usr/share/keyrings/valkey.gpg] https://packages.valkey.io/deb stable main" | sudo tee /etc/apt/sources.list.d/valkey.list
+            sudo apt-get update && sudo apt-get install -y valkey-server
+          }
 
-          mkdir -p /tmp/redis-tls
+          mkdir -p /tmp/valkey-tls
           openssl req -x509 -newkey rsa:4096 -sha256 -days 1 \
-            -nodes -keyout /tmp/redis-tls/redis.key \
-            -out /tmp/redis-tls/redis.crt \
+            -nodes -keyout /tmp/valkey-tls/valkey.key \
+            -out /tmp/valkey-tls/valkey.crt \
             -subj "/CN=localhost" \
             -addext "subjectAltName=DNS:localhost,IP:127.0.0.1"
-          cp /tmp/redis-tls/redis.crt /tmp/redis-tls/ca.crt
+          cp /tmp/valkey-tls/valkey.crt /tmp/valkey-tls/ca.crt
 
-      - name: Start Redis with TLS
+      - name: Start Valkey with TLS
         run: |
-          redis-server \
+          valkey-server \
             --tls-port 6380 \
             --port 0 \
-            --tls-cert-file /tmp/redis-tls/redis.crt \
-            --tls-key-file /tmp/redis-tls/redis.key \
-            --tls-ca-cert-file /tmp/redis-tls/ca.crt \
+            --tls-cert-file /tmp/valkey-tls/valkey.crt \
+            --tls-key-file /tmp/valkey-tls/valkey.key \
+            --tls-ca-cert-file /tmp/valkey-tls/ca.crt \
             --tls-auth-clients no \
             --daemonize yes
 
-          # Wait for Redis to be ready (fail if it never responds)
+          # Wait for Valkey to be ready (fail if it never responds)
           for i in $(seq 1 30); do
-            if redis-cli --tls \
-              --cert /tmp/redis-tls/redis.crt --key /tmp/redis-tls/redis.key \
-              --cacert /tmp/redis-tls/ca.crt \
+            if valkey-cli --tls \
+              --cert /tmp/valkey-tls/valkey.crt --key /tmp/valkey-tls/valkey.key \
+              --cacert /tmp/valkey-tls/ca.crt \
               -p 6380 ping 2>/dev/null | grep -q PONG; then
-              echo "Redis TLS is ready"
+              echo "Valkey TLS is ready"
               exit 0
             fi
-            echo "Waiting for Redis TLS... ($i)"
+            echo "Waiting for Valkey TLS... ($i)"
             sleep 1
           done
-          echo "ERROR: Redis TLS never became ready"
+          echo "ERROR: Valkey TLS never became ready"
           exit 1
 
       - name: Build
         run: cargo build --release
 
-      - name: Run benchmark against Redis TLS
-        run: ./target/release/cachecannon config/redis-tls-ci.toml
+      - name: Run benchmark against Valkey TLS
+        run: ./target/release/cachecannon config/valkey-tls-ci.toml
