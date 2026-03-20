@@ -587,11 +587,11 @@ pub fn run_benchmark_full(
                 (Some(current), Some(previous)) => {
                     if let Ok(delta) = current.wrapping_sub(previous) {
                         (
-                            percentile_from_histogram(&delta, 50.0) / 1000.0,
-                            percentile_from_histogram(&delta, 90.0) / 1000.0,
-                            percentile_from_histogram(&delta, 99.0) / 1000.0,
-                            percentile_from_histogram(&delta, 99.9) / 1000.0,
-                            percentile_from_histogram(&delta, 99.99) / 1000.0,
+                            percentile_from_histogram(&delta, 0.50) / 1000.0,
+                            percentile_from_histogram(&delta, 0.90) / 1000.0,
+                            percentile_from_histogram(&delta, 0.99) / 1000.0,
+                            percentile_from_histogram(&delta, 0.999) / 1000.0,
+                            percentile_from_histogram(&delta, 0.9999) / 1000.0,
                             max_from_histogram(&delta) / 1000.0,
                         )
                     } else {
@@ -599,11 +599,11 @@ pub fn run_benchmark_full(
                     }
                 }
                 (Some(current), None) => (
-                    percentile_from_histogram(current, 50.0) / 1000.0,
-                    percentile_from_histogram(current, 90.0) / 1000.0,
-                    percentile_from_histogram(current, 99.0) / 1000.0,
-                    percentile_from_histogram(current, 99.9) / 1000.0,
-                    percentile_from_histogram(current, 99.99) / 1000.0,
+                    percentile_from_histogram(current, 0.50) / 1000.0,
+                    percentile_from_histogram(current, 0.90) / 1000.0,
+                    percentile_from_histogram(current, 0.99) / 1000.0,
+                    percentile_from_histogram(current, 0.999) / 1000.0,
+                    percentile_from_histogram(current, 0.9999) / 1000.0,
                     max_from_histogram(current) / 1000.0,
                 ),
                 _ => (0.0, 0.0, 0.0, 0.0, 0.0, 0.0),
@@ -699,38 +699,38 @@ pub fn run_benchmark_full(
     let elapsed_secs = actual_duration.as_secs_f64();
 
     let get_latencies = LatencyStats {
-        p50_us: percentile(&metrics::GET_LATENCY, 50.0) / 1000.0,
-        p90_us: percentile(&metrics::GET_LATENCY, 90.0) / 1000.0,
-        p99_us: percentile(&metrics::GET_LATENCY, 99.0) / 1000.0,
-        p999_us: percentile(&metrics::GET_LATENCY, 99.9) / 1000.0,
-        p9999_us: percentile(&metrics::GET_LATENCY, 99.99) / 1000.0,
+        p50_us: percentile(&metrics::GET_LATENCY, 0.50) / 1000.0,
+        p90_us: percentile(&metrics::GET_LATENCY, 0.90) / 1000.0,
+        p99_us: percentile(&metrics::GET_LATENCY, 0.99) / 1000.0,
+        p999_us: percentile(&metrics::GET_LATENCY, 0.999) / 1000.0,
+        p9999_us: percentile(&metrics::GET_LATENCY, 0.9999) / 1000.0,
         max_us: max_percentile(&metrics::GET_LATENCY) / 1000.0,
     };
 
     let get_ttfb = LatencyStats {
-        p50_us: percentile(&metrics::GET_TTFB, 50.0) / 1000.0,
-        p90_us: percentile(&metrics::GET_TTFB, 90.0) / 1000.0,
-        p99_us: percentile(&metrics::GET_TTFB, 99.0) / 1000.0,
-        p999_us: percentile(&metrics::GET_TTFB, 99.9) / 1000.0,
-        p9999_us: percentile(&metrics::GET_TTFB, 99.99) / 1000.0,
+        p50_us: percentile(&metrics::GET_TTFB, 0.50) / 1000.0,
+        p90_us: percentile(&metrics::GET_TTFB, 0.90) / 1000.0,
+        p99_us: percentile(&metrics::GET_TTFB, 0.99) / 1000.0,
+        p999_us: percentile(&metrics::GET_TTFB, 0.999) / 1000.0,
+        p9999_us: percentile(&metrics::GET_TTFB, 0.9999) / 1000.0,
         max_us: max_percentile(&metrics::GET_TTFB) / 1000.0,
     };
 
     let set_latencies = LatencyStats {
-        p50_us: percentile(&metrics::SET_LATENCY, 50.0) / 1000.0,
-        p90_us: percentile(&metrics::SET_LATENCY, 90.0) / 1000.0,
-        p99_us: percentile(&metrics::SET_LATENCY, 99.0) / 1000.0,
-        p999_us: percentile(&metrics::SET_LATENCY, 99.9) / 1000.0,
-        p9999_us: percentile(&metrics::SET_LATENCY, 99.99) / 1000.0,
+        p50_us: percentile(&metrics::SET_LATENCY, 0.50) / 1000.0,
+        p90_us: percentile(&metrics::SET_LATENCY, 0.90) / 1000.0,
+        p99_us: percentile(&metrics::SET_LATENCY, 0.99) / 1000.0,
+        p999_us: percentile(&metrics::SET_LATENCY, 0.999) / 1000.0,
+        p9999_us: percentile(&metrics::SET_LATENCY, 0.9999) / 1000.0,
         max_us: max_percentile(&metrics::SET_LATENCY) / 1000.0,
     };
 
     let backfill_set_latencies = LatencyStats {
-        p50_us: percentile(&metrics::BACKFILL_SET_LATENCY, 50.0) / 1000.0,
-        p90_us: percentile(&metrics::BACKFILL_SET_LATENCY, 90.0) / 1000.0,
-        p99_us: percentile(&metrics::BACKFILL_SET_LATENCY, 99.0) / 1000.0,
-        p999_us: percentile(&metrics::BACKFILL_SET_LATENCY, 99.9) / 1000.0,
-        p9999_us: percentile(&metrics::BACKFILL_SET_LATENCY, 99.99) / 1000.0,
+        p50_us: percentile(&metrics::BACKFILL_SET_LATENCY, 0.50) / 1000.0,
+        p90_us: percentile(&metrics::BACKFILL_SET_LATENCY, 0.90) / 1000.0,
+        p99_us: percentile(&metrics::BACKFILL_SET_LATENCY, 0.99) / 1000.0,
+        p999_us: percentile(&metrics::BACKFILL_SET_LATENCY, 0.999) / 1000.0,
+        p9999_us: percentile(&metrics::BACKFILL_SET_LATENCY, 0.9999) / 1000.0,
         max_us: max_percentile(&metrics::BACKFILL_SET_LATENCY) / 1000.0,
     };
 
@@ -796,7 +796,7 @@ fn max_percentile(hist: &AtomicHistogram) -> f64 {
 
 /// Get the max value from a histogram snapshot.
 fn max_from_histogram(hist: &Histogram) -> f64 {
-    if let Ok(Some(results)) = hist.percentiles(&[100.0])
+    if let Ok(Some(results)) = hist.percentiles(&[1.0])
         && let Some((_pct, bucket)) = results.first()
     {
         return bucket.end() as f64;

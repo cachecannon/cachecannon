@@ -96,18 +96,18 @@ impl SaturationSearchState {
             (Some(current), Some(previous)) => {
                 if let Ok(delta) = current.wrapping_sub(previous) {
                     (
-                        percentile_from_histogram(&delta, 50.0),
-                        percentile_from_histogram(&delta, 99.0),
-                        percentile_from_histogram(&delta, 99.9),
+                        percentile_from_histogram(&delta, 0.50),
+                        percentile_from_histogram(&delta, 0.99),
+                        percentile_from_histogram(&delta, 0.999),
                     )
                 } else {
                     (0.0, 0.0, 0.0)
                 }
             }
             (Some(current), None) => (
-                percentile_from_histogram(current, 50.0),
-                percentile_from_histogram(current, 99.0),
-                percentile_from_histogram(current, 99.9),
+                percentile_from_histogram(current, 0.50),
+                percentile_from_histogram(current, 0.99),
+                percentile_from_histogram(current, 0.999),
             ),
             _ => (0.0, 0.0, 0.0),
         };
