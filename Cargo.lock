@@ -484,7 +484,6 @@ dependencies = [
  "clap",
  "crossbeam-channel",
  "ctrlc",
- "histogram",
  "http",
  "include_dir",
  "itoa",
