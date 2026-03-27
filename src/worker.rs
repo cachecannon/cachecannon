@@ -292,6 +292,8 @@ struct SharedWorkerState {
     task_state: Arc<TaskSharedState>,
     /// Prefill tracking: total keys assigned to this worker.
     prefill_total: usize,
+    /// Number of prefill keys confirmed by this worker.
+    prefill_confirmed: AtomicUsize,
     /// Whether prefill is already complete for this worker.
     prefill_done: AtomicU8, // 0 = not done, 1 = done
     /// Whether precheck is already complete for this worker.
@@ -507,6 +509,7 @@ impl AsyncEventHandler for BenchHandler {
         let worker_state = Arc::new(SharedWorkerState {
             task_state,
             prefill_total,
+            prefill_confirmed: AtomicUsize::new(0),
             prefill_done: AtomicU8::new(if prefill_done { 1 } else { 0 }),
             precheck_done: AtomicU8::new(if precheck_already_done { 1 } else { 0 }),
         });
@@ -1955,14 +1958,17 @@ fn map_momento_op(op: ringline_momento::CompletedOp) -> RequestResult {
 
 /// Confirm a single prefill key was successfully stored.
 fn confirm_prefill_key(state: &Arc<SharedWorkerState>) {
-    let new_total = state
+    // Increment global counter (used by runner for progress reporting).
+    state
         .task_state
         .shared
         .prefill_keys_confirmed
-        .fetch_add(1, Ordering::AcqRel)
-        + 1;
+        .fetch_add(1, Ordering::Release);
 
-    if new_total >= state.prefill_total
+    // Increment per-worker counter and check completion against this worker's total.
+    let worker_confirmed = state.prefill_confirmed.fetch_add(1, Ordering::AcqRel) + 1;
+
+    if worker_confirmed >= state.prefill_total
         && state.prefill_total > 0
         && state
             .prefill_done
@@ -1971,7 +1977,7 @@ fn confirm_prefill_key(state: &Arc<SharedWorkerState>) {
     {
         tracing::debug!(
             worker_id = state.task_state.worker_id,
-            confirmed = new_total,
+            confirmed = worker_confirmed,
             total = state.prefill_total,
             "prefill complete"
         );
@@ -2056,5 +2062,126 @@ fn pin_to_cpu(cpu_id: usize) -> std::io::Result<()> {
         } else {
             Err(io::Error::last_os_error())
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Build a minimal TaskSharedState + SharedWorkerState for testing prefill logic.
+    fn make_worker_state(
+        shared: Arc<SharedState>,
+        worker_id: usize,
+        prefill_total: usize,
+    ) -> Arc<SharedWorkerState> {
+        let config: Config = toml::from_str(
+            r#"
+            [target]
+            endpoints = ["127.0.0.1:6379"]
+            "#,
+        )
+        .unwrap();
+
+        let task_state = Arc::new(TaskSharedState {
+            config,
+            shared,
+            ratelimiter: None,
+            value_pool: Arc::new(vec![0u8; 64]),
+            endpoints: vec!["127.0.0.1:6379".parse().unwrap()],
+            ring: ketama::Ring::build(&["127.0.0.1:6379"]),
+            slot_table: Mutex::new(None),
+            prefill_queue: Mutex::new(VecDeque::new()),
+            worker_id,
+            backfill_on_miss: false,
+            momento_setup: Mutex::new(None),
+            tls_enabled: false,
+            tls_server_name: None,
+        });
+
+        Arc::new(SharedWorkerState {
+            task_state,
+            prefill_total,
+            prefill_confirmed: AtomicUsize::new(0),
+            prefill_done: AtomicU8::new(0),
+            precheck_done: AtomicU8::new(0),
+        })
+    }
+
+    #[test]
+    fn confirm_prefill_key_single_worker() {
+        let shared = Arc::new(SharedState::new());
+        let worker = make_worker_state(Arc::clone(&shared), 0, 3);
+
+        // Confirm 2 of 3 keys — worker should not be done yet.
+        confirm_prefill_key(&worker);
+        confirm_prefill_key(&worker);
+        assert!(!worker.is_prefill_done());
+        assert_eq!(shared.prefill_complete_count(), 0);
+
+        // Confirm the 3rd key — worker should now be done.
+        confirm_prefill_key(&worker);
+        assert!(worker.is_prefill_done());
+        assert_eq!(shared.prefill_complete_count(), 1);
+        assert_eq!(shared.prefill_keys_confirmed(), 3);
+    }
+
+    #[test]
+    fn confirm_prefill_key_multiple_workers_independent() {
+        // Two workers, each with 50 keys. Interleaved confirmations must not
+        // cause one worker to finish early due to the other's progress.
+        let shared = Arc::new(SharedState::new());
+        let worker0 = make_worker_state(Arc::clone(&shared), 0, 50);
+        let worker1 = make_worker_state(Arc::clone(&shared), 1, 50);
+
+        // Worker 1 confirms all 50 of its keys first.
+        for _ in 0..50 {
+            confirm_prefill_key(&worker1);
+        }
+        assert!(worker1.is_prefill_done());
+        assert_eq!(shared.prefill_complete_count(), 1);
+
+        // Worker 0 has confirmed 0 keys — must NOT be done even though
+        // global confirmed (50) >= worker 0's total (50).
+        assert!(!worker0.is_prefill_done());
+
+        // Worker 0 confirms 49 of its 50 keys — still not done.
+        for _ in 0..49 {
+            confirm_prefill_key(&worker0);
+        }
+        assert!(!worker0.is_prefill_done());
+        assert_eq!(shared.prefill_complete_count(), 1);
+
+        // Worker 0 confirms its last key — now done.
+        confirm_prefill_key(&worker0);
+        assert!(worker0.is_prefill_done());
+        assert_eq!(shared.prefill_complete_count(), 2);
+        assert_eq!(shared.prefill_keys_confirmed(), 100);
+    }
+
+    #[test]
+    fn confirm_prefill_key_marks_complete_only_once() {
+        let shared = Arc::new(SharedState::new());
+        let worker = make_worker_state(Arc::clone(&shared), 0, 2);
+
+        confirm_prefill_key(&worker);
+        confirm_prefill_key(&worker);
+        assert!(worker.is_prefill_done());
+        assert_eq!(shared.prefill_complete_count(), 1);
+
+        // Extra confirmations (e.g. late responses) should not double-count.
+        confirm_prefill_key(&worker);
+        assert_eq!(shared.prefill_complete_count(), 1);
+    }
+
+    #[test]
+    fn confirm_prefill_key_zero_total_never_completes() {
+        let shared = Arc::new(SharedState::new());
+        let worker = make_worker_state(Arc::clone(&shared), 0, 0);
+
+        // A worker with prefill_total=0 should never trigger completion
+        // via confirm_prefill_key (it's handled at init time instead).
+        confirm_prefill_key(&worker);
+        assert_eq!(shared.prefill_complete_count(), 0);
     }
 }
