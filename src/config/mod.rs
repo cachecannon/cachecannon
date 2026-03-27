@@ -481,6 +481,52 @@ impl Config {
                 "endpoints must be specified for non-Momento protocols".to_string(),
             ));
         }
+
+        if self.target.protocol == Protocol::MemcacheBinary {
+            return Err(ConfigError::Validation(
+                "memcache-binary protocol is not yet implemented".to_string(),
+            ));
+        }
+
+        if self.general.threads == 0 {
+            return Err(ConfigError::Validation("threads must be >= 1".to_string()));
+        }
+
+        if self.connection.total_connections() == 0 {
+            return Err(ConfigError::Validation(
+                "connections must be >= 1".to_string(),
+            ));
+        }
+
+        let cmds = &self.workload.commands;
+        if cmds.get == 0 && cmds.set == 0 && cmds.delete == 0 {
+            return Err(ConfigError::Validation(
+                "at least one command ratio (get, set, delete) must be > 0".to_string(),
+            ));
+        }
+
+        if let Some(ref sat) = self.workload.saturation_search {
+            if sat.step_multiplier <= 1.0 {
+                return Err(ConfigError::Validation(
+                    "saturation_search.step_multiplier must be > 1.0".to_string(),
+                ));
+            }
+
+            if !(0.0..=1.0).contains(&sat.min_throughput_ratio) {
+                return Err(ConfigError::Validation(
+                    "saturation_search.min_throughput_ratio must be between 0.0 and 1.0"
+                        .to_string(),
+                ));
+            }
+
+            if sat.slo.p50.is_none() && sat.slo.p99.is_none() && sat.slo.p999.is_none() {
+                return Err(ConfigError::Validation(
+                    "saturation_search.slo must have at least one threshold (p50, p99, or p999)"
+                        .to_string(),
+                ));
+            }
+        }
+
         Ok(())
     }
 }
@@ -587,6 +633,163 @@ mod cpu_list_tests {
     #[test]
     fn test_invalid_range() {
         assert!(parse_cpu_list("3-0").is_err());
+    }
+}
+
+#[cfg(test)]
+mod validation_tests {
+    use super::*;
+
+    fn parse_config(toml: &str) -> Result<Config, ConfigError> {
+        let config: Config = toml::from_str(toml).map_err(|e| ConfigError::Parse(e.to_string()))?;
+        config.validate()?;
+        Ok(config)
+    }
+
+    #[test]
+    fn valid_minimal_config() {
+        let config = parse_config(
+            r#"
+            [target]
+            endpoints = ["127.0.0.1:6379"]
+            "#,
+        );
+        assert!(config.is_ok());
+    }
+
+    #[test]
+    fn rejects_memcache_binary() {
+        let err = parse_config(
+            r#"
+            [target]
+            endpoints = ["127.0.0.1:11211"]
+            protocol = "memcache-binary"
+            "#,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("memcache-binary"));
+    }
+
+    #[test]
+    fn rejects_zero_threads() {
+        let err = parse_config(
+            r#"
+            [general]
+            threads = 0
+            [target]
+            endpoints = ["127.0.0.1:6379"]
+            "#,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("threads"));
+    }
+
+    #[test]
+    fn rejects_zero_connections() {
+        let err = parse_config(
+            r#"
+            [target]
+            endpoints = ["127.0.0.1:6379"]
+            [connection]
+            connections = 0
+            "#,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("connections"));
+    }
+
+    #[test]
+    fn rejects_all_zero_command_ratios() {
+        let err = parse_config(
+            r#"
+            [target]
+            endpoints = ["127.0.0.1:6379"]
+            [workload.commands]
+            get = 0
+            set = 0
+            delete = 0
+            "#,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("command ratio"));
+    }
+
+    #[test]
+    fn rejects_step_multiplier_at_one() {
+        let err = parse_config(
+            r#"
+            [target]
+            endpoints = ["127.0.0.1:6379"]
+            [workload.saturation_search]
+            step_multiplier = 1.0
+            [workload.saturation_search.slo]
+            p99 = "1ms"
+            "#,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("step_multiplier"));
+    }
+
+    #[test]
+    fn rejects_step_multiplier_below_one() {
+        let err = parse_config(
+            r#"
+            [target]
+            endpoints = ["127.0.0.1:6379"]
+            [workload.saturation_search]
+            step_multiplier = 0.5
+            [workload.saturation_search.slo]
+            p99 = "1ms"
+            "#,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("step_multiplier"));
+    }
+
+    #[test]
+    fn rejects_min_throughput_ratio_out_of_range() {
+        let err = parse_config(
+            r#"
+            [target]
+            endpoints = ["127.0.0.1:6379"]
+            [workload.saturation_search]
+            min_throughput_ratio = 1.5
+            [workload.saturation_search.slo]
+            p99 = "1ms"
+            "#,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("min_throughput_ratio"));
+    }
+
+    #[test]
+    fn rejects_saturation_search_without_slo_thresholds() {
+        let err = parse_config(
+            r#"
+            [target]
+            endpoints = ["127.0.0.1:6379"]
+            [workload.saturation_search]
+            [workload.saturation_search.slo]
+            "#,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("at least one threshold"));
+    }
+
+    #[test]
+    fn accepts_valid_saturation_search() {
+        let config = parse_config(
+            r#"
+            [target]
+            endpoints = ["127.0.0.1:6379"]
+            [workload.saturation_search]
+            step_multiplier = 1.05
+            min_throughput_ratio = 0.9
+            [workload.saturation_search.slo]
+            p99 = "1ms"
+            "#,
+        );
+        assert!(config.is_ok());
     }
 }
 
