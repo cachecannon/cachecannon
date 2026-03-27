@@ -165,8 +165,11 @@ async fn serve(listener: std::net::TcpListener, state: AppState) {
 
     let app = app(livereload, state);
 
-    listener.set_nonblocking(true).unwrap();
-    let listener = TcpListener::from_std(listener).unwrap();
+    listener
+        .set_nonblocking(true)
+        .expect("failed to set listener to non-blocking mode");
+    let listener =
+        TcpListener::from_std(listener).expect("failed to convert listener to tokio TcpListener");
 
     axum::serve(listener, app)
         .await
@@ -233,48 +236,50 @@ async fn data(
 
 async fn index() -> (StatusCode, [(header::HeaderName, &'static str); 1], String) {
     if let Some(asset) = ASSETS.get_file("index.html") {
-        let body = asset.contents_utf8().unwrap();
-        let content_type = "text/html";
-
-        (
-            StatusCode::OK,
-            [(header::CONTENT_TYPE, content_type)],
-            body.to_string(),
-        )
+        if let Some(body) = asset.contents_utf8() {
+            return (
+                StatusCode::OK,
+                [(header::CONTENT_TYPE, "text/html")],
+                body.to_string(),
+            );
+        }
+        error!("index.html is not valid UTF-8");
     } else {
         error!("index.html missing from build");
-        (
-            StatusCode::NOT_FOUND,
-            [(header::CONTENT_TYPE, "text/plain")],
-            "404 Not Found".to_string(),
-        )
     }
+    (
+        StatusCode::NOT_FOUND,
+        [(header::CONTENT_TYPE, "text/plain")],
+        "404 Not Found".to_string(),
+    )
 }
 
 async fn lib(
     axum::extract::Path(path): axum::extract::Path<String>,
 ) -> (StatusCode, [(header::HeaderName, &'static str); 1], String) {
     if let Some(asset) = ASSETS.get_file(format!("lib/{path}")) {
-        let body = asset.contents_utf8().unwrap();
-        let content_type = if path.ends_with(".js") {
-            "text/javascript"
-        } else if path.ends_with(".css") {
-            "text/css"
-        } else {
-            "text/plain"
-        };
+        if let Some(body) = asset.contents_utf8() {
+            let content_type = if path.ends_with(".js") {
+                "text/javascript"
+            } else if path.ends_with(".css") {
+                "text/css"
+            } else {
+                "text/plain"
+            };
 
-        (
-            StatusCode::OK,
-            [(header::CONTENT_TYPE, content_type)],
-            body.to_string(),
-        )
+            return (
+                StatusCode::OK,
+                [(header::CONTENT_TYPE, content_type)],
+                body.to_string(),
+            );
+        }
+        error!("asset lib/{path} is not valid UTF-8");
     } else {
         error!("path: {path} does not map to a static resource");
-        (
-            StatusCode::NOT_FOUND,
-            [(header::CONTENT_TYPE, "text/plain")],
-            "404 Not Found".to_string(),
-        )
     }
+    (
+        StatusCode::NOT_FOUND,
+        [(header::CONTENT_TYPE, "text/plain")],
+        "404 Not Found".to_string(),
+    )
 }

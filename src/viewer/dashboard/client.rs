@@ -8,7 +8,7 @@ pub fn generate(
     sections: Vec<Section>,
 ) -> View {
     // Use client data
-    let data = client.unwrap();
+    let data = client.expect("client::generate called without client data");
     let mut view = View::new(data, sections);
 
     // CPU utilization

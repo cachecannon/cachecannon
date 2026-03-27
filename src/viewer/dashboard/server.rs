@@ -8,7 +8,7 @@ pub fn generate(
     sections: Vec<Section>,
 ) -> View {
     // Use server data if available, otherwise use benchmark data for structure
-    let data = server.unwrap();
+    let data = server.expect("server::generate called without server data");
     let mut view = View::new(data, sections);
 
     // CPU utilization
