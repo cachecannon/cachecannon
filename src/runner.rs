@@ -584,20 +584,20 @@ pub fn run_benchmark_full(
 
             let current_histogram = metrics::RESPONSE_LATENCY.load();
             let (p50, p90, p99, p999, p9999, max) = match (&current_histogram, &last_histogram) {
-                (Some(current), Some(previous)) => {
-                    if let Ok(delta) = current.wrapping_sub(previous) {
-                        (
-                            percentile_from_histogram(&delta, 0.50) / 1000.0,
-                            percentile_from_histogram(&delta, 0.90) / 1000.0,
-                            percentile_from_histogram(&delta, 0.99) / 1000.0,
-                            percentile_from_histogram(&delta, 0.999) / 1000.0,
-                            percentile_from_histogram(&delta, 0.9999) / 1000.0,
-                            max_from_histogram(&delta) / 1000.0,
-                        )
-                    } else {
+                (Some(current), Some(previous)) => match current.wrapping_sub(previous) {
+                    Ok(delta) => (
+                        percentile_from_histogram(&delta, 0.50) / 1000.0,
+                        percentile_from_histogram(&delta, 0.90) / 1000.0,
+                        percentile_from_histogram(&delta, 0.99) / 1000.0,
+                        percentile_from_histogram(&delta, 0.999) / 1000.0,
+                        percentile_from_histogram(&delta, 0.9999) / 1000.0,
+                        max_from_histogram(&delta) / 1000.0,
+                    ),
+                    Err(e) => {
+                        tracing::warn!("histogram delta computation failed: {e}");
                         (0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
                     }
-                }
+                },
                 (Some(current), None) => (
                     percentile_from_histogram(current, 0.50) / 1000.0,
                     percentile_from_histogram(current, 0.90) / 1000.0,
@@ -777,10 +777,16 @@ fn percentile(hist: &AtomicHistogram, p: f64) -> f64 {
 
 /// Get a percentile from a histogram snapshot.
 fn percentile_from_histogram(hist: &Histogram, p: f64) -> f64 {
-    if let Ok(Some(results)) = hist.percentiles(&[p])
-        && let Some((_pct, bucket)) = results.first()
-    {
-        return bucket.end() as f64;
+    match hist.percentiles(&[p]) {
+        Ok(Some(results)) => {
+            if let Some((_pct, bucket)) = results.first() {
+                return bucket.end() as f64;
+            }
+        }
+        Err(e) => {
+            tracing::warn!("histogram percentile computation failed: {e}");
+        }
+        Ok(None) => {}
     }
     0.0
 }
@@ -796,10 +802,16 @@ fn max_percentile(hist: &AtomicHistogram) -> f64 {
 
 /// Get the max value from a histogram snapshot.
 fn max_from_histogram(hist: &Histogram) -> f64 {
-    if let Ok(Some(results)) = hist.percentiles(&[1.0])
-        && let Some((_pct, bucket)) = results.first()
-    {
-        return bucket.end() as f64;
+    match hist.percentiles(&[1.0]) {
+        Ok(Some(results)) => {
+            if let Some((_pct, bucket)) = results.first() {
+                return bucket.end() as f64;
+            }
+        }
+        Err(e) => {
+            tracing::warn!("histogram max computation failed: {e}");
+        }
+        Ok(None) => {}
     }
     0.0
 }

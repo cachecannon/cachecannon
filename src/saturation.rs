@@ -93,17 +93,17 @@ impl SaturationSearchState {
 
         // Get percentiles from delta histogram
         let (p50, p99, p999) = match (&current_histogram, &self.step_histogram) {
-            (Some(current), Some(previous)) => {
-                if let Ok(delta) = current.wrapping_sub(previous) {
-                    (
-                        percentile_from_histogram(&delta, 0.50),
-                        percentile_from_histogram(&delta, 0.99),
-                        percentile_from_histogram(&delta, 0.999),
-                    )
-                } else {
+            (Some(current), Some(previous)) => match current.wrapping_sub(previous) {
+                Ok(delta) => (
+                    percentile_from_histogram(&delta, 0.50),
+                    percentile_from_histogram(&delta, 0.99),
+                    percentile_from_histogram(&delta, 0.999),
+                ),
+                Err(e) => {
+                    tracing::warn!("histogram delta computation failed: {e}");
                     (0.0, 0.0, 0.0)
                 }
-            }
+            },
             (Some(current), None) => (
                 percentile_from_histogram(current, 0.50),
                 percentile_from_histogram(current, 0.99),
@@ -283,11 +283,17 @@ fn format_duration_short(d: Duration) -> String {
 
 /// Get a percentile from a histogram snapshot (in microseconds).
 fn percentile_from_histogram(hist: &Histogram, p: f64) -> f64 {
-    if let Ok(Some(results)) = hist.percentiles(&[p])
-        && let Some((_pct, bucket)) = results.first()
-    {
-        // Histogram stores nanoseconds, convert to microseconds
-        return bucket.end() as f64 / 1000.0;
+    match hist.percentiles(&[p]) {
+        Ok(Some(results)) => {
+            if let Some((_pct, bucket)) = results.first() {
+                // Histogram stores nanoseconds, convert to microseconds
+                return bucket.end() as f64 / 1000.0;
+            }
+        }
+        Err(e) => {
+            tracing::warn!("histogram percentile computation failed: {e}");
+        }
+        Ok(None) => {}
     }
     0.0
 }
