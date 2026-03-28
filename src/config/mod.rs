@@ -111,7 +111,7 @@ pub enum Protocol {
 #[derive(Debug, Clone, Deserialize)]
 pub struct Connection {
     /// Total number of connections (distributed across threads).
-    /// If not specified, defaults to 1 connection per endpoint.
+    /// If not specified, defaults to 1 connection total.
     #[serde(default = "default_connections")]
     pub connections: usize,
     /// Legacy alias for connections (deprecated, use 'connections' instead)
@@ -140,7 +140,7 @@ pub enum RequestDistribution {
 }
 
 impl Connection {
-    /// Get the effective number of connections, preferring 'connections' over legacy 'pool_size'.
+    /// Get the effective number of connections, preferring legacy 'pool_size' over 'connections' when set.
     pub fn total_connections(&self) -> usize {
         self.pool_size.unwrap_or(self.connections)
     }
@@ -806,7 +806,7 @@ mod humantime_serde {
     }
 
     fn humantime_parse(s: &str) -> Result<Duration, String> {
-        // Simple parser for durations like "60s", "10m", "1h"
+        // Simple parser for durations like "100ns", "500us", "1ms", "60s", "10m", "1h", or bare seconds
         let s = s.trim();
         if s.is_empty() {
             return Err("empty duration".to_string());

@@ -35,7 +35,7 @@ pub enum Phase {
     Precheck = 1,
     /// Prefill phase - write each key exactly once
     Prefill = 2,
-    /// Warmup phase - run workload but don't record metrics
+    /// Warmup phase - run workload; counter baselines are captured at the end so only Running phase data is reported
     Warmup = 3,
     /// Main measurement phase - record metrics
     Running = 4,
@@ -222,9 +222,9 @@ fn recv_config() -> BenchWorkerConfig {
 
 /// Zero-copy send guard referencing a slice of the shared value pool.
 ///
-/// When used with `conn.send_parts().build()`, the kernel sends directly from
-/// the pool memory via SendMsgZc. The `Arc<Vec<u8>>` keeps the pool alive
-/// until the kernel signals completion.
+/// When passed to `fire_set_with_guard()`, the ringline layer can send directly
+/// from the pool memory without copying. The `Arc<Vec<u8>>` keeps the pool
+/// alive until the send completes.
 ///
 /// Size: 8 (Arc ptr) + 4 + 4 = 16 bytes, well within GuardBox's 64-byte limit.
 struct ValuePoolGuard {
