@@ -379,13 +379,16 @@ pub fn run_benchmark_full(
                 // Shutdown workers cleanly
                 shutdown_handle.shutdown();
                 let shutdown_start = Instant::now();
-                for handle in handles {
+                for (i, handle) in handles.into_iter().enumerate() {
                     let remaining =
                         WORKER_SHUTDOWN_TIMEOUT.saturating_sub(shutdown_start.elapsed());
                     if remaining.is_zero() {
+                        tracing::warn!("shutdown timeout: some workers did not finish");
                         break;
                     }
-                    let _ = handle.join();
+                    if let Err(e) = handle.join() {
+                        tracing::error!("worker {i} panicked during precheck shutdown: {e:?}");
+                    }
                 }
 
                 return Err("precheck failed: no connectivity".into());
@@ -653,12 +656,15 @@ pub fn run_benchmark_full(
         shutdown_handle.shutdown();
 
         let shutdown_start = Instant::now();
-        for handle in handles {
+        for (i, handle) in handles.into_iter().enumerate() {
             let remaining = WORKER_SHUTDOWN_TIMEOUT.saturating_sub(shutdown_start.elapsed());
             if remaining.is_zero() {
+                tracing::warn!("shutdown timeout: some workers did not finish");
                 break;
             }
-            let _ = handle.join();
+            if let Err(e) = handle.join() {
+                tracing::error!("worker {i} panicked during prefill shutdown: {e:?}");
+            }
         }
 
         return Err("prefill failed: timed out or stalled".into());
