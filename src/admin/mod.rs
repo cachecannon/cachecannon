@@ -82,7 +82,9 @@ impl AdminServer {
 
                     // Wait for all tasks
                     for task in tasks {
-                        let _ = task.await;
+                        if let Err(e) = task.await {
+                            tracing::error!("admin task panicked: {}", e);
+                        }
                     }
                 });
             })
@@ -104,7 +106,9 @@ impl AdminHandle {
     pub fn shutdown(&mut self) {
         self.stop_notify.notify_waiters();
         if let Some(handle) = self.handle.take() {
-            let _ = handle.join();
+            if let Err(e) = handle.join() {
+                tracing::error!("admin thread panicked: {:?}", e);
+            }
         }
     }
 }
@@ -130,8 +134,11 @@ async fn run_prometheus_server(
                     Ok((mut socket, _peer)) => {
                         tokio::spawn(async move {
                             let mut buf = [0u8; 1024];
-                            // Read the request (we don't really care about it)
-                            let _ = socket.read(&mut buf).await;
+                            // Read the request (we don't parse it, just need to consume it)
+                            if let Err(e) = socket.read(&mut buf).await {
+                                tracing::debug!("prometheus read error: {}", e);
+                                return;
+                            }
 
                             // Generate Prometheus output
                             let body = generate_prometheus_output();
@@ -147,7 +154,9 @@ async fn run_prometheus_server(
                                 body
                             );
 
-                            let _ = socket.write_all(response.as_bytes()).await;
+                            if let Err(e) = socket.write_all(response.as_bytes()).await {
+                                tracing::debug!("prometheus write error: {}", e);
+                            }
                         });
                     }
                     Err(e) => {
