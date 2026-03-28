@@ -105,10 +105,10 @@ pub struct AdminHandle {
 impl AdminHandle {
     pub fn shutdown(&mut self) {
         self.stop_notify.notify_waiters();
-        if let Some(handle) = self.handle.take() {
-            if let Err(e) = handle.join() {
-                tracing::error!("admin thread panicked: {:?}", e);
-            }
+        if let Some(handle) = self.handle.take()
+            && let Err(e) = handle.join()
+        {
+            tracing::error!("admin thread panicked: {:?}", e);
         }
     }
 }
