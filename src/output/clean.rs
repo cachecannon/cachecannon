@@ -329,17 +329,9 @@ impl OutputFormatter for CleanFormatter {
             self.dim("─────────────────────────────────────────────────────────────────────────────────────")
         );
 
-        // Throughput line (guard against division by zero)
-        let throughput = if results.duration_secs > 0.0 {
-            results.responses as f64 / results.duration_secs
-        } else {
-            0.0
-        };
-        let err_pct = if results.responses > 0 {
-            (results.errors as f64 / results.responses as f64) * 100.0
-        } else {
-            0.0
-        };
+        // Throughput line
+        let throughput = results.throughput();
+        let err_pct = results.err_pct();
         let err_str = format!("{}% errors", format_pct(err_pct));
         let err_colored = self.maybe_red(&err_str, err_pct > 0.0);
         println!(
@@ -349,34 +341,20 @@ impl OutputFormatter for CleanFormatter {
             err_colored
         );
 
-        // Bandwidth line (guard against division by zero)
-        let rx_bps = if results.duration_secs > 0.0 {
-            (results.bytes_rx as f64 / results.duration_secs) * 8.0
-        } else {
-            0.0
-        };
-        let tx_bps = if results.duration_secs > 0.0 {
-            (results.bytes_tx as f64 / results.duration_secs) * 8.0
-        } else {
-            0.0
-        };
+        // Bandwidth line
         if results.bytes_rx > 0 || results.bytes_tx > 0 {
             println!(
                 "{}    {} RX, {} TX",
                 self.cyan("bandwidth"),
-                format_bandwidth_bps(rx_bps),
-                format_bandwidth_bps(tx_bps)
+                format_bandwidth_bps(results.rx_bps()),
+                format_bandwidth_bps(results.tx_bps())
             );
         }
 
         println!();
 
         // Hit rate line
-        let hit_pct = if results.hits + results.misses > 0 {
-            (results.hits as f64 / (results.hits + results.misses) as f64) * 100.0
-        } else {
-            0.0
-        };
+        let hit_pct = results.hit_pct();
         println!(
             "{}     {}% ({} hit, {} miss)",
             self.cyan("hit rate"),

@@ -142,6 +142,54 @@ pub struct Results {
     pub conns_total: u64,
 }
 
+impl Results {
+    /// Throughput in responses per second.
+    pub fn throughput(&self) -> f64 {
+        if self.duration_secs > 0.0 {
+            self.responses as f64 / self.duration_secs
+        } else {
+            0.0
+        }
+    }
+
+    /// Error percentage (0.0-100.0).
+    pub fn err_pct(&self) -> f64 {
+        if self.responses > 0 {
+            (self.errors as f64 / self.responses as f64) * 100.0
+        } else {
+            0.0
+        }
+    }
+
+    /// Cache hit percentage (0.0-100.0).
+    pub fn hit_pct(&self) -> f64 {
+        let total = self.hits + self.misses;
+        if total > 0 {
+            (self.hits as f64 / total as f64) * 100.0
+        } else {
+            0.0
+        }
+    }
+
+    /// Receive bandwidth in bits per second.
+    pub fn rx_bps(&self) -> f64 {
+        if self.duration_secs > 0.0 {
+            (self.bytes_rx as f64 / self.duration_secs) * 8.0
+        } else {
+            0.0
+        }
+    }
+
+    /// Transmit bandwidth in bits per second.
+    pub fn tx_bps(&self) -> f64 {
+        if self.duration_secs > 0.0 {
+            (self.bytes_tx as f64 / self.duration_secs) * 8.0
+        } else {
+            0.0
+        }
+    }
+}
+
 /// A single step in saturation search.
 #[derive(Debug, Clone)]
 pub struct SaturationStep {
