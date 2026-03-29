@@ -827,6 +827,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7e3450815272ef58cec6d564423f6e755e25379b217b0bc688e295ba24df6b1d"
 
 [[package]]
+name = "futures-io"
+version = "0.3.32"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cecba35d7ad927e23624b22ad55235f2239cfa44fd10428eecbeba6d6a717718"
+
+[[package]]
 name = "futures-sink"
 version = "0.3.32"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1975,10 +1981,11 @@ dependencies = [
 [[package]]
 name = "ringline"
 version = "0.0.3-alpha.0"
-source = "git+https://github.com/ringline-rs/ringline.git?rev=c084d5c#c084d5cb31f8fe69b3499b7f496287ed5dc475eb"
+source = "git+https://github.com/ringline-rs/ringline.git?rev=fa5cca9#fa5cca918800de925ac324e1c109686fd2a35c1c"
 dependencies = [
  "bytes",
  "crossbeam-channel",
+ "futures-io",
  "io-uring",
  "libc",
  "metriken 0.7.0",
@@ -1990,7 +1997,7 @@ dependencies = [
 [[package]]
 name = "ringline-memcache"
 version = "0.1.1"
-source = "git+https://github.com/ringline-rs/ringline.git?rev=c084d5c#c084d5cb31f8fe69b3499b7f496287ed5dc475eb"
+source = "git+https://github.com/ringline-rs/ringline.git?rev=fa5cca9#fa5cca918800de925ac324e1c109686fd2a35c1c"
 dependencies = [
  "bytes",
  "histogram 0.11.5",
@@ -2004,7 +2011,7 @@ dependencies = [
 [[package]]
 name = "ringline-momento"
 version = "0.1.0"
-source = "git+https://github.com/ringline-rs/ringline.git?rev=c084d5c#c084d5cb31f8fe69b3499b7f496287ed5dc475eb"
+source = "git+https://github.com/ringline-rs/ringline.git?rev=fa5cca9#fa5cca918800de925ac324e1c109686fd2a35c1c"
 dependencies = [
  "bytes",
  "histogram 0.11.5",
@@ -2016,7 +2023,7 @@ dependencies = [
 [[package]]
 name = "ringline-ping"
 version = "0.1.0"
-source = "git+https://github.com/ringline-rs/ringline.git?rev=c084d5c#c084d5cb31f8fe69b3499b7f496287ed5dc475eb"
+source = "git+https://github.com/ringline-rs/ringline.git?rev=fa5cca9#fa5cca918800de925ac324e1c109686fd2a35c1c"
 dependencies = [
  "histogram 0.11.5",
  "libc",
@@ -2028,7 +2035,7 @@ dependencies = [
 [[package]]
 name = "ringline-redis"
 version = "0.1.1"
-source = "git+https://github.com/ringline-rs/ringline.git?rev=c084d5c#c084d5cb31f8fe69b3499b7f496287ed5dc475eb"
+source = "git+https://github.com/ringline-rs/ringline.git?rev=fa5cca9#fa5cca918800de925ac324e1c109686fd2a35c1c"
 dependencies = [
  "bytes",
  "histogram 0.11.5",
