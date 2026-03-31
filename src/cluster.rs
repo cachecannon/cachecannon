@@ -113,7 +113,10 @@ fn build_topology(
     // Build slot table: slot → endpoint index
     let mut slot_table = vec![0u16; SLOT_COUNT as usize];
     for range in slot_map.ranges() {
-        let addr: SocketAddr = range.primary.address.parse().unwrap();
+        let addr: SocketAddr =
+            range.primary.address.parse().map_err(|e| {
+                format!("invalid primary address '{}': {}", range.primary.address, e)
+            })?;
         let idx = addr_to_idx[&addr];
         for slot in range.start..=range.end {
             slot_table[slot as usize] = idx as u16;
