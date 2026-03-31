@@ -48,7 +48,7 @@ pub fn generate(
         })
         .collect();
 
-    for (_, route, generator) in &section_meta {
+    for (name, route, generator) in &section_meta {
         let key = format!("{}.json", &route[1..]);
         let view = generator(
             &benchmark,
@@ -56,9 +56,14 @@ pub fn generate(
             client.as_ref(),
             sections.clone(),
         );
-        state
-            .sections
-            .insert(key, serde_json::to_string(&view).unwrap());
+        match serde_json::to_string(&view) {
+            Ok(json) => {
+                state.sections.insert(key, json);
+            }
+            Err(e) => {
+                tracing::error!(section = name, error = %e, "failed to serialize dashboard view");
+            }
+        }
     }
 
     state
