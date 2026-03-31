@@ -129,8 +129,9 @@ impl OutputFormatter for JsonFormatter {
             cpu_list: config.general.cpu_list.clone(),
         };
 
-        if let Ok(json) = serde_json::to_string(&output) {
-            println!("{}", json);
+        match serde_json::to_string(&output) {
+            Ok(json) => println!("{}", json),
+            Err(e) => tracing::warn!("failed to serialize JSON output: {e}"),
         }
     }
 
@@ -161,8 +162,9 @@ impl OutputFormatter for JsonFormatter {
             max_us: sample.max_us as u64,
         };
 
-        if let Ok(json) = serde_json::to_string(&output) {
-            println!("{}", json);
+        match serde_json::to_string(&output) {
+            Ok(json) => println!("{}", json),
+            Err(e) => tracing::warn!("failed to serialize JSON output: {e}"),
         }
     }
 
@@ -199,8 +201,9 @@ impl OutputFormatter for JsonFormatter {
             elapsed_secs: sample.elapsed.as_secs_f64(),
         };
 
-        if let Ok(json) = serde_json::to_string(&output) {
-            println!("{}", json);
+        match serde_json::to_string(&output) {
+            Ok(json) => println!("{}", json),
+            Err(e) => tracing::warn!("failed to serialize JSON output: {e}"),
         }
     }
 
@@ -235,8 +238,9 @@ impl OutputFormatter for JsonFormatter {
             requests_sent: diag.requests_sent,
         };
 
-        if let Ok(json) = serde_json::to_string(&output) {
-            println!("{}", json);
+        match serde_json::to_string(&output) {
+            Ok(json) => println!("{}", json),
+            Err(e) => tracing::warn!("failed to serialize JSON output: {e}"),
         }
     }
 
@@ -310,8 +314,9 @@ impl OutputFormatter for JsonFormatter {
             conns_failed: results.conns_failed,
         };
 
-        if let Ok(json) = serde_json::to_string(&output) {
-            println!("{}", json);
+        match serde_json::to_string(&output) {
+            Ok(json) => println!("{}", json),
+            Err(e) => tracing::warn!("failed to serialize JSON output: {e}"),
         }
     }
 }
