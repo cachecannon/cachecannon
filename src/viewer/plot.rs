@@ -66,116 +66,6 @@ impl Group {
         }
     }
 
-    #[allow(dead_code)]
-    pub fn push(&mut self, plot: Option<Plot>) {
-        if let Some(plot) = plot {
-            self.plots.push(plot);
-        }
-    }
-
-    #[allow(dead_code)]
-    pub fn plot(&mut self, opts: PlotOpts, series: Option<UntypedSeries>) {
-        if let Some(data) = series.map(|v| v.as_data()) {
-            self.plots.push(Plot {
-                opts,
-                data,
-                min_value: None,
-                max_value: None,
-                time_data: None,
-                formatted_time_data: None,
-                series_names: None,
-                promql_query: None,
-            })
-        }
-    }
-
-    #[allow(dead_code)]
-    pub fn heatmap(&mut self, opts: PlotOpts, series: Option<Heatmap>) {
-        if let Some(heatmap) = series {
-            let echarts_data = heatmap.as_data();
-
-            if !echarts_data.data.is_empty() {
-                self.plots.push(Plot {
-                    opts,
-                    data: echarts_data.data,
-                    min_value: Some(echarts_data.min_value),
-                    max_value: Some(echarts_data.max_value),
-                    time_data: Some(echarts_data.time),
-                    formatted_time_data: Some(echarts_data.formatted_time),
-                    series_names: None,
-                    promql_query: None,
-                })
-            }
-        }
-    }
-
-    #[allow(dead_code)]
-    pub fn scatter(&mut self, opts: PlotOpts, data: Option<Vec<UntypedSeries>>) {
-        if data.is_none() {
-            return;
-        }
-
-        let d = data.unwrap();
-
-        let mut data = Vec::new();
-
-        for series in &d {
-            let d = series.as_data();
-
-            if data.is_empty() {
-                data.push(d[0].clone());
-            }
-
-            data.push(d[1].clone());
-        }
-
-        self.plots.push(Plot {
-            opts,
-            data,
-            min_value: None,
-            max_value: None,
-            time_data: None,
-            formatted_time_data: None,
-            series_names: None,
-            promql_query: None,
-        })
-    }
-
-    // New method to add a multi-series plot
-    #[allow(dead_code)]
-    pub fn multi(&mut self, opts: PlotOpts, cgroup_data: Option<Vec<(String, UntypedSeries)>>) {
-        if cgroup_data.is_none() {
-            return;
-        }
-
-        let mut cgroup_data = cgroup_data.unwrap();
-
-        let mut data = Vec::new();
-        let mut labels = Vec::new();
-
-        for (label, series) in cgroup_data.drain(..) {
-            labels.push(label);
-            let d = series.as_data();
-
-            if data.is_empty() {
-                data.push(d[0].clone());
-            }
-
-            data.push(d[1].clone());
-        }
-
-        self.plots.push(Plot {
-            opts,
-            data,
-            min_value: None,
-            max_value: None,
-            time_data: None,
-            formatted_time_data: None,
-            series_names: Some(labels),
-            promql_query: None,
-        });
-    }
-
     pub fn plot_promql(&mut self, opts: PlotOpts, promql_query: String) {
         self.plots.push(Plot {
             opts,
@@ -207,8 +97,6 @@ pub struct Plot {
     #[serde(skip_serializing_if = "Option::is_none")]
     promql_query: Option<String>,
 }
-
-impl Plot {}
 
 #[derive(Serialize, Clone)]
 pub struct PlotOpts {
@@ -249,16 +137,6 @@ impl PlotOpts {
         }
     }
 
-    #[allow(dead_code)]
-    pub fn multi<T: Into<String>, U: Into<String>>(title: T, id: U, unit: Unit) -> Self {
-        Self {
-            title: title.into(),
-            id: id.into(),
-            style: "multi".to_string(),
-            format: Some(FormatConfig::new(unit)),
-        }
-    }
-
     pub fn scatter<T: Into<String>, U: Into<String>>(title: T, id: U, unit: Unit) -> Self {
         Self {
             title: title.into(),
@@ -268,36 +146,6 @@ impl PlotOpts {
         }
     }
 
-    #[allow(dead_code)]
-    pub fn heatmap<T: Into<String>, U: Into<String>>(title: T, id: U, unit: Unit) -> Self {
-        Self {
-            title: title.into(),
-            id: id.into(),
-            style: "heatmap".to_string(),
-            format: Some(FormatConfig::new(unit)),
-        }
-    }
-
-    // Convenience methods
-    #[allow(dead_code)]
-    pub fn with_unit_system<T: Into<String>>(mut self, unit_system: T) -> Self {
-        if let Some(ref mut format) = self.format {
-            format.unit_system = Some(unit_system.into());
-        }
-
-        self
-    }
-
-    #[allow(dead_code)]
-    pub fn with_axis_label<T: Into<String>>(mut self, y_label: T) -> Self {
-        if let Some(ref mut format) = self.format {
-            format.y_axis_label = Some(y_label.into());
-        }
-
-        self
-    }
-
-    #[allow(dead_code)]
     pub fn with_log_scale(mut self, log_scale: bool) -> Self {
         if let Some(ref mut format) = self.format {
             format.log_scale = Some(log_scale);
@@ -306,15 +154,6 @@ impl PlotOpts {
         self
     }
 
-    #[allow(dead_code)]
-    pub fn with_y_range(mut self, min: f64, max: f64) -> Self {
-        if let Some(ref mut format) = self.format {
-            format.min = Some(min);
-            format.max = Some(max);
-        }
-
-        self
-    }
 }
 
 impl FormatConfig {
@@ -332,7 +171,6 @@ impl FormatConfig {
     }
 }
 
-#[allow(dead_code)]
 pub enum Unit {
     Count,
     Rate,
@@ -341,7 +179,6 @@ pub enum Unit {
     Datarate,
     Bitrate,
     Percentage,
-    Frequency,
 }
 
 impl std::fmt::Display for Unit {
@@ -354,7 +191,6 @@ impl std::fmt::Display for Unit {
             Self::Datarate => "datarate",
             Self::Bitrate => "bitrate",
             Self::Percentage => "percentage",
-            Self::Frequency => "frequency",
         };
 
         write!(f, "{s}")
