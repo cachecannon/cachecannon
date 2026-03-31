@@ -498,6 +498,20 @@ impl Config {
             ));
         }
 
+        if self.workload.values.length == 0 {
+            return Err(ConfigError::Validation(
+                "workload.values.length must be >= 1".to_string(),
+            ));
+        }
+
+        if self.workload.values.length > crate::runner::VALUE_POOL_SIZE {
+            return Err(ConfigError::Validation(format!(
+                "workload.values.length ({}) exceeds the value pool size ({})",
+                self.workload.values.length,
+                crate::runner::VALUE_POOL_SIZE,
+            )));
+        }
+
         let cmds = &self.workload.commands;
         if cmds.get == 0 && cmds.set == 0 && cmds.delete == 0 {
             return Err(ConfigError::Validation(
@@ -790,6 +804,34 @@ mod validation_tests {
             "#,
         );
         assert!(config.is_ok());
+    }
+
+    #[test]
+    fn rejects_zero_value_length() {
+        let err = parse_config(
+            r#"
+            [target]
+            endpoints = ["127.0.0.1:6379"]
+            [workload.values]
+            length = 0
+            "#,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("values.length"));
+    }
+
+    #[test]
+    fn rejects_value_length_exceeding_pool() {
+        let err = parse_config(
+            r#"
+            [target]
+            endpoints = ["127.0.0.1:6379"]
+            [workload.values]
+            length = 2_000_000_000
+            "#,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("value pool size"));
     }
 }
 
