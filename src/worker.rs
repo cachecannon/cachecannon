@@ -22,7 +22,7 @@ use std::net::SocketAddr;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Mutex, OnceLock, RwLock};
 use std::time::{Duration, Instant};
 
 /// Test phase, controlled by main thread and read by workers.
@@ -275,7 +275,7 @@ struct TaskSharedState {
     value_pool: Arc<Vec<u8>>,
     endpoints: Vec<SocketAddr>,
     ring: ketama::Ring,
-    slot_table: Mutex<Option<Vec<u16>>>,
+    slot_table: RwLock<Option<Vec<u16>>>,
     /// Shared prefill queue: tasks pop key IDs from here.
     prefill_queue: Mutex<VecDeque<usize>>,
     /// Worker ID for logging.
@@ -495,7 +495,7 @@ impl AsyncEventHandler for BenchHandler {
             value_pool: cfg.value_pool,
             endpoints,
             ring,
-            slot_table: Mutex::new(slot_table),
+            slot_table: RwLock::new(slot_table),
             prefill_queue: Mutex::new(prefill_queue),
             worker_id: cfg.id,
             backfill_on_miss,
@@ -1167,7 +1167,7 @@ fn check_resp_redirect_parsed(redirect: &resp_proto::Redirect, state: &Arc<Share
     }
 
     if let Ok(addr) = redirect.address.parse::<SocketAddr>() {
-        let mut slot_table = state.task_state.slot_table.lock().unwrap();
+        let mut slot_table = state.task_state.slot_table.write().unwrap();
         if let Some(ref mut table) = *slot_table {
             let endpoint_idx = state.task_state.endpoints.iter().position(|a| *a == addr);
             if let Some(idx) = endpoint_idx {
@@ -2083,7 +2083,7 @@ fn record_counters(result: &RequestResult) {
 
 /// Route a key to an endpoint index.
 fn route_key(state: &TaskSharedState, key: &[u8]) -> usize {
-    let slot_table = state.slot_table.lock().unwrap();
+    let slot_table = state.slot_table.read().unwrap();
     if let Some(ref table) = *slot_table {
         let slot = resp_proto::hash_slot(key);
         table[slot as usize] as usize
@@ -2149,7 +2149,7 @@ mod tests {
             value_pool: Arc::new(vec![0u8; 64]),
             endpoints: vec!["127.0.0.1:6379".parse().unwrap()],
             ring: ketama::Ring::build(&["127.0.0.1:6379"]),
-            slot_table: Mutex::new(None),
+            slot_table: RwLock::new(None),
             prefill_queue: Mutex::new(VecDeque::new()),
             worker_id,
             backfill_on_miss: false,
