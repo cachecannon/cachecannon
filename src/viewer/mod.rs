@@ -223,9 +223,10 @@ async fn about() -> String {
 async fn data(
     axum::extract::State(state): axum::extract::State<Arc<AppState>>,
     axum::extract::Path(path): axum::extract::Path<String>,
-) -> (StatusCode, String) {
+) -> (StatusCode, [(header::HeaderName, &'static str); 1], String) {
     (
         StatusCode::OK,
+        [(header::CONTENT_TYPE, "application/json")],
         state
             .sections
             .get(&path)
