@@ -252,6 +252,10 @@ fn make_value_guard(
     value_len: usize,
     pool_len: usize,
 ) -> ValuePoolGuard {
+    debug_assert!(
+        value_len > 0 && value_len <= pool_len,
+        "value_len ({value_len}) must be in 1..={pool_len}"
+    );
     let max_offset = pool_len - value_len;
     let offset = rng.random_range(0..=max_offset);
     ValuePoolGuard {

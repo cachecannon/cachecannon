@@ -22,6 +22,12 @@ use std::time::{Duration, Instant};
 /// Timeout for waiting on worker threads to finish during shutdown.
 const WORKER_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// Size of the shared random-byte value pool (1 GiB).
+///
+/// Workers pick random offsets into this pool for SET values.  The configured
+/// `workload.values.length` must not exceed this size.
+pub const VALUE_POOL_SIZE: usize = 1024 * 1024 * 1024;
+
 /// Convenience entry point that takes only a [`Config`].
 ///
 /// Parses `cpu_list`, creates the output formatter, installs a Ctrl-C handler,
@@ -167,8 +173,7 @@ pub fn run_benchmark_full(
     // Workers pick random offsets into this pool for SET values, avoiding per-worker
     // copies. The pool is seeded deterministically for reproducibility.
     let value_pool = {
-        const POOL_SIZE: usize = 1024 * 1024 * 1024; // 1 GB
-        let mut pool = vec![0u8; POOL_SIZE];
+        let mut pool = vec![0u8; VALUE_POOL_SIZE];
         let mut rng = Xoshiro256PlusPlus::seed_from_u64(0xdeadbeef);
         // Fill in 8KB chunks for efficiency
         const CHUNK: usize = 8192;

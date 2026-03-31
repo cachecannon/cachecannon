@@ -18,6 +18,6 @@ pub use output::{
     Results, Sample, SaturationResults, SaturationStep, create_formatter,
 };
 pub use ratelimit::Ratelimiter;
-pub use runner::{run_benchmark, run_benchmark_full};
+pub use runner::{VALUE_POOL_SIZE, run_benchmark, run_benchmark_full};
 pub use saturation::SaturationSearchState;
 pub use worker::{BenchWorkerConfig, Phase, SharedState};
