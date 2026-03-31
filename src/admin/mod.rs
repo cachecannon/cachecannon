@@ -223,13 +223,13 @@ fn generate_prometheus_output() -> String {
 
                     // Output count and sum
                     let mut count = 0u64;
-                    let mut sum = 0u64;
+                    let mut sum = 0u128;
                     for bucket in snapshot.into_iter() {
                         let bucket_count = bucket.count();
                         count += bucket_count;
                         // Use midpoint of bucket for sum approximation
-                        let midpoint = (bucket.start() + bucket.end()) / 2;
-                        sum += bucket_count * midpoint;
+                        let midpoint = (bucket.start() as u128 + bucket.end() as u128) / 2;
+                        sum += bucket_count as u128 * midpoint;
                     }
                     output.push_str(&format!("{}_count {}\n", name, count));
                     output.push_str(&format!("{}_sum {}\n", name, sum));
