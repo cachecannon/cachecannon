@@ -487,7 +487,6 @@ dependencies = [
  "histogram 1.0.0",
  "http",
  "include_dir",
- "itoa",
  "ketama",
  "libc",
  "metriken 0.8.0",

@@ -8,6 +8,44 @@ repository = "https://github.com/cachecannon/cachecannon"
 description = "High-performance cache protocol benchmark tool"
 
 [dependencies]
+# Metrics query engine (used by viewer)
+metriken-query = { version = "0.6", features = ["http"] }
+
+# Configuration
+toml = "0.8"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1.0"
+
+# Time/Date
+chrono = { version = "0.4", features = ["serde"] }
+
+# CLI
+clap = { version = "4", features = ["derive"] }
+
+# Error handling
+thiserror = "2"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Async runtime (used by viewer and admin server)
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "net", "io-util", "sync", "time", "macros"] }
+
+# Viewer dependencies
+arrow = "56"
+parquet = "56"
+axum = "0.8"
+tower = "0.5"
+tower-http = { version = "0.6", features = ["compression-gzip", "decompression-gzip"] }
+tower-livereload = "0.9"
+include_dir = "0.7"
+open = "5"
+tracing-appender = "0.2"
+http = "1"
+
+# Linux-only dependencies (benchmark engine requires io_uring)
+[target.'cfg(target_os = "linux")'.dependencies]
 # I/O event loop
 ringline = { git = "https://github.com/ringline-rs/ringline.git", rev = "bd08001", features = ["timestamps"] }
 ringline-momento = { git = "https://github.com/ringline-rs/ringline.git", rev = "bd08001", features = ["timestamps"] }
@@ -30,18 +68,6 @@ ringline-ping = { git = "https://github.com/ringline-rs/ringline.git", rev = "bd
 histogram = "1.0.0"
 metriken = "0.8"
 metriken-exposition = { version = "0.14", features = ["parquet"] }
-metriken-query = { version = "0.6", features = ["http"] }
-
-# Configuration
-toml = "0.8"
-serde = { version = "1", features = ["derive"] }
-serde_json = "1.0"
-
-# Time/Date
-chrono = { version = "0.4", features = ["serde"] }
-
-# CLI
-clap = { version = "4", features = ["derive"] }
 
 # TLS
 rustls = { version = "0.23", default-features = false, features = ["std", "ring"] }
@@ -54,12 +80,6 @@ ratelimit = { git = "https://github.com/iopsystems/ratelimit", version = "1.0.1-
 bytes = "1.11.1"
 libc = "0.2"
 socket2 = { version = "0.5", features = ["all"] }
-thiserror = "2"
-itoa = "1.0"
-
-# Logging
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 # RNG for workload generation
 rand = "0.9"
@@ -67,21 +87,6 @@ rand_xoshiro = "0.7"
 
 # Signal handling
 ctrlc = { version = "3", features = ["termination"] }
-
-# Async runtime for admin server
-tokio = { version = "1", features = ["rt", "rt-multi-thread", "net", "io-util", "sync", "time", "macros"] }
-
-# Viewer dependencies
-arrow = "56"
-parquet = "56"
-axum = "0.8"
-tower = "0.5"
-tower-http = { version = "0.6", features = ["compression-gzip", "decompression-gzip"] }
-tower-livereload = "0.9"
-include_dir = "0.7"
-open = "5"
-tracing-appender = "0.2"
-http = "1"
 
 # Jemalloc allocator
 tikv-jemallocator = "0.6"

@@ -1,16 +1,13 @@
-use cachecannon::config::{
-    Commands, Config, Connection, Distribution, General, Protocol, SaturationSearch, SloThresholds,
-    Target, Values, Workload,
-};
-use cachecannon::output::create_formatter_with_banner;
 use cachecannon::viewer;
-use cachecannon::{parse_cpu_list, run_benchmark_full};
 
-use clap::{Parser, Subcommand, ValueEnum};
+#[cfg(target_os = "linux")]
+use clap::ValueEnum;
+use clap::{Parser, Subcommand};
+#[cfg(target_os = "linux")]
 use std::net::{SocketAddr, ToSocketAddrs};
+#[cfg(target_os = "linux")]
 use std::path::PathBuf;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+#[cfg(target_os = "linux")]
 use std::time::Duration;
 
 /// High-performance Valkey/Redis benchmark tool.
@@ -30,6 +27,7 @@ struct Cli {
     #[command(subcommand)]
     command: Option<Command>,
 
+    #[cfg(target_os = "linux")]
     #[command(flatten)]
     bench: BenchArgs,
 }
@@ -37,6 +35,7 @@ struct Cli {
 #[derive(Subcommand, Debug)]
 enum Command {
     /// Find the maximum throughput that meets latency SLOs.
+    #[cfg(target_os = "linux")]
     Saturate(Box<SaturateArgs>),
     /// View benchmark results from a parquet file in a web dashboard.
     View(viewer::ViewArgs),
@@ -46,6 +45,7 @@ enum Command {
 // Benchmark flags (used by the default run and shared with `saturate`)
 // ---------------------------------------------------------------------------
 
+#[cfg(target_os = "linux")]
 #[derive(Parser, Debug)]
 struct BenchArgs {
     // -- Tier 1 flags -------------------------------------------------------
@@ -163,6 +163,7 @@ struct BenchArgs {
 // Saturate subcommand flags
 // ---------------------------------------------------------------------------
 
+#[cfg(target_os = "linux")]
 #[derive(Parser, Debug)]
 struct SaturateArgs {
     #[command(flatten)]
@@ -201,12 +202,14 @@ struct SaturateArgs {
 // Enums for clap ValueEnum
 // ---------------------------------------------------------------------------
 
+#[cfg(target_os = "linux")]
 #[derive(Debug, Clone, Copy, ValueEnum)]
 enum DistributionArg {
     Uniform,
     Zipf,
 }
 
+#[cfg(target_os = "linux")]
 impl From<DistributionArg> for Distribution {
     fn from(d: DistributionArg) -> Self {
         match d {
@@ -228,23 +231,35 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             viewer::run(args.into());
             Ok(())
         }
+        #[cfg(target_os = "linux")]
         Some(Command::Saturate(args)) => {
             init_tracing();
             let config = build_config_from_saturate(&args)?;
             launch_benchmark(config)
         }
         None => {
-            init_tracing();
-            let config = build_config(&cli.bench)?;
-            launch_benchmark(config)
+            #[cfg(target_os = "linux")]
+            {
+                init_tracing();
+                let config = build_config(&cli.bench)?;
+                launch_benchmark(config)
+            }
+            #[cfg(not(target_os = "linux"))]
+            {
+                Cli::parse_from(["valkey-lab", "--help"]);
+                Ok(())
+            }
         }
     }
 }
 
-/// Set up the output formatter, signal handler, CPU pinning, and launch the
-/// shared benchmark engine.
-fn launch_benchmark(config: Config) -> Result<(), Box<dyn std::error::Error>> {
-    // Parse CPU list if configured
+#[cfg(target_os = "linux")]
+fn launch_benchmark(config: cachecannon::config::Config) -> Result<(), Box<dyn std::error::Error>> {
+    use cachecannon::output::create_formatter_with_banner;
+    use cachecannon::{parse_cpu_list, run_benchmark_full};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
     let cpu_ids = if let Some(ref cpu_list) = config.general.cpu_list {
         match parse_cpu_list(cpu_list) {
             Ok(ids) => Some(ids),
@@ -257,17 +272,14 @@ fn launch_benchmark(config: Config) -> Result<(), Box<dyn std::error::Error>> {
         None
     };
 
-    // Create the output formatter
     let formatter = create_formatter_with_banner(
         config.admin.format,
         config.admin.color,
         "valkey-lab, powered by cachecannon".to_string(),
     );
 
-    // Print config using the formatter
     formatter.print_config(&config);
 
-    // Set up signal handler for graceful shutdown
     let running = Arc::new(AtomicBool::new(true));
     let r = running.clone();
     ctrlc::set_handler(move || {
@@ -278,6 +290,7 @@ fn launch_benchmark(config: Config) -> Result<(), Box<dyn std::error::Error>> {
     run_benchmark_full(config, cpu_ids, formatter, running)
 }
 
+#[cfg(target_os = "linux")]
 fn init_tracing() {
     let (non_blocking, _guard) = tracing_appender::non_blocking(std::io::stderr());
     tracing_subscriber::fmt()
@@ -287,16 +300,22 @@ fn init_tracing() {
                 .add_directive(tracing::Level::INFO.into()),
         )
         .init();
-    // Leak the guard so the non-blocking writer lives for the process lifetime
     std::mem::forget(_guard);
 }
 
 // ---------------------------------------------------------------------------
-// Config construction
+// Config construction (Linux only)
 // ---------------------------------------------------------------------------
+
+#[cfg(target_os = "linux")]
+use cachecannon::config::{
+    Commands, Config, Connection, Distribution, General, Protocol, SaturationSearch, SloThresholds,
+    Target, Values, Workload,
+};
 
 /// Build a [`Config`] from the bench CLI flags, optionally layering on top of
 /// a TOML base config loaded via `--config`.
+#[cfg(target_os = "linux")]
 fn build_config(args: &BenchArgs) -> Result<Config, Box<dyn std::error::Error>> {
     let mut config = load_base_config(args)?;
     apply_bench_flags(&mut config, args)?;
@@ -305,6 +324,7 @@ fn build_config(args: &BenchArgs) -> Result<Config, Box<dyn std::error::Error>> 
 
 /// Build a [`Config`] for the `saturate` subcommand. This layers the bench
 /// flags *and* the saturation-specific flags on top of an optional TOML base.
+#[cfg(target_os = "linux")]
 fn build_config_from_saturate(args: &SaturateArgs) -> Result<Config, Box<dyn std::error::Error>> {
     let mut config = build_config(&args.bench)?;
 
@@ -338,6 +358,7 @@ fn build_config_from_saturate(args: &SaturateArgs) -> Result<Config, Box<dyn std
 }
 
 /// If `--config` was provided, load it as the base; otherwise start from defaults.
+#[cfg(target_os = "linux")]
 fn load_base_config(args: &BenchArgs) -> Result<Config, Box<dyn std::error::Error>> {
     if let Some(ref path) = args.config {
         Ok(Config::load(path)?)
@@ -378,6 +399,7 @@ fn load_base_config(args: &BenchArgs) -> Result<Config, Box<dyn std::error::Erro
 
 /// Apply explicitly-provided CLI flags onto the config, preserving TOML
 /// values for anything the user didn't specify on the command line.
+#[cfg(target_os = "linux")]
 fn apply_bench_flags(
     config: &mut Config,
     args: &BenchArgs,
@@ -484,6 +506,7 @@ fn apply_bench_flags(
 // ---------------------------------------------------------------------------
 
 /// Parse a ratio string like "80:20" into (get, set) u8 values.
+#[cfg(target_os = "linux")]
 fn parse_ratio(s: &str) -> Result<(u8, u8), Box<dyn std::error::Error>> {
     let parts: Vec<&str> = s.split(':').collect();
     if parts.len() != 2 {
@@ -504,6 +527,7 @@ fn parse_ratio(s: &str) -> Result<(u8, u8), Box<dyn std::error::Error>> {
 }
 
 /// Parse a human-readable duration string (e.g. "500us", "1ms", "5s").
+#[cfg(target_os = "linux")]
 fn parse_duration(s: &str) -> Result<Duration, String> {
     let s = s.trim();
     if s.is_empty() {
@@ -529,6 +553,7 @@ fn parse_duration(s: &str) -> Result<Duration, String> {
 }
 
 /// Resolve a hostname (or IP literal) and port to a `SocketAddr`.
+#[cfg(target_os = "linux")]
 fn resolve_host(host: &str, port: u16) -> Result<SocketAddr, Box<dyn std::error::Error>> {
     (host, port)
         .to_socket_addrs()?
@@ -536,7 +561,7 @@ fn resolve_host(host: &str, port: u16) -> Result<SocketAddr, Box<dyn std::error:
         .ok_or_else(|| format!("could not resolve host '{host}'").into())
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "linux"))]
 mod tests {
     use super::*;
 
