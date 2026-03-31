@@ -153,7 +153,6 @@ impl PlotOpts {
 
         self
     }
-
 }
 
 impl FormatConfig {
