@@ -1691,6 +1691,7 @@ async fn momento_connection_task(state: Arc<SharedWorkerState>, _conn_idx: usize
     let mut rng = Xoshiro256PlusPlus::seed_from_u64(seed);
     let mut key_buf = vec![0u8; config.workload.keyspace.length];
     let mut value_buf = vec![0u8; config.workload.values.length];
+    let mut backfill_queue: Vec<usize> = Vec::new();
 
     // Fill value buffer with random data
     let mut init_rng = Xoshiro256PlusPlus::seed_from_u64(42);
@@ -1756,9 +1757,15 @@ async fn momento_connection_task(state: Arc<SharedWorkerState>, _conn_idx: usize
         }
 
         // Drive workload
-        let result =
-            drive_momento_session(&mut client, &state, &mut rng, &mut key_buf, &mut value_buf)
-                .await;
+        let result = drive_momento_session(
+            &mut client,
+            &state,
+            &mut rng,
+            &mut key_buf,
+            &mut value_buf,
+            &mut backfill_queue,
+        )
+        .await;
 
         metrics::CONNECTIONS_ACTIVE.decrement();
 
@@ -1781,6 +1788,7 @@ async fn drive_momento_session(
     rng: &mut Xoshiro256PlusPlus,
     key_buf: &mut [u8],
     value_buf: &mut [u8],
+    backfill_queue: &mut Vec<usize>,
 ) -> Result<(), DisconnectReason> {
     let config = &state.task_state.config;
     let key_count = config.workload.keyspace.count;
@@ -1789,6 +1797,7 @@ async fn drive_momento_session(
     let pipeline_depth = config.connection.pipeline_depth;
     let cache_name = &config.momento.cache_name;
     let ttl_ms = config.momento.ttl_seconds * 1000;
+    let backfill_on_miss = state.task_state.backfill_on_miss;
     let mut prefill_in_flight: VecDeque<usize> = VecDeque::new();
 
     loop {
@@ -1811,7 +1820,7 @@ async fn drive_momento_session(
                 write_key(key_buf, key_id);
                 rng.fill_bytes(value_buf);
 
-                match client.fire_set(cache_name, key_buf, value_buf, ttl_ms) {
+                match client.fire_set(cache_name, key_buf, value_buf, ttl_ms, 0) {
                     Ok(_) => {
                         metrics::REQUESTS_SENT.increment();
                         prefill_in_flight.push_back(key_id);
@@ -1825,6 +1834,32 @@ async fn drive_momento_session(
             }
         } else if phase == Phase::Warmup || phase == Phase::Running {
             while client.pending_count() < pipeline_depth {
+                // Drain backfill queue first
+                if let Some(key_id) = backfill_queue.pop() {
+                    write_key(key_buf, key_id);
+                    rng.fill_bytes(value_buf);
+
+                    if let Some(ref rl) = state.task_state.ratelimiter
+                        && rl.try_wait().is_err()
+                    {
+                        backfill_queue.push(key_id);
+                        break;
+                    }
+
+                    let user_data = key_id as u64 | BACKFILL_MARKER;
+                    match client.fire_set(cache_name, key_buf, value_buf, ttl_ms, user_data) {
+                        Ok(_) => {
+                            metrics::REQUESTS_SENT.increment();
+                        }
+                        Err(_) => {
+                            backfill_queue.push(key_id);
+                            break;
+                        }
+                    }
+                    continue;
+                }
+
+                // Rate limiting
                 if let Some(ref rl) = state.task_state.ratelimiter
                     && rl.try_wait().is_err()
                 {
@@ -1836,13 +1871,13 @@ async fn drive_momento_session(
 
                 let roll = rng.random_range(0..100);
                 let sent = if roll < get_ratio {
-                    client.fire_get(cache_name, key_buf).is_ok()
+                    client.fire_get(cache_name, key_buf, key_id as u64).is_ok()
                 } else if roll < get_ratio + delete_ratio {
-                    client.fire_delete(cache_name, key_buf).is_ok()
+                    client.fire_delete(cache_name, key_buf, 0).is_ok()
                 } else {
                     rng.fill_bytes(value_buf);
                     client
-                        .fire_set(cache_name, key_buf, value_buf, ttl_ms)
+                        .fire_set(cache_name, key_buf, value_buf, ttl_ms, 0)
                         .is_ok()
                 };
 
@@ -1888,6 +1923,21 @@ async fn drive_momento_session(
             }
         }
 
+        // Handle backfill-on-miss
+        if backfill_on_miss
+            && result.request_type == RequestType::Get
+            && result.success
+            && result.hit == Some(false)
+            && let Some(key_id) = result.key_id
+        {
+            backfill_queue.push(key_id);
+        }
+
+        // Handle backfill SET tracking
+        if result.backfill && result.request_type == RequestType::Set && result.success {
+            metrics::BACKFILL_SET_COUNT.increment();
+        }
+
         // Record counter metrics (latency is recorded by the on_result callback)
         record_counters(&result);
     }
@@ -1896,32 +1946,37 @@ async fn drive_momento_session(
 /// Map a ringline-momento CompletedOp to a RequestResult.
 fn map_momento_op(op: ringline_momento::CompletedOp) -> RequestResult {
     match op {
-        ringline_momento::CompletedOp::Get { id, result, .. } => {
+        ringline_momento::CompletedOp::Get {
+            result, user_data, ..
+        } => {
             let (success, is_error, hit) = match result {
                 Ok(Some(_)) => (true, false, Some(true)),
                 Ok(None) => (true, false, Some(false)),
                 Err(_) => (false, true, None),
             };
             RequestResult {
-                id: id.value(),
+                id: 0,
                 success,
                 is_error_response: is_error,
                 latency_ns: 0,
                 ttfb_ns: None,
                 request_type: RequestType::Get,
                 hit,
-                key_id: None,
+                key_id: Some(user_data as usize),
                 backfill: false,
                 redirect: None,
             }
         }
-        ringline_momento::CompletedOp::Set { id, result, .. } => {
+        ringline_momento::CompletedOp::Set {
+            result, user_data, ..
+        } => {
             let (success, is_error) = match result {
                 Ok(()) => (true, false),
                 Err(_) => (false, true),
             };
+            let backfill = user_data & BACKFILL_MARKER != 0;
             RequestResult {
-                id: id.value(),
+                id: 0,
                 success,
                 is_error_response: is_error,
                 latency_ns: 0,
@@ -1929,17 +1984,17 @@ fn map_momento_op(op: ringline_momento::CompletedOp) -> RequestResult {
                 request_type: RequestType::Set,
                 hit: None,
                 key_id: None,
-                backfill: false,
+                backfill,
                 redirect: None,
             }
         }
-        ringline_momento::CompletedOp::Delete { id, result, .. } => {
+        ringline_momento::CompletedOp::Delete { result, .. } => {
             let (success, is_error) = match result {
                 Ok(()) => (true, false),
                 Err(_) => (false, true),
             };
             RequestResult {
-                id: id.value(),
+                id: 0,
                 success,
                 is_error_response: is_error,
                 latency_ns: 0,
