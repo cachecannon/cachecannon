@@ -311,6 +311,8 @@ pub fn run_benchmark_full(
 
     // Track when warmup actually starts (after prefill completes)
     let mut warmup_start: Option<Instant> = None;
+    // Track when the running phase started (for saturation search duration)
+    let mut running_start: Option<Instant> = None;
 
     // Precheck tracking.
     // The precheck timer does not start until all workers have finished
@@ -340,13 +342,8 @@ pub fn run_benchmark_full(
         // Check for signal
         if !running.load(Ordering::SeqCst) {
             shared.set_phase(Phase::Stop);
-            if let Some(ws) = warmup_start {
-                let warmup_elapsed = ws.elapsed();
-                if warmup_elapsed > warmup {
-                    actual_duration = warmup_elapsed - warmup;
-                } else {
-                    actual_duration = Duration::ZERO;
-                }
+            if let Some(rs) = running_start {
+                actual_duration = rs.elapsed();
             } else {
                 actual_duration = Duration::ZERO;
             }
@@ -528,8 +525,17 @@ pub fn run_benchmark_full(
         let warmup_start_time = warmup_start.unwrap_or(start);
         let elapsed = warmup_start_time.elapsed();
 
-        // Check if we're done
-        if elapsed >= warmup + duration {
+        // Check if we're done.
+        // When saturation search is configured, the search controls its own
+        // termination (stop_after_failures, max_rate), so we only stop on
+        // the duration timer if no saturation search is configured.
+        let saturation_done = saturation_state.as_ref().is_some_and(|s| s.is_completed());
+        let has_saturation = config.workload.saturation_search.is_some();
+        let time_done = elapsed >= warmup + duration;
+        if saturation_done || (time_done && !has_saturation) {
+            if let Some(rs) = running_start {
+                actual_duration = rs.elapsed();
+            }
             shared.set_phase(Phase::Stop);
             break;
         }
@@ -538,6 +544,7 @@ pub fn run_benchmark_full(
         if current_phase == Phase::Warmup && elapsed >= warmup {
             shared.set_phase(Phase::Running);
             current_phase = Phase::Running;
+            running_start = Some(Instant::now());
             formatter.print_running(duration);
             formatter.print_header();
             last_report = Instant::now();
