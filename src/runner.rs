@@ -312,8 +312,12 @@ pub fn run_benchmark_full(
     // Track when warmup actually starts (after prefill completes)
     let mut warmup_start: Option<Instant> = None;
 
-    // Precheck tracking
-    let precheck_start = Instant::now();
+    // Precheck tracking.
+    // The precheck timer does not start until all workers have finished
+    // initializing their event loops (io_uring setup, on_start).  This
+    // prevents false timeouts on loaded systems where worker startup
+    // takes longer than the connect_timeout window.
+    let mut precheck_start: Option<Instant> = None;
     let precheck_timeout = config.connection.connect_timeout;
 
     // Prefill progress tracking
@@ -353,7 +357,7 @@ pub fn run_benchmark_full(
         if current_phase == Phase::Precheck {
             let precheck_complete = shared.precheck_complete_count();
             if precheck_complete >= num_threads {
-                let elapsed = precheck_start.elapsed();
+                let elapsed = precheck_start.map_or(Duration::ZERO, |t| t.elapsed());
                 formatter.print_precheck_ok(elapsed);
                 if prefill_enabled {
                     shared.set_phase(Phase::Prefill);
@@ -374,8 +378,23 @@ pub fn run_benchmark_full(
                 continue;
             }
 
+            // Start the precheck timer once all workers have initialized
+            // their event loops.  Until then, workers are still setting up
+            // io_uring and haven't attempted any connections yet.
+            if precheck_start.is_none() {
+                if shared.workers_started() >= num_threads {
+                    precheck_start = Some(Instant::now());
+                } else if handles.iter().all(|h| h.is_finished()) {
+                    // All workers exited before starting — fall through to
+                    // timeout path which will report the failure.
+                    precheck_start = Some(Instant::now() - precheck_timeout);
+                } else {
+                    continue;
+                }
+            }
+
             // Timeout detection
-            let elapsed = precheck_start.elapsed();
+            let elapsed = precheck_start.unwrap().elapsed();
             if elapsed >= precheck_timeout {
                 let conns_failed = metrics::CONNECTIONS_FAILED.value();
                 formatter.print_precheck_failed(elapsed, conns_failed, config.target.protocol);
