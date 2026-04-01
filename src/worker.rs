@@ -88,6 +88,8 @@ pub enum DisconnectReason {
 pub struct SharedState {
     /// Current test phase (controlled by main thread)
     phase: AtomicU8,
+    /// Number of workers whose event loops have started (on_start called)
+    workers_started: AtomicUsize,
     /// Number of workers that have completed precheck
     precheck_done: AtomicUsize,
     /// Number of workers that have completed prefill
@@ -102,6 +104,7 @@ impl SharedState {
     pub fn new() -> Self {
         Self {
             phase: AtomicU8::new(Phase::Connect as u8),
+            workers_started: AtomicUsize::new(0),
             precheck_done: AtomicUsize::new(0),
             prefill_complete: AtomicUsize::new(0),
             prefill_keys_confirmed: AtomicUsize::new(0),
@@ -119,6 +122,18 @@ impl SharedState {
     #[inline]
     pub fn set_phase(&self, phase: Phase) {
         self.phase.store(phase as u8, Ordering::Release);
+    }
+
+    /// Mark one worker's event loop as started.
+    #[inline]
+    pub fn mark_worker_started(&self) {
+        self.workers_started.fetch_add(1, Ordering::Release);
+    }
+
+    /// Get the number of workers whose event loops have started.
+    #[inline]
+    pub fn workers_started(&self) -> usize {
+        self.workers_started.load(Ordering::Acquire)
     }
 
     /// Mark one worker's precheck as complete.
@@ -380,6 +395,7 @@ impl AsyncEventHandler for BenchHandler {
                     );
                 }
             }
+            worker_state.task_state.shared.mark_worker_started();
         }))
     }
 
