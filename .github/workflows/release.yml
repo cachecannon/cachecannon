@@ -25,10 +25,21 @@ jobs:
         run: cargo install cargo-deb
       - name: Build release binary
         run: cargo build --release
+      - name: Extract debug info and strip binaries
+        run: |
+          for bin in cachecannon valkey-lab; do
+            objcopy --only-keep-debug target/release/$bin target/release/$bin.debug
+            objcopy --add-gnu-debuglink=target/release/$bin.debug target/release/$bin
+            strip target/release/$bin
+          done
       - name: Build cachecannon .deb package
-        run: cargo deb --no-build
+        run: cargo deb --no-build --no-strip
       - name: Build valkey-lab .deb package
-        run: cargo deb --no-build --variant valkey-lab
+        run: cargo deb --no-build --no-strip --variant valkey-lab
+      - name: Build cachecannon-dbgsym .deb package
+        run: cargo deb --no-build --no-strip --variant cachecannon-dbgsym
+      - name: Build valkey-lab-dbgsym .deb package
+        run: cargo deb --no-build --no-strip --variant valkey-lab-dbgsym
       - name: Upload .deb artifacts
         uses: actions/upload-artifact@v4
         with:
@@ -53,10 +64,23 @@ jobs:
         run: cargo install cargo-deb
       - name: Build release binary with cross
         run: cross build --release --target aarch64-unknown-linux-gnu
+      - name: Install cross-arch binutils
+        run: sudo apt-get update && sudo apt-get install -y binutils-aarch64-linux-gnu
+      - name: Extract debug info and strip binaries
+        run: |
+          for bin in cachecannon valkey-lab; do
+            aarch64-linux-gnu-objcopy --only-keep-debug target/aarch64-unknown-linux-gnu/release/$bin target/aarch64-unknown-linux-gnu/release/$bin.debug
+            aarch64-linux-gnu-objcopy --add-gnu-debuglink=target/aarch64-unknown-linux-gnu/release/$bin.debug target/aarch64-unknown-linux-gnu/release/$bin
+            aarch64-linux-gnu-strip target/aarch64-unknown-linux-gnu/release/$bin
+          done
       - name: Build cachecannon .deb package
         run: cargo deb --no-build --no-strip --target aarch64-unknown-linux-gnu
       - name: Build valkey-lab .deb package
         run: cargo deb --no-build --no-strip --target aarch64-unknown-linux-gnu --variant valkey-lab
+      - name: Build cachecannon-dbgsym .deb package
+        run: cargo deb --no-build --no-strip --target aarch64-unknown-linux-gnu --variant cachecannon-dbgsym
+      - name: Build valkey-lab-dbgsym .deb package
+        run: cargo deb --no-build --no-strip --target aarch64-unknown-linux-gnu --variant valkey-lab-dbgsym
       - name: Upload .deb artifacts
         uses: actions/upload-artifact@v4
         with:
@@ -77,10 +101,21 @@ jobs:
         run: cargo install cargo-generate-rpm
       - name: Build release binary
         run: cargo build --release
+      - name: Extract debug info and strip binaries
+        run: |
+          for bin in cachecannon valkey-lab; do
+            objcopy --only-keep-debug target/release/$bin target/release/$bin.debug
+            objcopy --add-gnu-debuglink=target/release/$bin.debug target/release/$bin
+            strip target/release/$bin
+          done
       - name: Build cachecannon .rpm package
         run: cargo generate-rpm
       - name: Build valkey-lab .rpm package
         run: cargo generate-rpm -s 'name = "valkey-lab"' -s 'assets = [{source = "target/release/valkey-lab", dest = "/usr/bin/valkey-lab", mode = "0755"}]'
+      - name: Build cachecannon-debuginfo .rpm package
+        run: cargo generate-rpm -s 'name = "cachecannon-debuginfo"' -s 'assets = [{source = "target/release/cachecannon.debug", dest = "/usr/lib/debug/usr/bin/cachecannon.debug", mode = "0644"}]'
+      - name: Build valkey-lab-debuginfo .rpm package
+        run: cargo generate-rpm -s 'name = "valkey-lab-debuginfo"' -s 'assets = [{source = "target/release/valkey-lab.debug", dest = "/usr/lib/debug/usr/bin/valkey-lab.debug", mode = "0644"}]'
       - name: Upload .rpm artifacts
         uses: actions/upload-artifact@v4
         with:
@@ -105,10 +140,23 @@ jobs:
         run: cargo install cargo-generate-rpm
       - name: Build release binary with cross
         run: cross build --release --target aarch64-unknown-linux-gnu
+      - name: Install cross-arch binutils
+        run: sudo apt-get update && sudo apt-get install -y binutils-aarch64-linux-gnu
+      - name: Extract debug info and strip binaries
+        run: |
+          for bin in cachecannon valkey-lab; do
+            aarch64-linux-gnu-objcopy --only-keep-debug target/aarch64-unknown-linux-gnu/release/$bin target/aarch64-unknown-linux-gnu/release/$bin.debug
+            aarch64-linux-gnu-objcopy --add-gnu-debuglink=target/aarch64-unknown-linux-gnu/release/$bin.debug target/aarch64-unknown-linux-gnu/release/$bin
+            aarch64-linux-gnu-strip target/aarch64-unknown-linux-gnu/release/$bin
+          done
       - name: Build cachecannon .rpm package
         run: cargo generate-rpm --target aarch64-unknown-linux-gnu
       - name: Build valkey-lab .rpm package
         run: cargo generate-rpm --target aarch64-unknown-linux-gnu -s 'name = "valkey-lab"' -s 'assets = [{source = "target/aarch64-unknown-linux-gnu/release/valkey-lab", dest = "/usr/bin/valkey-lab", mode = "0755"}]'
+      - name: Build cachecannon-debuginfo .rpm package
+        run: cargo generate-rpm --target aarch64-unknown-linux-gnu -s 'name = "cachecannon-debuginfo"' -s 'assets = [{source = "target/aarch64-unknown-linux-gnu/release/cachecannon.debug", dest = "/usr/lib/debug/usr/bin/cachecannon.debug", mode = "0644"}]'
+      - name: Build valkey-lab-debuginfo .rpm package
+        run: cargo generate-rpm --target aarch64-unknown-linux-gnu -s 'name = "valkey-lab-debuginfo"' -s 'assets = [{source = "target/aarch64-unknown-linux-gnu/release/valkey-lab.debug", dest = "/usr/lib/debug/usr/bin/valkey-lab.debug", mode = "0644"}]'
       - name: Upload .rpm artifacts
         uses: actions/upload-artifact@v4
         with:
