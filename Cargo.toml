@@ -119,6 +119,20 @@ assets = [
     ["target/release/valkey-lab", "usr/bin/", "755"],
 ]
 
+[package.metadata.deb.variants.cachecannon-dbgsym]
+name = "cachecannon-dbgsym"
+section = "debug"
+assets = [
+    ["target/release/cachecannon.debug", "usr/lib/debug/usr/bin/", "644"],
+]
+
+[package.metadata.deb.variants.valkey-lab-dbgsym]
+name = "valkey-lab-dbgsym"
+section = "debug"
+assets = [
+    ["target/release/valkey-lab.debug", "usr/lib/debug/usr/bin/", "644"],
+]
+
 [package.metadata.generate-rpm]
 name = "cachecannon"
 assets = [
