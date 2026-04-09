@@ -231,12 +231,6 @@ pub fn run_benchmark_full(
     };
 
     let ringline_config = ringline::Config {
-        recv_buffer: ringline::RecvBufferConfig {
-            // Use 256KB buffers for io_uring to reduce CQE overhead with large values.
-            ring_size: 1024u16.next_power_of_two(),
-            buffer_size: 256 * 1024,
-            ..Default::default()
-        },
         worker: ringline::WorkerConfig {
             threads: num_threads,
             pin_to_core: false, // We pin in create_for_worker instead

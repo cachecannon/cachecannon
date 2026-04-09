@@ -47,8 +47,8 @@ http = "1"
 # Linux-only dependencies (benchmark engine requires io_uring)
 [target.'cfg(target_os = "linux")'.dependencies]
 # I/O event loop
-ringline = { git = "https://github.com/ringline-rs/ringline.git", rev = "bd08001", features = ["timestamps"] }
-ringline-momento = { git = "https://github.com/ringline-rs/ringline.git", rev = "bd08001", features = ["timestamps"] }
+ringline = { version = "0.0.5", features = ["timestamps"] }
+ringline-momento = { version = "0.1.3", features = ["timestamps"] }
 
 # Consistent hashing
 ketama = "0.0.1"
@@ -60,9 +60,9 @@ crossbeam-channel = "0.5"
 resp-proto = { version = "0.0.1", features = ["resp3"] }
 
 # Client crates
-ringline-redis = { git = "https://github.com/ringline-rs/ringline.git", rev = "bd08001", features = ["timestamps"] }
-ringline-memcache = { git = "https://github.com/ringline-rs/ringline.git", rev = "bd08001", features = ["timestamps"] }
-ringline-ping = { git = "https://github.com/ringline-rs/ringline.git", rev = "bd08001", features = ["timestamps"] }
+ringline-redis = { version = "0.1.4", features = ["timestamps"] }
+ringline-memcache = { version = "0.1.4", features = ["timestamps"] }
+ringline-ping = { version = "0.1.3", features = ["timestamps"] }
 
 # Metrics
 histogram = "1.0.0"
