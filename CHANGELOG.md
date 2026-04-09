@@ -7,6 +7,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- Fix final results latency histogram including warmup/prefill data,
+  causing inflated tail latencies (p999+) in the summary report (#63)
+- Fix prefill completion bug comparing global count against per-worker
+  total (#41)
+- Replace panicking unwrap() calls in viewer with graceful error
+  handling (#42)
+- Replace panicking unwrap with error propagation in cluster slot table
+  build (#52)
+- Use u128 for Prometheus histogram sum to prevent overflow (#54)
+- Fix stale and misleading doc comments (#45)
+
+### Changed
+- Let saturation search control its own run duration (#61)
+- Defer precheck timeout until workers finish initializing (#60)
+- Use RwLock for slot table to reduce contention in route_key (#58)
+- Upgrade ringline to fa5cca9 (#49)
+- Switch ringline dependencies from git to crates.io (#64)
+- Add computed methods to Results, deduplicate formatter logic (#46)
+- Split debug symbols into separate packages to reduce binary size (#62)
+
+### Added
+- Add backfill-on-miss support to Momento driver (#50)
+- Add config validation for value length against pool size (#51)
+- Add config validation for threads, connections, commands, and
+  saturation search (#43)
+- Make viewer work cross-platform by gating benchmark deps behind
+  cfg(target_os = "linux") (#59)
+- Add Content-Type header to viewer data endpoint (#55)
+- Log warnings when histogram percentile or delta computation fails (#44)
+- Log error instead of panicking on dashboard view serialization
+  failure (#53)
+- Log warnings on JSON serialization failures instead of silently
+  dropping output (#56)
+- Log errors in admin server instead of silently discarding them (#47)
+- Log worker thread panics during precheck and prefill error
+  shutdown (#48)
+
+### Removed
+- Remove dead code from viewer plot module (#57)
+
 ## [0.0.11] - 2026-03-20
 
 ### Changed
