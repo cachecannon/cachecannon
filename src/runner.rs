@@ -302,6 +302,10 @@ pub fn run_benchmark_full(
     let mut baseline_get_count = 0u64;
     let mut baseline_set_count = 0u64;
     let mut baseline_backfill_set_count = 0u64;
+    let mut baseline_get_latency: Option<Histogram> = None;
+    let mut baseline_get_ttfb: Option<Histogram> = None;
+    let mut baseline_set_latency: Option<Histogram> = None;
+    let mut baseline_backfill_set_latency: Option<Histogram> = None;
     let mut current_phase = Phase::Precheck;
 
     let mut actual_duration = duration;
@@ -562,6 +566,10 @@ pub fn run_benchmark_full(
             baseline_backfill_set_count = metrics::BACKFILL_SET_COUNT.value();
             baseline_bytes_tx = metrics::BYTES_TX.value();
             baseline_bytes_rx = metrics::BYTES_RX.value();
+            baseline_get_latency = metrics::GET_LATENCY.load();
+            baseline_get_ttfb = metrics::GET_TTFB.load();
+            baseline_set_latency = metrics::SET_LATENCY.load();
+            baseline_backfill_set_latency = metrics::BACKFILL_SET_LATENCY.load();
 
             last_responses = baseline_responses;
             last_errors = baseline_errors;
@@ -735,41 +743,13 @@ pub fn run_benchmark_full(
     let failed = metrics::CONNECTIONS_FAILED.value();
     let elapsed_secs = actual_duration.as_secs_f64();
 
-    let get_latencies = LatencyStats {
-        p50_us: percentile(&metrics::GET_LATENCY, 0.50) / 1000.0,
-        p90_us: percentile(&metrics::GET_LATENCY, 0.90) / 1000.0,
-        p99_us: percentile(&metrics::GET_LATENCY, 0.99) / 1000.0,
-        p999_us: percentile(&metrics::GET_LATENCY, 0.999) / 1000.0,
-        p9999_us: percentile(&metrics::GET_LATENCY, 0.9999) / 1000.0,
-        max_us: max_percentile(&metrics::GET_LATENCY) / 1000.0,
-    };
-
-    let get_ttfb = LatencyStats {
-        p50_us: percentile(&metrics::GET_TTFB, 0.50) / 1000.0,
-        p90_us: percentile(&metrics::GET_TTFB, 0.90) / 1000.0,
-        p99_us: percentile(&metrics::GET_TTFB, 0.99) / 1000.0,
-        p999_us: percentile(&metrics::GET_TTFB, 0.999) / 1000.0,
-        p9999_us: percentile(&metrics::GET_TTFB, 0.9999) / 1000.0,
-        max_us: max_percentile(&metrics::GET_TTFB) / 1000.0,
-    };
-
-    let set_latencies = LatencyStats {
-        p50_us: percentile(&metrics::SET_LATENCY, 0.50) / 1000.0,
-        p90_us: percentile(&metrics::SET_LATENCY, 0.90) / 1000.0,
-        p99_us: percentile(&metrics::SET_LATENCY, 0.99) / 1000.0,
-        p999_us: percentile(&metrics::SET_LATENCY, 0.999) / 1000.0,
-        p9999_us: percentile(&metrics::SET_LATENCY, 0.9999) / 1000.0,
-        max_us: max_percentile(&metrics::SET_LATENCY) / 1000.0,
-    };
-
-    let backfill_set_latencies = LatencyStats {
-        p50_us: percentile(&metrics::BACKFILL_SET_LATENCY, 0.50) / 1000.0,
-        p90_us: percentile(&metrics::BACKFILL_SET_LATENCY, 0.90) / 1000.0,
-        p99_us: percentile(&metrics::BACKFILL_SET_LATENCY, 0.99) / 1000.0,
-        p999_us: percentile(&metrics::BACKFILL_SET_LATENCY, 0.999) / 1000.0,
-        p9999_us: percentile(&metrics::BACKFILL_SET_LATENCY, 0.9999) / 1000.0,
-        max_us: max_percentile(&metrics::BACKFILL_SET_LATENCY) / 1000.0,
-    };
+    let get_latencies = delta_latency_stats(&metrics::GET_LATENCY, &baseline_get_latency);
+    let get_ttfb = delta_latency_stats(&metrics::GET_TTFB, &baseline_get_ttfb);
+    let set_latencies = delta_latency_stats(&metrics::SET_LATENCY, &baseline_set_latency);
+    let backfill_set_latencies = delta_latency_stats(
+        &metrics::BACKFILL_SET_LATENCY,
+        &baseline_backfill_set_latency,
+    );
 
     let results = Results {
         duration_secs: elapsed_secs,
@@ -803,12 +783,35 @@ pub fn run_benchmark_full(
     Ok(())
 }
 
-/// Get a percentile from the atomic histogram (cumulative).
-fn percentile(hist: &AtomicHistogram, p: f64) -> f64 {
-    if let Some(snapshot) = hist.load() {
-        percentile_from_histogram(&snapshot, p)
-    } else {
-        0.0
+/// Compute latency stats from the running-phase delta of an atomic histogram.
+///
+/// Subtracts the baseline snapshot (captured at warmup→running transition) from
+/// the current cumulative histogram so that precheck/prefill/warmup samples are
+/// excluded from the final results.
+fn delta_latency_stats(hist: &AtomicHistogram, baseline: &Option<Histogram>) -> LatencyStats {
+    let current = hist.load();
+    let delta = match (&current, baseline) {
+        (Some(cur), Some(base)) => cur.wrapping_sub(base).ok(),
+        (Some(cur), None) => Some(cur.clone()),
+        _ => None,
+    };
+    match delta {
+        Some(d) => LatencyStats {
+            p50_us: percentile_from_histogram(&d, 0.50) / 1000.0,
+            p90_us: percentile_from_histogram(&d, 0.90) / 1000.0,
+            p99_us: percentile_from_histogram(&d, 0.99) / 1000.0,
+            p999_us: percentile_from_histogram(&d, 0.999) / 1000.0,
+            p9999_us: percentile_from_histogram(&d, 0.9999) / 1000.0,
+            max_us: max_from_histogram(&d) / 1000.0,
+        },
+        None => LatencyStats {
+            p50_us: 0.0,
+            p90_us: 0.0,
+            p99_us: 0.0,
+            p999_us: 0.0,
+            p9999_us: 0.0,
+            max_us: 0.0,
+        },
     }
 }
 
@@ -826,15 +829,6 @@ fn percentile_from_histogram(hist: &Histogram, p: f64) -> f64 {
         Ok(None) => {}
     }
     0.0
-}
-
-/// Get the max value from an atomic histogram.
-fn max_percentile(hist: &AtomicHistogram) -> f64 {
-    if let Some(snapshot) = hist.load() {
-        max_from_histogram(&snapshot)
-    } else {
-        0.0
-    }
 }
 
 /// Get the max value from a histogram snapshot.
