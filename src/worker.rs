@@ -1149,9 +1149,7 @@ fn map_resp_op(op: ringline_redis::CompletedOp) -> RequestResult {
             }
         }
         ringline_redis::CompletedOp::Del {
-            result,
-            latency_ns,
-            ..
+            result, latency_ns, ..
         } => {
             let (success, is_error) = match &result {
                 Ok(_) => (true, false),
@@ -1575,9 +1573,7 @@ fn map_memcache_op(op: ringline_memcache::CompletedOp) -> RequestResult {
             }
         }
         ringline_memcache::CompletedOp::Delete {
-            result,
-            latency_ns,
-            ..
+            result, latency_ns, ..
         } => {
             let (success, is_error) = match &result {
                 Ok(_) => (true, false),
@@ -2051,9 +2047,7 @@ fn map_momento_op(op: ringline_momento::CompletedOp) -> RequestResult {
             }
         }
         ringline_momento::CompletedOp::Delete {
-            result,
-            latency_ns,
-            ..
+            result, latency_ns, ..
         } => {
             let (success, is_error) = match result {
                 Ok(()) => (true, false),

@@ -57,7 +57,7 @@ ketama = "0.0.1"
 crossbeam-channel = "0.5"
 
 # Protocol implementations
-resp-proto = { git = "https://github.com/ringline-rs/ringline", branch = "main", features = ["resp3"] }
+resp-proto = { version = "0.0.1", features = ["resp3"] }
 
 # Client crates
 ringline-redis = { git = "https://github.com/ringline-rs/ringline", branch = "main", features = ["timestamps"] }
