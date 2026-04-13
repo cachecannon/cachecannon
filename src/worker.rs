@@ -693,13 +693,16 @@ fn resolve_tls_server_name(state: &TaskSharedState, endpoint: SocketAddr) -> Opt
 
 // ── on_result callback factories ─────────────────────────────────────────
 
-/// Create a RESP on_result callback that records latency metrics only.
+/// Create a RESP on_result callback that records latency and byte metrics.
 /// Counter metrics (RESPONSES_RECEIVED, GET_COUNT, etc.) are recorded by record_counters().
 fn make_resp_callback() -> impl Fn(&ringline_redis::CommandResult) {
     move |r| {
         match r.command {
             ringline_redis::CommandType::Get => {
                 let _ = metrics::GET_LATENCY.increment(r.latency_ns);
+                if let Some(ttfb) = r.ttfb_ns {
+                    let _ = metrics::GET_TTFB.increment(ttfb);
+                }
             }
             ringline_redis::CommandType::Set => {
                 let _ = metrics::SET_LATENCY.increment(r.latency_ns);
@@ -710,16 +713,21 @@ fn make_resp_callback() -> impl Fn(&ringline_redis::CommandResult) {
             _ => {}
         }
         let _ = metrics::RESPONSE_LATENCY.increment(r.latency_ns);
+        metrics::BYTES_TX.add(r.tx_bytes as u64);
+        metrics::BYTES_RX.add(r.rx_bytes as u64);
     }
 }
 
-/// Create a Memcache on_result callback that records latency metrics only.
+/// Create a Memcache on_result callback that records latency and byte metrics.
 /// Counter metrics (RESPONSES_RECEIVED, GET_COUNT, etc.) are recorded by record_counters().
 fn make_memcache_callback() -> impl Fn(&ringline_memcache::CommandResult) {
     move |r| {
         match r.command {
             ringline_memcache::CommandType::Get => {
                 let _ = metrics::GET_LATENCY.increment(r.latency_ns);
+                if let Some(ttfb) = r.ttfb_ns {
+                    let _ = metrics::GET_TTFB.increment(ttfb);
+                }
             }
             ringline_memcache::CommandType::Set => {
                 let _ = metrics::SET_LATENCY.increment(r.latency_ns);
@@ -730,6 +738,8 @@ fn make_memcache_callback() -> impl Fn(&ringline_memcache::CommandResult) {
             _ => {}
         }
         let _ = metrics::RESPONSE_LATENCY.increment(r.latency_ns);
+        metrics::BYTES_TX.add(r.tx_bytes as u64);
+        metrics::BYTES_RX.add(r.rx_bytes as u64);
     }
 }
 
@@ -746,12 +756,15 @@ fn make_ping_callback() -> impl Fn(&ringline_ping::CommandResult) {
     }
 }
 
-/// Create a Momento on_result callback that records latency metrics for each completed command.
+/// Create a Momento on_result callback that records latency and byte metrics.
 fn make_momento_callback() -> impl Fn(&ringline_momento::CommandResult) {
     move |r| {
         match r.command {
             ringline_momento::CommandType::Get => {
                 let _ = metrics::GET_LATENCY.increment(r.latency_ns);
+                if let Some(ttfb) = r.ttfb_ns {
+                    let _ = metrics::GET_TTFB.increment(ttfb);
+                }
             }
             ringline_momento::CommandType::Set => {
                 let _ = metrics::SET_LATENCY.increment(r.latency_ns);
@@ -761,6 +774,8 @@ fn make_momento_callback() -> impl Fn(&ringline_momento::CommandResult) {
             }
         }
         let _ = metrics::RESPONSE_LATENCY.increment(r.latency_ns);
+        metrics::BYTES_TX.add(r.tx_bytes as u64);
+        metrics::BYTES_RX.add(r.rx_bytes as u64);
     }
 }
 
@@ -1058,6 +1073,7 @@ async fn drive_resp_workload(
         // Handle backfill SET tracking
         if result.backfill && result.request_type == RequestType::Set && result.success {
             metrics::BACKFILL_SET_COUNT.increment();
+            let _ = metrics::BACKFILL_SET_LATENCY.increment(result.latency_ns);
         }
 
         // Handle cluster redirects
@@ -1076,7 +1092,11 @@ const BACKFILL_MARKER: u64 = 1 << 63;
 /// Map a ringline-redis `CompletedOp` to a `RequestResult`.
 fn map_resp_op(op: ringline_redis::CompletedOp) -> RequestResult {
     match op {
-        ringline_redis::CompletedOp::Get { result, user_data } => {
+        ringline_redis::CompletedOp::Get {
+            result,
+            user_data,
+            latency_ns,
+        } => {
             let (success, is_error, hit) = match &result {
                 Ok(Some(_)) => (true, false, Some(true)),
                 Ok(None) => (true, false, Some(false)),
@@ -1091,7 +1111,7 @@ fn map_resp_op(op: ringline_redis::CompletedOp) -> RequestResult {
                 id: 0,
                 success,
                 is_error_response: is_error,
-                latency_ns: 0,
+                latency_ns,
                 ttfb_ns: None,
                 request_type: RequestType::Get,
                 hit,
@@ -1100,7 +1120,11 @@ fn map_resp_op(op: ringline_redis::CompletedOp) -> RequestResult {
                 redirect,
             }
         }
-        ringline_redis::CompletedOp::Set { result, user_data } => {
+        ringline_redis::CompletedOp::Set {
+            result,
+            user_data,
+            latency_ns,
+        } => {
             let (success, is_error) = match &result {
                 Ok(()) => (true, false),
                 Err(_) => (false, true),
@@ -1115,7 +1139,7 @@ fn map_resp_op(op: ringline_redis::CompletedOp) -> RequestResult {
                 id: 0,
                 success,
                 is_error_response: is_error,
-                latency_ns: 0,
+                latency_ns,
                 ttfb_ns: None,
                 request_type: RequestType::Set,
                 hit: None,
@@ -1126,7 +1150,8 @@ fn map_resp_op(op: ringline_redis::CompletedOp) -> RequestResult {
         }
         ringline_redis::CompletedOp::Del {
             result,
-            user_data: _,
+            latency_ns,
+            ..
         } => {
             let (success, is_error) = match &result {
                 Ok(_) => (true, false),
@@ -1141,7 +1166,7 @@ fn map_resp_op(op: ringline_redis::CompletedOp) -> RequestResult {
                 id: 0,
                 success,
                 is_error_response: is_error,
-                latency_ns: 0,
+                latency_ns,
                 ttfb_ns: None,
                 request_type: RequestType::Delete,
                 hit: None,
@@ -1492,6 +1517,7 @@ async fn drive_memcache_workload(
         // Handle backfill SET tracking
         if result.backfill && result.request_type == RequestType::Set && result.success {
             metrics::BACKFILL_SET_COUNT.increment();
+            let _ = metrics::BACKFILL_SET_LATENCY.increment(result.latency_ns);
         }
 
         // Record counter metrics
@@ -1502,7 +1528,11 @@ async fn drive_memcache_workload(
 /// Map a ringline-memcache CompletedOp to a RequestResult.
 fn map_memcache_op(op: ringline_memcache::CompletedOp) -> RequestResult {
     match op {
-        ringline_memcache::CompletedOp::Get { result, user_data } => {
+        ringline_memcache::CompletedOp::Get {
+            result,
+            user_data,
+            latency_ns,
+        } => {
             let (success, is_error, hit) = match &result {
                 Ok(Some(_)) => (true, false, Some(true)),
                 Ok(None) => (true, false, Some(false)),
@@ -1512,7 +1542,7 @@ fn map_memcache_op(op: ringline_memcache::CompletedOp) -> RequestResult {
                 id: 0,
                 success,
                 is_error_response: is_error,
-                latency_ns: 0,
+                latency_ns,
                 ttfb_ns: None,
                 request_type: RequestType::Get,
                 hit,
@@ -1521,7 +1551,11 @@ fn map_memcache_op(op: ringline_memcache::CompletedOp) -> RequestResult {
                 redirect: None,
             }
         }
-        ringline_memcache::CompletedOp::Set { result, user_data } => {
+        ringline_memcache::CompletedOp::Set {
+            result,
+            user_data,
+            latency_ns,
+        } => {
             let (success, is_error) = match &result {
                 Ok(()) => (true, false),
                 Err(_) => (false, true),
@@ -1531,7 +1565,7 @@ fn map_memcache_op(op: ringline_memcache::CompletedOp) -> RequestResult {
                 id: 0,
                 success,
                 is_error_response: is_error,
-                latency_ns: 0,
+                latency_ns,
                 ttfb_ns: None,
                 request_type: RequestType::Set,
                 hit: None,
@@ -1542,7 +1576,8 @@ fn map_memcache_op(op: ringline_memcache::CompletedOp) -> RequestResult {
         }
         ringline_memcache::CompletedOp::Delete {
             result,
-            user_data: _,
+            latency_ns,
+            ..
         } => {
             let (success, is_error) = match &result {
                 Ok(_) => (true, false),
@@ -1552,7 +1587,7 @@ fn map_memcache_op(op: ringline_memcache::CompletedOp) -> RequestResult {
                 id: 0,
                 success,
                 is_error_response: is_error,
-                latency_ns: 0,
+                latency_ns,
                 ttfb_ns: None,
                 request_type: RequestType::Delete,
                 hit: None,
@@ -1956,6 +1991,7 @@ async fn drive_momento_session(
         // Handle backfill SET tracking
         if result.backfill && result.request_type == RequestType::Set && result.success {
             metrics::BACKFILL_SET_COUNT.increment();
+            let _ = metrics::BACKFILL_SET_LATENCY.increment(result.latency_ns);
         }
 
         // Record counter metrics (latency is recorded by the on_result callback)
@@ -1967,7 +2003,10 @@ async fn drive_momento_session(
 fn map_momento_op(op: ringline_momento::CompletedOp) -> RequestResult {
     match op {
         ringline_momento::CompletedOp::Get {
-            result, user_data, ..
+            result,
+            user_data,
+            latency_ns,
+            ..
         } => {
             let (success, is_error, hit) = match result {
                 Ok(Some(_)) => (true, false, Some(true)),
@@ -1978,7 +2017,7 @@ fn map_momento_op(op: ringline_momento::CompletedOp) -> RequestResult {
                 id: 0,
                 success,
                 is_error_response: is_error,
-                latency_ns: 0,
+                latency_ns,
                 ttfb_ns: None,
                 request_type: RequestType::Get,
                 hit,
@@ -1988,7 +2027,10 @@ fn map_momento_op(op: ringline_momento::CompletedOp) -> RequestResult {
             }
         }
         ringline_momento::CompletedOp::Set {
-            result, user_data, ..
+            result,
+            user_data,
+            latency_ns,
+            ..
         } => {
             let (success, is_error) = match result {
                 Ok(()) => (true, false),
@@ -1999,7 +2041,7 @@ fn map_momento_op(op: ringline_momento::CompletedOp) -> RequestResult {
                 id: 0,
                 success,
                 is_error_response: is_error,
-                latency_ns: 0,
+                latency_ns,
                 ttfb_ns: None,
                 request_type: RequestType::Set,
                 hit: None,
@@ -2008,7 +2050,11 @@ fn map_momento_op(op: ringline_momento::CompletedOp) -> RequestResult {
                 redirect: None,
             }
         }
-        ringline_momento::CompletedOp::Delete { result, .. } => {
+        ringline_momento::CompletedOp::Delete {
+            result,
+            latency_ns,
+            ..
+        } => {
             let (success, is_error) = match result {
                 Ok(()) => (true, false),
                 Err(_) => (false, true),
@@ -2017,7 +2063,7 @@ fn map_momento_op(op: ringline_momento::CompletedOp) -> RequestResult {
                 id: 0,
                 success,
                 is_error_response: is_error,
-                latency_ns: 0,
+                latency_ns,
                 ttfb_ns: None,
                 request_type: RequestType::Delete,
                 hit: None,
