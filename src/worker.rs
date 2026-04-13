@@ -15,11 +15,13 @@ use ringline::{AsyncEventHandler, ConnCtx, DriverCtx, RegionId, SendGuard};
 use rand::prelude::*;
 use rand_xoshiro::Xoshiro256PlusPlus;
 use std::any::Any;
+use std::cell::Cell;
 use std::collections::VecDeque;
 use std::future::Future;
 use std::io;
 use std::net::SocketAddr;
 use std::pin::Pin;
+use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
 use std::sync::{Mutex, OnceLock, RwLock};
@@ -691,15 +693,125 @@ fn resolve_tls_server_name(state: &TaskSharedState, endpoint: SocketAddr) -> Opt
     )
 }
 
+// ── Byte estimation helpers ─────────────────────────────────────────────
+
+/// Number of decimal digits needed to represent `n`.
+fn decimal_digits(n: usize) -> usize {
+    if n == 0 {
+        return 1;
+    }
+    let mut d = 0;
+    let mut v = n;
+    while v > 0 {
+        d += 1;
+        v /= 10;
+    }
+    d
+}
+
+/// Estimate TX bytes for a RESP GET command: `*2\r\n$3\r\nGET\r\n$<d>\r\n<key>\r\n`
+fn resp_get_tx(key_len: usize) -> u64 {
+    // *2\r\n  $3\r\nGET\r\n  $<digits>\r\n<key>\r\n
+    (18 + key_len + decimal_digits(key_len)) as u64
+}
+
+/// Estimate TX bytes for a RESP SET command: `*3\r\n$3\r\nSET\r\n$<d>\r\n<key>\r\n$<d>\r\n<val>\r\n`
+fn resp_set_tx(key_len: usize, value_len: usize) -> u64 {
+    (23 + key_len + decimal_digits(key_len) + value_len + decimal_digits(value_len)) as u64
+}
+
+/// Estimate TX bytes for a RESP DEL command: `*2\r\n$3\r\nDEL\r\n$<d>\r\n<key>\r\n`
+fn resp_del_tx(key_len: usize) -> u64 {
+    (18 + key_len + decimal_digits(key_len)) as u64
+}
+
+/// Estimate RX bytes for a RESP response based on result type.
+fn resp_rx_bytes(result: &RequestResult, value_len: usize) -> u64 {
+    match result.request_type {
+        RequestType::Get => match result.hit {
+            Some(true) => (5 + value_len + decimal_digits(value_len)) as u64, // $<d>\r\n<val>\r\n
+            Some(false) => 5, // $-1\r\n
+            None => 0,        // error, unknown size
+        },
+        RequestType::Set => 5,  // +OK\r\n
+        RequestType::Delete => 4, // :N\r\n
+        _ => 0,
+    }
+}
+
+/// Estimate TX bytes for a Memcache GET command: `get <key>\r\n`
+fn memcache_get_tx(key_len: usize) -> u64 {
+    (4 + key_len + 2) as u64
+}
+
+/// Estimate TX bytes for a Memcache SET command: `set <key> 0 0 <bytes>\r\n<value>\r\n`
+fn memcache_set_tx(key_len: usize, value_len: usize) -> u64 {
+    // "set " + key + " 0 0 " + digits(value_len) + "\r\n" + value + "\r\n"
+    (4 + key_len + 5 + decimal_digits(value_len) + 2 + value_len + 2) as u64
+}
+
+/// Estimate TX bytes for a Memcache DELETE command: `delete <key>\r\n`
+fn memcache_del_tx(key_len: usize) -> u64 {
+    (7 + key_len + 2) as u64
+}
+
+/// Estimate RX bytes for a Memcache response based on result type.
+fn memcache_rx_bytes(result: &RequestResult, value_len: usize) -> u64 {
+    match result.request_type {
+        RequestType::Get => match result.hit {
+            // "VALUE <key> 0 <bytes>\r\n<value>\r\nEND\r\n" — key not available, estimate with 0
+            Some(true) => (16 + decimal_digits(value_len) + value_len) as u64,
+            Some(false) => 5, // "END\r\n"
+            None => 0,
+        },
+        RequestType::Set => 8,    // "STORED\r\n"
+        RequestType::Delete => 9, // "DELETED\r\n"
+        _ => 0,
+    }
+}
+
+/// Record byte metrics for a completed request.
+fn record_bytes(result: &RequestResult, key_len: usize, value_len: usize, is_resp: bool) {
+    let (tx, rx) = if is_resp {
+        let tx = match result.request_type {
+            RequestType::Get => resp_get_tx(key_len),
+            RequestType::Set => resp_set_tx(key_len, value_len),
+            RequestType::Delete => resp_del_tx(key_len),
+            _ => 0,
+        };
+        (tx, resp_rx_bytes(result, value_len))
+    } else {
+        let tx = match result.request_type {
+            RequestType::Get => memcache_get_tx(key_len),
+            RequestType::Set => memcache_set_tx(key_len, value_len),
+            RequestType::Delete => memcache_del_tx(key_len),
+            _ => 0,
+        };
+        (tx, memcache_rx_bytes(result, value_len))
+    };
+    if tx > 0 {
+        metrics::BYTES_TX.add(tx);
+    }
+    if rx > 0 {
+        metrics::BYTES_RX.add(rx);
+    }
+}
+
 // ── on_result callback factories ─────────────────────────────────────────
 
-/// Create a RESP on_result callback that records latency metrics only.
-/// Counter metrics (RESPONSES_RECEIVED, GET_COUNT, etc.) are recorded by record_counters().
-fn make_resp_callback() -> impl Fn(&ringline_redis::CommandResult) {
+/// Create a RESP on_result callback that records latency metrics and captures
+/// the last latency value for backfill SET latency tracking.
+fn make_resp_callback(
+    last_latency: Rc<Cell<u64>>,
+) -> impl Fn(&ringline_redis::CommandResult) {
     move |r| {
+        last_latency.set(r.latency_ns);
         match r.command {
             ringline_redis::CommandType::Get => {
                 let _ = metrics::GET_LATENCY.increment(r.latency_ns);
+                if let Some(ttfb) = r.ttfb_ns {
+                    let _ = metrics::GET_TTFB.increment(ttfb);
+                }
             }
             ringline_redis::CommandType::Set => {
                 let _ = metrics::SET_LATENCY.increment(r.latency_ns);
@@ -713,13 +825,19 @@ fn make_resp_callback() -> impl Fn(&ringline_redis::CommandResult) {
     }
 }
 
-/// Create a Memcache on_result callback that records latency metrics only.
-/// Counter metrics (RESPONSES_RECEIVED, GET_COUNT, etc.) are recorded by record_counters().
-fn make_memcache_callback() -> impl Fn(&ringline_memcache::CommandResult) {
+/// Create a Memcache on_result callback that records latency metrics and captures
+/// the last latency value for backfill SET latency tracking.
+fn make_memcache_callback(
+    last_latency: Rc<Cell<u64>>,
+) -> impl Fn(&ringline_memcache::CommandResult) {
     move |r| {
+        last_latency.set(r.latency_ns);
         match r.command {
             ringline_memcache::CommandType::Get => {
                 let _ = metrics::GET_LATENCY.increment(r.latency_ns);
+                if let Some(ttfb) = r.ttfb_ns {
+                    let _ = metrics::GET_TTFB.increment(ttfb);
+                }
             }
             ringline_memcache::CommandType::Set => {
                 let _ = metrics::SET_LATENCY.increment(r.latency_ns);
@@ -746,9 +864,13 @@ fn make_ping_callback() -> impl Fn(&ringline_ping::CommandResult) {
     }
 }
 
-/// Create a Momento on_result callback that records latency metrics for each completed command.
-fn make_momento_callback() -> impl Fn(&ringline_momento::CommandResult) {
+/// Create a Momento on_result callback that records latency metrics and captures
+/// the last latency value for backfill SET latency tracking.
+fn make_momento_callback(
+    last_latency: Rc<Cell<u64>>,
+) -> impl Fn(&ringline_momento::CommandResult) {
     move |r| {
+        last_latency.set(r.latency_ns);
         match r.command {
             ringline_momento::CommandType::Get => {
                 let _ = metrics::GET_LATENCY.increment(r.latency_ns);
@@ -794,8 +916,9 @@ async fn resp_connection_task(state: Arc<SharedWorkerState>, endpoint_idx: usize
 
         metrics::CONNECTIONS_ACTIVE.increment();
         let use_kernel_ts = matches!(config.timestamps.mode, TimestampMode::Software);
+        let last_latency = Rc::new(Cell::new(0u64));
         let mut client = ringline_redis::Client::builder(conn)
-            .on_result(make_resp_callback())
+            .on_result(make_resp_callback(last_latency.clone()))
             .kernel_timestamps(use_kernel_ts)
             .build();
 
@@ -847,6 +970,7 @@ async fn resp_connection_task(state: Arc<SharedWorkerState>, endpoint_idx: usize
             &mut rng,
             &mut key_buf,
             &mut backfill_queue,
+            &last_latency,
         )
         .await;
 
@@ -872,6 +996,7 @@ async fn drive_resp_workload(
     rng: &mut Xoshiro256PlusPlus,
     key_buf: &mut [u8],
     backfill_queue: &mut Vec<usize>,
+    last_latency: &Rc<Cell<u64>>,
 ) -> Result<(), DisconnectReason> {
     let config = &state.task_state.config;
     let key_count = config.workload.keyspace.count;
@@ -1058,6 +1183,7 @@ async fn drive_resp_workload(
         // Handle backfill SET tracking
         if result.backfill && result.request_type == RequestType::Set && result.success {
             metrics::BACKFILL_SET_COUNT.increment();
+            let _ = metrics::BACKFILL_SET_LATENCY.increment(last_latency.get());
         }
 
         // Handle cluster redirects
@@ -1067,6 +1193,9 @@ async fn drive_resp_workload(
 
         // Record counter metrics (latency is recorded by the on_result callback)
         record_counters(&result);
+
+        // Record byte metrics
+        record_bytes(&result, key_buf.len(), value_len, true);
     }
 }
 
@@ -1230,8 +1359,9 @@ async fn memcache_connection_task(state: Arc<SharedWorkerState>, endpoint_idx: u
 
         metrics::CONNECTIONS_ACTIVE.increment();
         let use_kernel_ts = matches!(config.timestamps.mode, TimestampMode::Software);
+        let last_latency = Rc::new(Cell::new(0u64));
         let mut client = ringline_memcache::Client::builder(conn)
-            .on_result(make_memcache_callback())
+            .on_result(make_memcache_callback(last_latency.clone()))
             .kernel_timestamps(use_kernel_ts)
             .build();
 
@@ -1283,6 +1413,7 @@ async fn memcache_connection_task(state: Arc<SharedWorkerState>, endpoint_idx: u
             &mut rng,
             &mut key_buf,
             &mut backfill_queue,
+            &last_latency,
         )
         .await;
 
@@ -1308,6 +1439,7 @@ async fn drive_memcache_workload(
     rng: &mut Xoshiro256PlusPlus,
     key_buf: &mut [u8],
     backfill_queue: &mut Vec<usize>,
+    last_latency: &Rc<Cell<u64>>,
 ) -> Result<(), DisconnectReason> {
     let config = &state.task_state.config;
     let key_count = config.workload.keyspace.count;
@@ -1492,10 +1624,14 @@ async fn drive_memcache_workload(
         // Handle backfill SET tracking
         if result.backfill && result.request_type == RequestType::Set && result.success {
             metrics::BACKFILL_SET_COUNT.increment();
+            let _ = metrics::BACKFILL_SET_LATENCY.increment(last_latency.get());
         }
 
         // Record counter metrics
         record_counters(&result);
+
+        // Record byte metrics
+        record_bytes(&result, key_buf.len(), value_len, false);
     }
 }
 
@@ -1750,8 +1886,9 @@ async fn momento_connection_task(state: Arc<SharedWorkerState>, _conn_idx: usize
 
         // Rebuild with on_result callback + kernel timestamps for latency recording
         let use_kernel_ts = matches!(config.timestamps.mode, TimestampMode::Software);
+        let last_latency = Rc::new(Cell::new(0u64));
         let mut client = ringline_momento::Client::builder(authenticated.conn())
-            .on_result(make_momento_callback())
+            .on_result(make_momento_callback(last_latency.clone()))
             .kernel_timestamps(use_kernel_ts)
             .build();
 
@@ -1784,6 +1921,7 @@ async fn momento_connection_task(state: Arc<SharedWorkerState>, _conn_idx: usize
             &mut key_buf,
             &mut value_buf,
             &mut backfill_queue,
+            &last_latency,
         )
         .await;
 
@@ -1809,6 +1947,7 @@ async fn drive_momento_session(
     key_buf: &mut [u8],
     value_buf: &mut [u8],
     backfill_queue: &mut Vec<usize>,
+    last_latency: &Rc<Cell<u64>>,
 ) -> Result<(), DisconnectReason> {
     let config = &state.task_state.config;
     let key_count = config.workload.keyspace.count;
@@ -1956,10 +2095,14 @@ async fn drive_momento_session(
         // Handle backfill SET tracking
         if result.backfill && result.request_type == RequestType::Set && result.success {
             metrics::BACKFILL_SET_COUNT.increment();
+            let _ = metrics::BACKFILL_SET_LATENCY.increment(last_latency.get());
         }
 
         // Record counter metrics (latency is recorded by the on_result callback)
         record_counters(&result);
+
+        // Momento uses gRPC; precise byte estimation is not feasible, so byte
+        // metrics are not recorded for this protocol.
     }
 }
 
