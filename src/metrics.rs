@@ -180,10 +180,10 @@ pub static SET_LATENCY: AtomicHistogram = AtomicHistogram::new(7, 64);
 )]
 pub static DELETE_LATENCY: AtomicHistogram = AtomicHistogram::new(7, 64);
 
-#[metric(
-    name = "get_ttfb",
-    description = "GET time-to-first-byte histogram (nanoseconds)"
-)]
+// GET TTFB: not registered with metriken because ringline does not yet
+// populate ttfb_ns (always None).  The histogram is still read by the
+// runner / output layer which gates on non-zero values, so it is kept as
+// a plain static to avoid breaking that code path if support is added later.
 pub static GET_TTFB: AtomicHistogram = AtomicHistogram::new(7, 64);
 
 #[metric(

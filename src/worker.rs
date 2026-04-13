@@ -756,11 +756,13 @@ fn memcache_del_tx(key_len: usize) -> u64 {
 }
 
 /// Estimate RX bytes for a Memcache response based on result type.
-fn memcache_rx_bytes(result: &RequestResult, value_len: usize) -> u64 {
+fn memcache_rx_bytes(result: &RequestResult, key_len: usize, value_len: usize) -> u64 {
     match result.request_type {
         RequestType::Get => match result.hit {
-            // "VALUE <key> 0 <bytes>\r\n<value>\r\nEND\r\n" — key not available, estimate with 0
-            Some(true) => (16 + decimal_digits(value_len) + value_len) as u64,
+            // "VALUE <key> 0 <bytes>\r\n<value>\r\nEND\r\n"
+            Some(true) => {
+                (18 + key_len + decimal_digits(value_len) + value_len) as u64
+            }
             Some(false) => 5, // "END\r\n"
             None => 0,
         },
@@ -787,7 +789,7 @@ fn record_bytes(result: &RequestResult, key_len: usize, value_len: usize, is_res
             RequestType::Delete => memcache_del_tx(key_len),
             _ => 0,
         };
-        (tx, memcache_rx_bytes(result, value_len))
+        (tx, memcache_rx_bytes(result, key_len, value_len))
     };
     if tx > 0 {
         metrics::BYTES_TX.add(tx);
@@ -809,9 +811,6 @@ fn make_resp_callback(
         match r.command {
             ringline_redis::CommandType::Get => {
                 let _ = metrics::GET_LATENCY.increment(r.latency_ns);
-                if let Some(ttfb) = r.ttfb_ns {
-                    let _ = metrics::GET_TTFB.increment(ttfb);
-                }
             }
             ringline_redis::CommandType::Set => {
                 let _ = metrics::SET_LATENCY.increment(r.latency_ns);
@@ -835,9 +834,6 @@ fn make_memcache_callback(
         match r.command {
             ringline_memcache::CommandType::Get => {
                 let _ = metrics::GET_LATENCY.increment(r.latency_ns);
-                if let Some(ttfb) = r.ttfb_ns {
-                    let _ = metrics::GET_TTFB.increment(ttfb);
-                }
             }
             ringline_memcache::CommandType::Set => {
                 let _ = metrics::SET_LATENCY.increment(r.latency_ns);
