@@ -592,7 +592,7 @@ impl OutputFormatter for CleanFormatter {
 
         let target = format_rate(step.target_rate as f64);
         let achieved_str = format_rate(step.achieved_rate);
-        let p999_str = format_latency_us(step.p999_us);
+        let slo_p_str = format_latency_us(step.slo_percentile_us);
 
         let bar = self.dim("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
 
@@ -628,9 +628,10 @@ impl OutputFormatter for CleanFormatter {
         println!();
         println!("SLO:    {}{}", target, slo_display);
         println!(
-            "Result: {} @ p999={}",
+            "Result: {} @ {}={}",
             self.bold(&achieved_str),
-            self.bold(&p999_str)
+            step.slo_percentile_label,
+            self.bold(&slo_p_str)
         );
 
         // Fail reason: yellow for throughput, red for latency
@@ -645,7 +646,7 @@ impl OutputFormatter for CleanFormatter {
             && let Some(threshold_us) = step.slo_threshold_us
             && threshold_us > 0.0
         {
-            let headroom = ((threshold_us - step.p999_us) / threshold_us) * 100.0;
+            let headroom = ((threshold_us - step.slo_percentile_us) / threshold_us) * 100.0;
             println!(
                 "{}",
                 self.dim(&format!("Headroom: {:.0}%", headroom.max(0.0)))

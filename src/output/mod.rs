@@ -211,6 +211,10 @@ pub struct SaturationStep {
     pub slo_display: String,
     /// SLO threshold in microseconds (for percentage calculation).
     pub slo_threshold_us: Option<f64>,
+    /// Label of the percentile the SLO is evaluated against (e.g. "p99").
+    pub slo_percentile_label: &'static str,
+    /// Measured value at the SLO percentile, in microseconds.
+    pub slo_percentile_us: f64,
 }
 
 /// Results from saturation search.

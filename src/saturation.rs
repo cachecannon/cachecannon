@@ -134,6 +134,7 @@ impl SaturationSearchState {
         };
 
         // Record step
+        let (slo_percentile_label, slo_percentile_us) = self.slo_percentile(p50, p99, p999);
         let step = SaturationStep {
             target_rate: self.current_rate,
             achieved_rate,
@@ -144,6 +145,8 @@ impl SaturationSearchState {
             fail_reason,
             slo_display: self.slo_display(),
             slo_threshold_us: self.slo_threshold_us(),
+            slo_percentile_label,
+            slo_percentile_us,
         };
         formatter.print_saturation_step(&step);
         self.results.push(step);
@@ -240,6 +243,22 @@ impl SaturationSearchState {
             .or(slo.p99)
             .or(slo.p50)
             .map(|t| t.as_micros() as f64)
+    }
+
+    /// Pick the percentile (label + measured value) that corresponds to the
+    /// SLO's highest configured percentile, matching `slo_display`. Falls back
+    /// to p999 when no SLO is configured.
+    fn slo_percentile(&self, p50_us: f64, p99_us: f64, p999_us: f64) -> (&'static str, f64) {
+        let slo = &self.config.slo;
+        if slo.p999.is_some() {
+            ("p999", p999_us)
+        } else if slo.p99.is_some() {
+            ("p99", p99_us)
+        } else if slo.p50.is_some() {
+            ("p50", p50_us)
+        } else {
+            ("p999", p999_us)
+        }
     }
 
     /// Whether the search has completed.
