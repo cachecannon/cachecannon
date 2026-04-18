@@ -10,6 +10,7 @@ use crate::{
 use ratelimit::Ratelimiter;
 
 use chrono::Utc;
+use histogram::SampleQuantiles;
 use metriken::{AtomicHistogram, histogram::Histogram};
 use rand::RngCore;
 use rand_xoshiro::Xoshiro256PlusPlus;
@@ -812,9 +813,9 @@ fn delta_latency_stats(hist: &AtomicHistogram, baseline: &Option<Histogram>) -> 
 
 /// Get a percentile from a histogram snapshot.
 fn percentile_from_histogram(hist: &Histogram, p: f64) -> f64 {
-    match hist.percentiles(&[p]) {
+    match hist.quantiles(&[p]) {
         Ok(Some(results)) => {
-            if let Some((_pct, bucket)) = results.first() {
+            if let Some(bucket) = results.entries().values().next() {
                 return bucket.end() as f64;
             }
         }
@@ -828,12 +829,8 @@ fn percentile_from_histogram(hist: &Histogram, p: f64) -> f64 {
 
 /// Get the max value from a histogram snapshot.
 fn max_from_histogram(hist: &Histogram) -> f64 {
-    match hist.percentiles(&[1.0]) {
-        Ok(Some(results)) => {
-            if let Some((_pct, bucket)) = results.first() {
-                return bucket.end() as f64;
-            }
-        }
+    match hist.quantile(1.0) {
+        Ok(Some(results)) => return results.max().end() as f64,
         Err(e) => {
             tracing::warn!("histogram max computation failed: {e}");
         }

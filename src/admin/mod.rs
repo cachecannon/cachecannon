@@ -1,3 +1,4 @@
+use histogram::SampleQuantiles;
 use metriken_exposition::{
     Counter as SnapCounter, Gauge as SnapGauge, Histogram as SnapHistogram, ParquetOptions,
     ParquetSchema, Snapshot, SnapshotV2,
@@ -207,15 +208,14 @@ fn generate_prometheus_output() -> String {
                 {
                     output.push_str(&format!("# TYPE {} histogram\n", name));
 
-                    // Output percentiles as summary-style metrics
-                    let percentiles = [0.50, 0.90, 0.95, 0.99, 0.999, 0.9999];
-                    if let Ok(Some(results)) = snapshot.percentiles(&percentiles) {
-                        for (pct, bucket) in results {
-                            let quantile = pct;
+                    // Output quantiles as summary-style metrics
+                    let quantiles = [0.50, 0.90, 0.95, 0.99, 0.999, 0.9999];
+                    if let Ok(Some(results)) = snapshot.quantiles(&quantiles) {
+                        for (quantile, bucket) in results.entries() {
                             output.push_str(&format!(
                                 "{}{{quantile=\"{}\"}} {}\n",
                                 name,
-                                quantile,
+                                quantile.as_f64(),
                                 bucket.end()
                             ));
                         }

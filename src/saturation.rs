@@ -8,6 +8,7 @@ use crate::metrics;
 use crate::output::{OutputFormatter, SaturationResults, SaturationStep};
 use ratelimit::Ratelimiter;
 
+use histogram::SampleQuantiles;
 use metriken::histogram::Histogram;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -302,9 +303,9 @@ fn format_duration_short(d: Duration) -> String {
 
 /// Get a percentile from a histogram snapshot (in microseconds).
 fn percentile_from_histogram(hist: &Histogram, p: f64) -> f64 {
-    match hist.percentiles(&[p]) {
+    match hist.quantiles(&[p]) {
         Ok(Some(results)) => {
-            if let Some((_pct, bucket)) = results.first() {
+            if let Some(bucket) = results.entries().values().next() {
                 // Histogram stores nanoseconds, convert to microseconds
                 return bucket.end() as f64 / 1000.0;
             }
