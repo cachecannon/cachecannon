@@ -65,7 +65,7 @@ ringline-memcache = { version = "0.2", features = ["timestamps"] }
 ringline-ping = { version = "0.2", features = ["timestamps"] }
 
 # Metrics
-histogram = "1.0.0"
+histogram = "1.1"
 metriken = "0.8"
 metriken-exposition = { version = "0.14", features = ["parquet"] }
 
