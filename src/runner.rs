@@ -111,6 +111,7 @@ pub fn run_benchmark_full(
     } else {
         None
     };
+    metrics::TARGET_RATE.set(initial_rate as i64);
 
     // Start admin server if configured
     let _admin_handle = if config.admin.listen.is_some() || config.admin.parquet.is_some() {
