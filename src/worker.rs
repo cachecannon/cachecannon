@@ -812,6 +812,7 @@ async fn resp_connection_task(state: Arc<SharedWorkerState>, endpoint_idx: usize
         let mut client = ringline_redis::Client::builder(conn)
             .on_result(make_resp_callback())
             .kernel_timestamps(use_kernel_ts)
+            .max_batch_size(config.connection.pipeline_depth)
             .build();
 
         tracing::debug!(
