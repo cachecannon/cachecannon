@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.12] - 2026-04-19
+
+### Security
+- Bump rustls-webpki to 0.103.12 to address RUSTSEC-2026-0098 and
+  RUSTSEC-2026-0099 (#69)
+
 ### Fixed
 - Fix final results latency histogram including warmup/prefill data,
   causing inflated tail latencies (p999+) in the summary report (#63)
@@ -18,15 +24,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   build (#52)
 - Use u128 for Prometheus histogram sum to prevent overflow (#54)
 - Fix stale and misleading doc comments (#45)
+- Set `target_rate` gauge for fixed-rate runs (#70)
 
 ### Changed
 - Let saturation search control its own run duration (#61)
 - Defer precheck timeout until workers finish initializing (#60)
 - Use RwLock for slot table to reduce contention in route_key (#58)
-- Upgrade ringline to fa5cca9 (#49)
-- Switch ringline dependencies from git to crates.io (#64)
 - Add computed methods to Results, deduplicate formatter logic (#46)
 - Split debug symbols into separate packages to reduce binary size (#62)
+- Adopt ringline per-command byte metrics, TTFB, and op latency from
+  `CompletedOp` (#67, #68)
 
 ### Added
 - Add backfill-on-miss support to Momento driver (#50)
