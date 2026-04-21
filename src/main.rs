@@ -1,7 +1,6 @@
 use cachecannon::viewer;
 
 use clap::{Parser, Subcommand};
-#[cfg(target_os = "linux")]
 use std::path::PathBuf;
 
 #[derive(Parser, Debug)]
@@ -14,12 +13,10 @@ struct Cli {
     command: Option<Command>,
 
     /// Path to configuration file
-    #[cfg(target_os = "linux")]
     #[arg(value_name = "CONFIG")]
     config: Option<PathBuf>,
 
     /// Path to write Parquet output file
-    #[cfg(target_os = "linux")]
     #[arg(long)]
     parquet: Option<PathBuf>,
 }
@@ -38,21 +35,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             viewer::run(args.into());
             Ok(())
         }
-        None => {
-            #[cfg(target_os = "linux")]
-            {
-                run_benchmark_cli(&cli)
-            }
-            #[cfg(not(target_os = "linux"))]
-            {
-                Cli::parse_from(["cachecannon", "--help"]);
-                Ok(())
-            }
-        }
+        None => run_benchmark_cli(&cli),
     }
 }
 
-#[cfg(target_os = "linux")]
 fn run_benchmark_cli(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
     use cachecannon::config::Config;
     use cachecannon::{create_formatter, parse_cpu_list, run_benchmark_full};

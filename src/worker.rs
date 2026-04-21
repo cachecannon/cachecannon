@@ -6,7 +6,9 @@
 //! phase transitions, diagnostics, and shutdown.
 
 use crate::client::{MomentoSetup, RequestResult, RequestType};
-use crate::config::{Config, Protocol as CacheProtocol, TimestampMode};
+#[cfg(target_os = "linux")]
+use crate::config::TimestampMode;
+use crate::config::{Config, Protocol as CacheProtocol};
 use crate::metrics;
 use ratelimit::Ratelimiter;
 
@@ -440,15 +442,12 @@ impl AsyncEventHandler for BenchHandler {
             && !ids.is_empty()
         {
             let cpu_id = ids[cfg.id % ids.len()];
-            #[cfg(target_os = "linux")]
-            {
-                if let Err(e) = pin_to_cpu(cpu_id) {
-                    tracing::warn!("failed to pin worker {} to CPU {}: {}", cfg.id, cpu_id, e);
-                } else {
-                    tracing::debug!("pinned worker {} to CPU {}", cfg.id, cpu_id);
+            match pin_to_cpu(cpu_id) {
+                Ok(()) => tracing::debug!("pinned worker {} to CPU {}", cfg.id, cpu_id),
+                Err(e) => {
+                    tracing::warn!("failed to pin worker {} to CPU {}: {}", cfg.id, cpu_id, e)
                 }
             }
-            let _ = cpu_id;
         }
 
         // Set metrics thread shard
@@ -808,10 +807,11 @@ async fn resp_connection_task(state: Arc<SharedWorkerState>, endpoint_idx: usize
             };
 
         metrics::CONNECTIONS_ACTIVE.increment();
-        let use_kernel_ts = matches!(config.timestamps.mode, TimestampMode::Software);
-        let mut client = ringline_redis::Client::builder(conn)
-            .on_result(make_resp_callback())
-            .kernel_timestamps(use_kernel_ts)
+        let builder = ringline_redis::Client::builder(conn).on_result(make_resp_callback());
+        #[cfg(target_os = "linux")]
+        let builder =
+            builder.kernel_timestamps(matches!(config.timestamps.mode, TimestampMode::Software));
+        let mut client = builder
             .max_batch_size(config.connection.effective_batch_size())
             .build();
 
@@ -1258,11 +1258,11 @@ async fn memcache_connection_task(state: Arc<SharedWorkerState>, endpoint_idx: u
             };
 
         metrics::CONNECTIONS_ACTIVE.increment();
-        let use_kernel_ts = matches!(config.timestamps.mode, TimestampMode::Software);
-        let mut client = ringline_memcache::Client::builder(conn)
-            .on_result(make_memcache_callback())
-            .kernel_timestamps(use_kernel_ts)
-            .build();
+        let builder = ringline_memcache::Client::builder(conn).on_result(make_memcache_callback());
+        #[cfg(target_os = "linux")]
+        let builder =
+            builder.kernel_timestamps(matches!(config.timestamps.mode, TimestampMode::Software));
+        let mut client = builder.build();
 
         tracing::debug!(
             worker = state.task_state.worker_id,
@@ -1611,6 +1611,7 @@ fn map_memcache_op(op: ringline_memcache::CompletedOp) -> RequestResult {
 /// A single Ping protocol connection task.
 async fn ping_connection_task(state: Arc<SharedWorkerState>, endpoint_idx: usize, _seed: u64) {
     let endpoint = state.task_state.endpoints[endpoint_idx];
+    #[cfg(target_os = "linux")]
     let config = &state.task_state.config;
     let tls_name = resolve_tls_server_name(&state.task_state, endpoint);
 
@@ -1632,11 +1633,11 @@ async fn ping_connection_task(state: Arc<SharedWorkerState>, endpoint_idx: usize
             };
 
         metrics::CONNECTIONS_ACTIVE.increment();
-        let use_kernel_ts = matches!(config.timestamps.mode, TimestampMode::Software);
-        let mut client = ringline_ping::Client::builder(conn)
-            .on_result(make_ping_callback())
-            .kernel_timestamps(use_kernel_ts)
-            .build();
+        let builder = ringline_ping::Client::builder(conn).on_result(make_ping_callback());
+        #[cfg(target_os = "linux")]
+        let builder =
+            builder.kernel_timestamps(matches!(config.timestamps.mode, TimestampMode::Software));
+        let mut client = builder.build();
 
         tracing::debug!(
             worker = state.task_state.worker_id,
@@ -1790,12 +1791,13 @@ async fn momento_connection_task(state: Arc<SharedWorkerState>, _conn_idx: usize
             }
         };
 
-        // Rebuild with on_result callback + kernel timestamps for latency recording
-        let use_kernel_ts = matches!(config.timestamps.mode, TimestampMode::Software);
-        let mut client = ringline_momento::Client::builder(authenticated.conn())
-            .on_result(make_momento_callback())
-            .kernel_timestamps(use_kernel_ts)
-            .build();
+        // Rebuild with on_result callback + (on Linux) kernel timestamps for latency recording
+        let builder = ringline_momento::Client::builder(authenticated.conn())
+            .on_result(make_momento_callback());
+        #[cfg(target_os = "linux")]
+        let builder =
+            builder.kernel_timestamps(matches!(config.timestamps.mode, TimestampMode::Software));
+        let mut client = builder.build();
 
         metrics::CONNECTIONS_ACTIVE.increment();
 
@@ -2194,6 +2196,15 @@ fn pin_to_cpu(cpu_id: usize) -> std::io::Result<()> {
             Err(io::Error::last_os_error())
         }
     }
+}
+
+/// CPU pinning is Linux-only (relies on `sched_setaffinity`).
+#[cfg(not(target_os = "linux"))]
+fn pin_to_cpu(_cpu_id: usize) -> std::io::Result<()> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "CPU pinning is only supported on Linux",
+    ))
 }
 
 #[cfg(test)]

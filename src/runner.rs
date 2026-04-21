@@ -1,4 +1,6 @@
-use crate::config::{Config, Protocol as CacheProtocol, TimestampMode};
+#[cfg(target_os = "linux")]
+use crate::config::TimestampMode;
+use crate::config::{Config, Protocol as CacheProtocol};
 use crate::metrics;
 use crate::output::{PrefillDiagnostics, PrefillSample, PrefillStallCause};
 use crate::saturation::SaturationSearchState;
@@ -232,7 +234,8 @@ pub fn run_benchmark_full(
         None
     };
 
-    let ringline_config = ringline::Config {
+    #[cfg_attr(not(target_os = "linux"), allow(unused_mut))]
+    let mut ringline_config = ringline::Config {
         worker: ringline::WorkerConfig {
             threads: num_threads,
             pin_to_core: false, // We pin in create_for_worker instead
@@ -240,9 +243,12 @@ pub fn run_benchmark_full(
         },
         tcp_nodelay: true,
         tls_client,
-        timestamps: matches!(config.timestamps.mode, TimestampMode::Software),
         ..Default::default()
     };
+    #[cfg(target_os = "linux")]
+    {
+        ringline_config.timestamps = matches!(config.timestamps.mode, TimestampMode::Software);
+    }
 
     // Launch ringline workers (client-only, no bind)
     tracing::debug!(num_threads, "launching ringline workers");

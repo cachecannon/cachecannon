@@ -47,11 +47,9 @@ http = "1"
 # Signal handling
 ctrlc = { version = "3", features = ["termination"] }
 
-# Linux-only dependencies (benchmark engine requires io_uring)
-[target.'cfg(target_os = "linux")'.dependencies]
-# I/O event loop
-ringline = { version = "0.1", features = ["timestamps"] }
-ringline-momento = { version = "0.2", features = ["timestamps"] }
+# I/O event loop (io_uring on Linux, mio on other platforms)
+ringline = "0.1"
+ringline-momento = "0.2"
 
 # Consistent hashing
 ketama = "0.0.1"
@@ -63,9 +61,9 @@ crossbeam-channel = "0.5"
 resp-proto = { version = "0.0.1", features = ["resp3"] }
 
 # Client crates
-ringline-redis = { version = "0.2", features = ["timestamps"] }
-ringline-memcache = { version = "0.2", features = ["timestamps"] }
-ringline-ping = { version = "0.2", features = ["timestamps"] }
+ringline-redis = "0.2"
+ringline-memcache = "0.2"
+ringline-ping = "0.2"
 
 # Metrics
 histogram = "1.1"
@@ -88,7 +86,15 @@ socket2 = { version = "0.5", features = ["all"] }
 rand = "0.9"
 rand_xoshiro = "0.7"
 
-# Jemalloc allocator
+# Kernel SO_TIMESTAMPING support is Linux-only.
+[target.'cfg(target_os = "linux")'.dependencies]
+ringline = { version = "0.1", features = ["timestamps"] }
+ringline-momento = { version = "0.2", features = ["timestamps"] }
+ringline-redis = { version = "0.2", features = ["timestamps"] }
+ringline-memcache = { version = "0.2", features = ["timestamps"] }
+ringline-ping = { version = "0.2", features = ["timestamps"] }
+
+# Jemalloc allocator (glibc only — not needed on musl/macOS/Windows).
 tikv-jemallocator = "0.6"
 tikv-jemalloc-ctl = { version = "0.6", features = ["stats"] }
 

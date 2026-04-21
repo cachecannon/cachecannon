@@ -12,6 +12,12 @@ mod json;
 mod quiet;
 mod verbose;
 
+/// Name of the ringline I/O backend in use on this platform.
+#[cfg(target_os = "linux")]
+pub const IO_ENGINE: &str = "io_uring";
+#[cfg(not(target_os = "linux"))]
+pub const IO_ENGINE: &str = "mio";
+
 pub use clean::CleanFormatter;
 pub use json::JsonFormatter;
 pub use quiet::QuietFormatter;

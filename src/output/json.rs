@@ -99,15 +99,8 @@ struct ResultsOutput {
 impl OutputFormatter for JsonFormatter {
     fn print_config(&self, config: &Config) {
         let target = if config.target.protocol == Protocol::Momento {
-            #[cfg(target_os = "linux")]
-            {
-                crate::client::MomentoSetup::resolve_endpoint_display(config)
-                    .unwrap_or_else(|| "<MOMENTO_API_KEY not set>".to_string())
-            }
-            #[cfg(not(target_os = "linux"))]
-            {
-                "<momento>".to_string()
-            }
+            crate::client::MomentoSetup::resolve_endpoint_display(config)
+                .unwrap_or_else(|| "<MOMENTO_API_KEY not set>".to_string())
         } else {
             let endpoints: Vec<_> = config
                 .target
@@ -129,7 +122,7 @@ impl OutputFormatter for JsonFormatter {
             keyspace: config.workload.keyspace.count as u64,
             key_size: config.workload.keyspace.length,
             value_size: config.workload.values.length,
-            engine: "io_uring".to_string(),
+            engine: crate::output::IO_ENGINE.to_string(),
             ratelimit: config.workload.rate_limit,
             warmup_secs: config.general.warmup.as_secs(),
             duration_secs: config.general.duration.as_secs(),

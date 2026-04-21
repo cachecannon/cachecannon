@@ -38,7 +38,7 @@ impl OutputFormatter for VerboseFormatter {
             config.workload.keyspace.length
         );
         tracing::info!("value_size: {} bytes", config.workload.values.length);
-        tracing::info!("io_engine: ringline (io_uring)");
+        tracing::info!("io_engine: ringline ({})", crate::output::IO_ENGINE);
         if let Some(ref cpu_list) = config.general.cpu_list {
             tracing::info!("cpu_list: {}", cpu_list);
         }
