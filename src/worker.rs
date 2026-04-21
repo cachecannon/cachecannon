@@ -812,7 +812,7 @@ async fn resp_connection_task(state: Arc<SharedWorkerState>, endpoint_idx: usize
         let mut client = ringline_redis::Client::builder(conn)
             .on_result(make_resp_callback())
             .kernel_timestamps(use_kernel_ts)
-            .max_batch_size(config.connection.pipeline_depth)
+            .max_batch_size(config.connection.effective_batch_size())
             .build();
 
         tracing::debug!(
@@ -898,6 +898,7 @@ async fn drive_resp_workload(
     let backfill_on_miss = state.task_state.backfill_on_miss;
     let multi_endpoint = state.task_state.endpoints.len() > 1;
     let pipeline_depth = config.connection.pipeline_depth;
+    let batch_size = config.connection.effective_batch_size();
     let mut prefill_in_flight: VecDeque<usize> = VecDeque::new();
 
     loop {
@@ -906,10 +907,15 @@ async fn drive_resp_workload(
             return Ok(());
         }
 
+        // Only refill when there's room for a full batch, so fire_* calls
+        // accumulate into a single coalesced send rather than one-per-response.
+        let want_fire =
+            pipeline_depth.saturating_sub(client.pending_count()) >= batch_size;
+
         // Fill pipeline
         if phase == Phase::Prefill && !state.is_prefill_done() {
             let mut skips = 0usize;
-            while client.pending_count() < pipeline_depth {
+            while want_fire && client.pending_count() < pipeline_depth {
                 let key_id = {
                     let mut queue = state.task_state.prefill_queue.lock().unwrap();
                     match queue.pop_front() {
@@ -950,7 +956,7 @@ async fn drive_resp_workload(
                 }
             }
         } else if phase == Phase::Warmup || phase == Phase::Running {
-            while client.pending_count() < pipeline_depth {
+            while want_fire && client.pending_count() < pipeline_depth {
                 // Drain backfill queue first
                 if let Some(key_id) = backfill_queue.pop() {
                     write_key(key_buf, key_id);
@@ -1342,6 +1348,7 @@ async fn drive_memcache_workload(
     let backfill_on_miss = state.task_state.backfill_on_miss;
     let multi_endpoint = state.task_state.endpoints.len() > 1;
     let pipeline_depth = config.connection.pipeline_depth;
+    let batch_size = config.connection.effective_batch_size();
     let mut prefill_in_flight: VecDeque<usize> = VecDeque::new();
 
     loop {
@@ -1350,10 +1357,15 @@ async fn drive_memcache_workload(
             return Ok(());
         }
 
+        // Only refill when there's room for a full batch, so fire_* calls
+        // accumulate into a single coalesced send rather than one-per-response.
+        let want_fire =
+            pipeline_depth.saturating_sub(client.pending_count()) >= batch_size;
+
         // Fill pipeline
         if phase == Phase::Prefill && !state.is_prefill_done() {
             let mut skips = 0usize;
-            while client.pending_count() < pipeline_depth {
+            while want_fire && client.pending_count() < pipeline_depth {
                 let key_id = {
                     let mut queue = state.task_state.prefill_queue.lock().unwrap();
                     match queue.pop_front() {
@@ -1394,7 +1406,7 @@ async fn drive_memcache_workload(
                 }
             }
         } else if phase == Phase::Warmup || phase == Phase::Running {
-            while client.pending_count() < pipeline_depth {
+            while want_fire && client.pending_count() < pipeline_depth {
                 // Drain backfill queue first
                 if let Some(key_id) = backfill_queue.pop() {
                     write_key(key_buf, key_id);
@@ -1847,6 +1859,7 @@ async fn drive_momento_session(
     let get_ratio = config.workload.commands.get as usize;
     let delete_ratio = config.workload.commands.delete as usize;
     let pipeline_depth = config.connection.pipeline_depth;
+    let batch_size = config.connection.effective_batch_size();
     let cache_name = &config.momento.cache_name;
     let ttl_ms = config.momento.ttl_seconds * 1000;
     let backfill_on_miss = state.task_state.backfill_on_miss;
@@ -1858,9 +1871,14 @@ async fn drive_momento_session(
             return Ok(());
         }
 
+        // Only refill when there's room for a full batch, so fire_* calls
+        // accumulate into a single coalesced send rather than one-per-response.
+        let want_fire =
+            pipeline_depth.saturating_sub(client.pending_count()) >= batch_size;
+
         // Fill pipeline
         if phase == Phase::Prefill && !state.is_prefill_done() {
-            while client.pending_count() < pipeline_depth {
+            while want_fire && client.pending_count() < pipeline_depth {
                 let key_id = {
                     let mut queue = state.task_state.prefill_queue.lock().unwrap();
                     match queue.pop_front() {
@@ -1885,7 +1903,7 @@ async fn drive_momento_session(
                 }
             }
         } else if phase == Phase::Warmup || phase == Phase::Running {
-            while client.pending_count() < pipeline_depth {
+            while want_fire && client.pending_count() < pipeline_depth {
                 // Drain backfill queue first
                 if let Some(key_id) = backfill_queue.pop() {
                     write_key(key_buf, key_id);
