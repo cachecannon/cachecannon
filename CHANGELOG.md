@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.13] - 2026-04-20
+
+### Fixed
+- Coalesce `fire_*` calls into batched sends during steady state
+  to reduce per-op syscall overhead (#75)
+- Make the macOS build compile so pre-release `cargo clippy`
+  and `cargo test` can run locally (#76)
+
 ## [0.0.12] - 2026-04-19
 
 ### Security
