@@ -124,11 +124,8 @@ impl OutputFormatter for CleanFormatter {
         let protocol = format!("{:?}", config.target.protocol);
         let tls_suffix = if config.target.tls { ", TLS" } else { "" };
         if config.target.protocol == Protocol::Momento {
-            #[cfg(target_os = "linux")]
             let endpoint_display = crate::client::MomentoSetup::resolve_endpoint_display(config)
                 .unwrap_or_else(|| "<MOMENTO_API_KEY not set>".to_string());
-            #[cfg(not(target_os = "linux"))]
-            let endpoint_display = "<momento>".to_string();
             println!(
                 "{}     {} ({})",
                 self.cyan("target"),
