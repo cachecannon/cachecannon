@@ -119,6 +119,12 @@ pub struct Connection {
     pub pool_size: Option<usize>,
     #[serde(default = "default_pipeline_depth")]
     pub pipeline_depth: usize,
+    /// Maximum number of fire_* operations to coalesce into a single send.
+    /// When unset, defaults to `pipeline_depth`, giving one packet per
+    /// pipeline's worth of requests. Set to 1 to disable coalescing.
+    /// Clamped to `[1, pipeline_depth]` at use.
+    #[serde(default)]
+    pub batch_size: Option<usize>,
     #[serde(default = "default_connect_timeout", with = "humantime_serde")]
     pub connect_timeout: Duration,
     #[serde(default = "default_request_timeout", with = "humantime_serde")]
@@ -144,6 +150,14 @@ impl Connection {
     pub fn total_connections(&self) -> usize {
         self.pool_size.unwrap_or(self.connections)
     }
+
+    /// Effective fire_* coalesce threshold. Defaults to `pipeline_depth` when
+    /// `batch_size` is unset, and is clamped to `[1, pipeline_depth]`.
+    pub fn effective_batch_size(&self) -> usize {
+        self.batch_size
+            .unwrap_or(self.pipeline_depth)
+            .clamp(1, self.pipeline_depth.max(1))
+    }
 }
 
 impl Default for Connection {
@@ -152,6 +166,7 @@ impl Default for Connection {
             connections: default_connections(),
             pool_size: None,
             pipeline_depth: default_pipeline_depth(),
+            batch_size: None,
             connect_timeout: default_connect_timeout(),
             request_timeout: default_request_timeout(),
             request_distribution: RequestDistribution::default(),

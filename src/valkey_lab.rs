@@ -69,6 +69,11 @@ struct BenchArgs {
     #[arg(short = 'P', long)]
     pipeline: Option<usize>,
 
+    /// Coalesce up to this many fire_* commands into a single send.
+    /// Defaults to --pipeline. Set to 1 to disable batching.
+    #[arg(long)]
+    batch_size: Option<usize>,
+
     /// Number of worker threads (default: CPU count).
     #[arg(short = 't', long)]
     threads: Option<usize>,
@@ -385,6 +390,7 @@ fn load_base_config(args: &BenchArgs) -> Result<Config, Box<dyn std::error::Erro
             connection: Connection {
                 connections: args.connections.unwrap_or(1),
                 pipeline_depth: args.pipeline.unwrap_or(1),
+                batch_size: args.batch_size,
                 connect_timeout: args.connect_timeout.unwrap_or(Duration::from_secs(5)),
                 request_timeout: args.request_timeout.unwrap_or(Duration::from_secs(1)),
                 ..Connection::default()
@@ -448,6 +454,9 @@ fn apply_bench_flags(
     }
     if let Some(p) = args.pipeline {
         config.connection.pipeline_depth = p;
+    }
+    if let Some(b) = args.batch_size {
+        config.connection.batch_size = Some(b);
     }
     if let Some(t) = args.connect_timeout {
         config.connection.connect_timeout = t;
