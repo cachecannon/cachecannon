@@ -519,6 +519,7 @@ impl Config {
             ));
         }
 
+        #[cfg(target_os = "linux")]
         if self.workload.values.length > crate::runner::VALUE_POOL_SIZE {
             return Err(ConfigError::Validation(format!(
                 "workload.values.length ({}) exceeds the value pool size ({})",
@@ -835,6 +836,7 @@ mod validation_tests {
         assert!(err.to_string().contains("values.length"));
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn rejects_value_length_exceeding_pool() {
         let err = parse_config(
