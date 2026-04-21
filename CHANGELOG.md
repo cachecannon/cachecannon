@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.14] - 2026-04-21
+
+### Added
+- Run the benchmark engine on macOS via ringline's mio backend; add macOS
+  to the CI matrix for clippy, doc, test, and test-release (#79)
+
+### Fixed
+- Pre-acquire ratelimit tokens per batch so rate-limited fire loops emit
+  fully coalesced batches instead of breaking early on `try_wait()` errors
+  (#80)
+
+### Changed
+- Narrow Linux-only surface to kernel `SO_TIMESTAMPING` and
+  `sched_setaffinity` CPU pinning; non-Linux now logs a warning and
+  continues instead of failing (#79)
+- Bump `ratelimit` to 2.0.0 for `try_wait_n` support (#80)
+
 ## [0.0.13] - 2026-04-20
 
 ### Fixed
