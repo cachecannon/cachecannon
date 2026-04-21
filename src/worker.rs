@@ -954,20 +954,31 @@ async fn drive_resp_workload(
                     }
                 }
             }
-        } else if phase == Phase::Warmup || phase == Phase::Running {
-            while want_fire && client.pending_count() < pipeline_depth {
+        } else if (phase == Phase::Warmup || phase == Phase::Running) && want_fire {
+            // Pre-acquire a full batch of rate-limit tokens up front so the
+            // fire loop produces a single coalesced send, rather than being
+            // broken into tiny partial flushes by per-iteration try_wait()
+            // rejections.
+            let mut token_budget = match state.task_state.ratelimiter {
+                Some(ref rl) => {
+                    let n = (batch_size as u64).min(rl.max_tokens());
+                    if n > 0 && rl.try_wait_n(n).is_ok() {
+                        n as usize
+                    } else {
+                        0
+                    }
+                }
+                None => batch_size,
+            };
+
+            while client.pending_count() < pipeline_depth && token_budget > 0 {
                 // Drain backfill queue first
                 if let Some(key_id) = backfill_queue.pop() {
                     write_key(key_buf, key_id);
                     let guard =
                         make_value_guard(rng, &state.task_state.value_pool, value_len, pool_len);
 
-                    if let Some(ref rl) = state.task_state.ratelimiter
-                        && rl.try_wait().is_err()
-                    {
-                        backfill_queue.push(key_id);
-                        break;
-                    }
+                    token_budget -= 1;
 
                     // user_data encodes key_id with backfill marker (high bit set)
                     let user_data = key_id as u64 | BACKFILL_MARKER;
@@ -983,12 +994,7 @@ async fn drive_resp_workload(
                     continue;
                 }
 
-                // Rate limiting
-                if let Some(ref rl) = state.task_state.ratelimiter
-                    && rl.try_wait().is_err()
-                {
-                    break;
-                }
+                token_budget -= 1;
 
                 // Generate random key
                 let key_id = rng.random_range(0..key_count);
@@ -1403,20 +1409,31 @@ async fn drive_memcache_workload(
                     }
                 }
             }
-        } else if phase == Phase::Warmup || phase == Phase::Running {
-            while want_fire && client.pending_count() < pipeline_depth {
+        } else if (phase == Phase::Warmup || phase == Phase::Running) && want_fire {
+            // Pre-acquire a full batch of rate-limit tokens up front so the
+            // fire loop produces a single coalesced send, rather than being
+            // broken into tiny partial flushes by per-iteration try_wait()
+            // rejections.
+            let mut token_budget = match state.task_state.ratelimiter {
+                Some(ref rl) => {
+                    let n = (batch_size as u64).min(rl.max_tokens());
+                    if n > 0 && rl.try_wait_n(n).is_ok() {
+                        n as usize
+                    } else {
+                        0
+                    }
+                }
+                None => batch_size,
+            };
+
+            while client.pending_count() < pipeline_depth && token_budget > 0 {
                 // Drain backfill queue first
                 if let Some(key_id) = backfill_queue.pop() {
                     write_key(key_buf, key_id);
                     let guard =
                         make_value_guard(rng, &state.task_state.value_pool, value_len, pool_len);
 
-                    if let Some(ref rl) = state.task_state.ratelimiter
-                        && rl.try_wait().is_err()
-                    {
-                        backfill_queue.push(key_id);
-                        break;
-                    }
+                    token_budget -= 1;
 
                     let user_data = key_id as u64 | BACKFILL_MARKER;
                     match client.fire_set_with_guard(key_buf, guard, 0, 0, user_data) {
@@ -1431,12 +1448,7 @@ async fn drive_memcache_workload(
                     continue;
                 }
 
-                // Rate limiting
-                if let Some(ref rl) = state.task_state.ratelimiter
-                    && rl.try_wait().is_err()
-                {
-                    break;
-                }
+                token_budget -= 1;
 
                 // Generate random key
                 let key_id = rng.random_range(0..key_count);
@@ -1899,19 +1911,30 @@ async fn drive_momento_session(
                     }
                 }
             }
-        } else if phase == Phase::Warmup || phase == Phase::Running {
-            while want_fire && client.pending_count() < pipeline_depth {
+        } else if (phase == Phase::Warmup || phase == Phase::Running) && want_fire {
+            // Pre-acquire a full batch of rate-limit tokens up front so the
+            // fire loop produces a single coalesced send, rather than being
+            // broken into tiny partial flushes by per-iteration try_wait()
+            // rejections.
+            let mut token_budget = match state.task_state.ratelimiter {
+                Some(ref rl) => {
+                    let n = (batch_size as u64).min(rl.max_tokens());
+                    if n > 0 && rl.try_wait_n(n).is_ok() {
+                        n as usize
+                    } else {
+                        0
+                    }
+                }
+                None => batch_size,
+            };
+
+            while client.pending_count() < pipeline_depth && token_budget > 0 {
                 // Drain backfill queue first
                 if let Some(key_id) = backfill_queue.pop() {
                     write_key(key_buf, key_id);
                     rng.fill_bytes(value_buf);
 
-                    if let Some(ref rl) = state.task_state.ratelimiter
-                        && rl.try_wait().is_err()
-                    {
-                        backfill_queue.push(key_id);
-                        break;
-                    }
+                    token_budget -= 1;
 
                     let user_data = key_id as u64 | BACKFILL_MARKER;
                     match client.fire_set(cache_name, key_buf, value_buf, ttl_ms, user_data) {
@@ -1926,12 +1949,7 @@ async fn drive_momento_session(
                     continue;
                 }
 
-                // Rate limiting
-                if let Some(ref rl) = state.task_state.ratelimiter
-                    && rl.try_wait().is_err()
-                {
-                    break;
-                }
+                token_budget -= 1;
 
                 let key_id = rng.random_range(0..key_count);
                 write_key(key_buf, key_id);

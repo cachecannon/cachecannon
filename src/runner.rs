@@ -103,9 +103,14 @@ pub fn run_benchmark_full(
     };
 
     let ratelimiter = if initial_rate > 0 || config.workload.saturation_search.is_some() {
+        // Ensure max_tokens can hold a full batch so try_wait_n(batch_size)
+        // in the worker fire loops never deadlocks under very low rates.
+        let max_tokens =
+            initial_rate.max(config.connection.effective_batch_size() as u64);
         Some(Arc::new(
             Ratelimiter::builder(initial_rate)
                 .initial_available(initial_rate)
+                .max_tokens(max_tokens)
                 .build()
                 .expect("failed to build ratelimiter"),
         ))
