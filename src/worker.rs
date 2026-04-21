@@ -909,8 +909,7 @@ async fn drive_resp_workload(
 
         // Only refill when there's room for a full batch, so fire_* calls
         // accumulate into a single coalesced send rather than one-per-response.
-        let want_fire =
-            pipeline_depth.saturating_sub(client.pending_count()) >= batch_size;
+        let want_fire = pipeline_depth.saturating_sub(client.pending_count()) >= batch_size;
 
         // Fill pipeline
         if phase == Phase::Prefill && !state.is_prefill_done() {
@@ -1359,8 +1358,7 @@ async fn drive_memcache_workload(
 
         // Only refill when there's room for a full batch, so fire_* calls
         // accumulate into a single coalesced send rather than one-per-response.
-        let want_fire =
-            pipeline_depth.saturating_sub(client.pending_count()) >= batch_size;
+        let want_fire = pipeline_depth.saturating_sub(client.pending_count()) >= batch_size;
 
         // Fill pipeline
         if phase == Phase::Prefill && !state.is_prefill_done() {
@@ -1873,8 +1871,7 @@ async fn drive_momento_session(
 
         // Only refill when there's room for a full batch, so fire_* calls
         // accumulate into a single coalesced send rather than one-per-response.
-        let want_fire =
-            pipeline_depth.saturating_sub(client.pending_count()) >= batch_size;
+        let want_fire = pipeline_depth.saturating_sub(client.pending_count()) >= batch_size;
 
         // Fill pipeline
         if phase == Phase::Prefill && !state.is_prefill_done() {
