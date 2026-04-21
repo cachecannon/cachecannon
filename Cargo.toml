@@ -44,6 +44,9 @@ open = "5"
 tracing-appender = "0.2"
 http = "1"
 
+# Signal handling
+ctrlc = { version = "3", features = ["termination"] }
+
 # Linux-only dependencies (benchmark engine requires io_uring)
 [target.'cfg(target_os = "linux")'.dependencies]
 # I/O event loop
@@ -84,9 +87,6 @@ socket2 = { version = "0.5", features = ["all"] }
 # RNG for workload generation
 rand = "0.9"
 rand_xoshiro = "0.7"
-
-# Signal handling
-ctrlc = { version = "3", features = ["termination"] }
 
 # Jemalloc allocator
 tikv-jemallocator = "0.6"
