@@ -1897,8 +1897,9 @@ dependencies = [
 
 [[package]]
 name = "ratelimit"
-version = "1.0.1-alpha.0"
-source = "git+https://github.com/iopsystems/ratelimit#eab3cf13c2a1c74686ce15af68dbbc7749e77968"
+version = "2.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e78b08065c51c82ff8c4a0d88e3dce3edfce39c375e946c3464210fff3433fb8"
 dependencies = [
  "thiserror",
 ]
