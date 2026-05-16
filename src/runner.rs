@@ -303,6 +303,7 @@ pub fn run_benchmark_full(
     let mut baseline_requests = 0u64;
     let mut baseline_responses = 0u64;
     let mut baseline_errors = 0u64;
+    let mut baseline_conn_failures = 0u64;
     let mut baseline_hits = 0u64;
     let mut baseline_misses = 0u64;
     let mut baseline_get_count = 0u64;
@@ -565,6 +566,7 @@ pub fn run_benchmark_full(
             baseline_requests = metrics::REQUESTS_SENT.value();
             baseline_responses = metrics::RESPONSES_RECEIVED.value();
             baseline_errors = metrics::REQUEST_ERRORS.value();
+            baseline_conn_failures = metrics::CONNECTIONS_FAILED.value();
             baseline_hits = metrics::CACHE_HITS.value();
             baseline_misses = metrics::CACHE_MISSES.value();
             baseline_get_count = metrics::GET_COUNT.value();
@@ -738,7 +740,8 @@ pub fn run_benchmark_full(
     // Final report — subtract baselines captured at warmup->running transition
     let requests = metrics::REQUESTS_SENT.value() - baseline_requests;
     let responses = metrics::RESPONSES_RECEIVED.value() - baseline_responses;
-    let errors = metrics::REQUEST_ERRORS.value() - baseline_errors;
+    let conn_failures = metrics::CONNECTIONS_FAILED.value() - baseline_conn_failures;
+    let errors = (metrics::REQUEST_ERRORS.value() - baseline_errors) + conn_failures;
     let hits = metrics::CACHE_HITS.value() - baseline_hits;
     let misses = metrics::CACHE_MISSES.value() - baseline_misses;
     let bytes_tx = metrics::BYTES_TX.value() - baseline_bytes_tx;
@@ -747,7 +750,7 @@ pub fn run_benchmark_full(
     let set_count = metrics::SET_COUNT.value() - baseline_set_count;
     let backfill_set_count = metrics::BACKFILL_SET_COUNT.value() - baseline_backfill_set_count;
     let active = metrics::CONNECTIONS_ACTIVE.value();
-    let failed = metrics::CONNECTIONS_FAILED.value();
+    let failed = conn_failures;
     let elapsed_secs = actual_duration.as_secs_f64();
 
     let get_latencies = delta_latency_stats(&metrics::GET_LATENCY, &baseline_get_latency);

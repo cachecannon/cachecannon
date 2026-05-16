@@ -23,6 +23,8 @@ pub struct RequestResult {
     pub key_id: Option<usize>,
     /// True if this SET was triggered by a miss (backfill)
     pub backfill: bool,
+    /// True if this SET was issued as part of the prefill phase
+    pub prefill: bool,
     /// Cluster redirect (MOVED/ASK), if the response was a redirect error.
     pub redirect: Option<resp_proto::Redirect>,
 }
