@@ -420,11 +420,7 @@ async fn run_parquet_recorder(
 
     match converter.convert_file_path(&temp_path, &path) {
         Ok(rows) => {
-            tracing::info!(
-                "parquet recorder stopped, wrote {:?} ({} rows)",
-                path,
-                rows
-            );
+            tracing::info!("parquet recorder stopped, wrote {:?} ({} rows)", path, rows);
         }
         Err(e) => {
             tracing::warn!("failed to convert msgpack stream to parquet: {}", e);
@@ -447,7 +443,6 @@ fn msgpack_temp_path(parquet_path: &Path) -> PathBuf {
 
 /// Serialize a snapshot to msgpack and append it to the staging file.
 fn append_snapshot<W: Write>(writer: &mut W, snapshot: &Snapshot) -> io::Result<()> {
-    let bytes =
-        Snapshot::to_msgpack(snapshot).map_err(|e| io::Error::other(e.to_string()))?;
+    let bytes = Snapshot::to_msgpack(snapshot).map_err(|e| io::Error::other(e.to_string()))?;
     writer.write_all(&bytes)
 }
