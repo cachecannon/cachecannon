@@ -306,10 +306,7 @@ impl PrefillQueues {
     }
 
     fn push_front(&self, endpoint_idx: usize, key_id: usize) {
-        self.queues[endpoint_idx]
-            .lock()
-            .unwrap()
-            .push_front(key_id);
+        self.queues[endpoint_idx].lock().unwrap().push_front(key_id);
     }
 
     fn pop_front(&self, endpoint_idx: usize) -> Option<usize> {
@@ -530,12 +527,8 @@ impl AsyncEventHandler for BenchHandler {
                 let mut key_buf = vec![0u8; key_len];
                 for key_id in range.start..range.end {
                     write_key(&mut key_buf, key_id);
-                    let endpoint_idx = route_partition(
-                        &slot_table,
-                        &ring,
-                        endpoints.len(),
-                        &key_buf,
-                    );
+                    let endpoint_idx =
+                        route_partition(&slot_table, &ring, endpoints.len(), &key_buf);
                     prefill_queues.push_back(endpoint_idx, key_id);
                 }
                 tracing::debug!(
@@ -921,7 +914,6 @@ async fn resp_connection_task(state: Arc<SharedWorkerState>, endpoint_idx: usize
         match result {
             Ok(()) => return,
             Err(reason) => {
-                metrics::CONNECTIONS_FAILED.increment();
                 record_disconnect_reason(reason);
             }
         }
@@ -987,7 +979,8 @@ async fn drive_resp_workload(
                 let guard =
                     make_value_guard(rng, &state.task_state.value_pool, value_len, pool_len);
 
-                match client.fire_set_with_guard(key_buf, guard, 0) {
+                let user_data = key_id as u64 | PREFILL_MARKER;
+                match client.fire_set_with_guard(key_buf, guard, user_data) {
                     Ok(_) => {
                         metrics::REQUESTS_SENT.increment();
                         prefill_in_flight.push_back(key_id);
@@ -1052,8 +1045,7 @@ async fn drive_resp_workload(
                     loop {
                         let candidate = rng.random_range(0..key_count);
                         write_key(key_buf, candidate);
-                        if !multi_endpoint
-                            || route_key(&state.task_state, key_buf) == endpoint_idx
+                        if !multi_endpoint || route_key(&state.task_state, key_buf) == endpoint_idx
                         {
                             break Some(candidate);
                         }
@@ -1100,15 +1092,11 @@ async fn drive_resp_workload(
         let op = match client.recv().await {
             Ok(op) => op,
             Err(ringline_redis::Error::ConnectionClosed) => {
-                for key_id in prefill_in_flight.drain(..) {
-                    state.task_state.prefill_queues.push_back(endpoint_idx, key_id);
-                }
+                requeue_drained_prefill(&state.task_state, key_buf, prefill_in_flight.drain(..));
                 return Err(DisconnectReason::Eof);
             }
             Err(_) => {
-                for key_id in prefill_in_flight.drain(..) {
-                    state.task_state.prefill_queues.push_back(endpoint_idx, key_id);
-                }
+                requeue_drained_prefill(&state.task_state, key_buf, prefill_in_flight.drain(..));
                 return Err(DisconnectReason::RecvError);
             }
         };
@@ -1116,14 +1104,22 @@ async fn drive_resp_workload(
         // Map CompletedOp to RequestResult
         let result = map_resp_op(op);
 
-        // Handle prefill tracking via in-flight deque
-        if !prefill_in_flight.is_empty() {
-            let key_id = prefill_in_flight.pop_front().unwrap();
+        // Handle prefill tracking. The PREFILL_MARKER bit in user_data
+        // identifies prefill SETs unambiguously across phases, so we don't
+        // mis-attribute a non-prefill response to a prefill key.
+        if result.prefill {
+            let key_id = prefill_in_flight
+                .pop_front()
+                .or(result.key_id)
+                .expect("prefill response without key_id");
             if result.success {
                 confirm_prefill_key(state);
             } else {
                 // Retry failed prefill SET
-                state.task_state.prefill_queues.push_back(endpoint_idx, key_id);
+                state
+                    .task_state
+                    .prefill_queues
+                    .push_back(endpoint_idx, key_id);
             }
         }
 
@@ -1156,6 +1152,11 @@ async fn drive_resp_workload(
 /// Marker bit for backfill SET user_data (high bit of u64).
 const BACKFILL_MARKER: u64 = 1 << 63;
 
+/// Marker bit for prefill SET user_data (second-highest bit of u64).
+/// The remaining low bits carry the key_id so we can identify a prefill
+/// response without relying on FIFO assumptions across phases.
+const PREFILL_MARKER: u64 = 1 << 62;
+
 /// Map a ringline-redis `CompletedOp` to a `RequestResult`.
 fn map_resp_op(op: ringline_redis::CompletedOp) -> RequestResult {
     match op {
@@ -1184,6 +1185,7 @@ fn map_resp_op(op: ringline_redis::CompletedOp) -> RequestResult {
                 hit,
                 key_id: Some(user_data as usize),
                 backfill: false,
+                prefill: false,
                 redirect,
             }
         }
@@ -1202,6 +1204,12 @@ fn map_resp_op(op: ringline_redis::CompletedOp) -> RequestResult {
                 None
             };
             let backfill = user_data & BACKFILL_MARKER != 0;
+            let prefill = user_data & PREFILL_MARKER != 0;
+            let key_id = if prefill {
+                Some((user_data & !PREFILL_MARKER & !BACKFILL_MARKER) as usize)
+            } else {
+                None
+            };
             RequestResult {
                 id: 0,
                 success,
@@ -1210,8 +1218,9 @@ fn map_resp_op(op: ringline_redis::CompletedOp) -> RequestResult {
                 ttfb_ns: None,
                 request_type: RequestType::Set,
                 hit: None,
-                key_id: None,
+                key_id,
                 backfill,
+                prefill,
                 redirect,
             }
         }
@@ -1237,6 +1246,7 @@ fn map_resp_op(op: ringline_redis::CompletedOp) -> RequestResult {
                 hit: None,
                 key_id: None,
                 backfill: false,
+                prefill: false,
                 redirect,
             }
         }
@@ -1381,7 +1391,6 @@ async fn memcache_connection_task(state: Arc<SharedWorkerState>, endpoint_idx: u
         match result {
             Ok(()) => return,
             Err(reason) => {
-                metrics::CONNECTIONS_FAILED.increment();
                 record_disconnect_reason(reason);
             }
         }
@@ -1445,7 +1454,8 @@ async fn drive_memcache_workload(
                 let guard =
                     make_value_guard(rng, &state.task_state.value_pool, value_len, pool_len);
 
-                match client.fire_set_with_guard(key_buf, guard, 0, 0, 0) {
+                let user_data = key_id as u64 | PREFILL_MARKER;
+                match client.fire_set_with_guard(key_buf, guard, 0, 0, user_data) {
                     Ok(_) => {
                         metrics::REQUESTS_SENT.increment();
                         prefill_in_flight.push_back(key_id);
@@ -1509,8 +1519,7 @@ async fn drive_memcache_workload(
                     loop {
                         let candidate = rng.random_range(0..key_count);
                         write_key(key_buf, candidate);
-                        if !multi_endpoint
-                            || route_key(&state.task_state, key_buf) == endpoint_idx
+                        if !multi_endpoint || route_key(&state.task_state, key_buf) == endpoint_idx
                         {
                             break Some(candidate);
                         }
@@ -1556,15 +1565,11 @@ async fn drive_memcache_workload(
         let op = match client.recv().await {
             Ok(op) => op,
             Err(ringline_memcache::Error::ConnectionClosed) => {
-                for key_id in prefill_in_flight.drain(..) {
-                    state.task_state.prefill_queues.push_back(endpoint_idx, key_id);
-                }
+                requeue_drained_prefill(&state.task_state, key_buf, prefill_in_flight.drain(..));
                 return Err(DisconnectReason::Eof);
             }
             Err(_) => {
-                for key_id in prefill_in_flight.drain(..) {
-                    state.task_state.prefill_queues.push_back(endpoint_idx, key_id);
-                }
+                requeue_drained_prefill(&state.task_state, key_buf, prefill_in_flight.drain(..));
                 return Err(DisconnectReason::RecvError);
             }
         };
@@ -1572,14 +1577,20 @@ async fn drive_memcache_workload(
         // Map CompletedOp to RequestResult
         let result = map_memcache_op(op);
 
-        // Handle prefill tracking via in-flight deque
-        if !prefill_in_flight.is_empty() {
-            let key_id = prefill_in_flight.pop_front().unwrap();
+        // Handle prefill tracking. See the RESP recv loop for rationale.
+        if result.prefill {
+            let key_id = prefill_in_flight
+                .pop_front()
+                .or(result.key_id)
+                .expect("prefill response without key_id");
             if result.success {
                 confirm_prefill_key(state);
             } else {
                 // Retry failed prefill SET
-                state.task_state.prefill_queues.push_back(endpoint_idx, key_id);
+                state
+                    .task_state
+                    .prefill_queues
+                    .push_back(endpoint_idx, key_id);
             }
         }
 
@@ -1627,6 +1638,7 @@ fn map_memcache_op(op: ringline_memcache::CompletedOp) -> RequestResult {
                 hit,
                 key_id: Some(user_data as usize),
                 backfill: false,
+                prefill: false,
                 redirect: None,
             }
         }
@@ -1640,6 +1652,12 @@ fn map_memcache_op(op: ringline_memcache::CompletedOp) -> RequestResult {
                 Err(_) => (false, true),
             };
             let backfill = user_data & BACKFILL_MARKER != 0;
+            let prefill = user_data & PREFILL_MARKER != 0;
+            let key_id = if prefill {
+                Some((user_data & !PREFILL_MARKER & !BACKFILL_MARKER) as usize)
+            } else {
+                None
+            };
             RequestResult {
                 id: 0,
                 success,
@@ -1648,8 +1666,9 @@ fn map_memcache_op(op: ringline_memcache::CompletedOp) -> RequestResult {
                 ttfb_ns: None,
                 request_type: RequestType::Set,
                 hit: None,
-                key_id: None,
+                key_id,
                 backfill,
+                prefill,
                 redirect: None,
             }
         }
@@ -1670,6 +1689,7 @@ fn map_memcache_op(op: ringline_memcache::CompletedOp) -> RequestResult {
                 hit: None,
                 key_id: None,
                 backfill: false,
+                prefill: false,
                 redirect: None,
             }
         }
@@ -1757,7 +1777,6 @@ async fn ping_connection_task(state: Arc<SharedWorkerState>, endpoint_idx: usize
         match result {
             Ok(()) => return,
             Err(reason) => {
-                metrics::CONNECTIONS_FAILED.increment();
                 record_disconnect_reason(reason);
             }
         }
@@ -1914,7 +1933,6 @@ async fn momento_connection_task(state: Arc<SharedWorkerState>, _conn_idx: usize
         match result {
             Ok(()) => return, // Clean shutdown
             Err(_) => {
-                metrics::CONNECTIONS_FAILED.increment();
                 metrics::DISCONNECTS_CLOSED_EVENT.increment();
             }
         }
@@ -1967,7 +1985,8 @@ async fn drive_momento_session(
                 let offset = rng.random_range(0..=max_value_offset);
                 let value = &value_pool[offset..offset + value_len];
 
-                match client.fire_set(cache_name, key_buf, value, ttl_ms, 0) {
+                let user_data = key_id as u64 | PREFILL_MARKER;
+                match client.fire_set(cache_name, key_buf, value, ttl_ms, user_data) {
                     Ok(_) => {
                         metrics::REQUESTS_SENT.increment();
                         prefill_in_flight.push_back(key_id);
@@ -2062,9 +2081,12 @@ async fn drive_momento_session(
         // Map CompletedOp to RequestResult
         let result = map_momento_op(op);
 
-        // Handle prefill tracking via in-flight deque
-        if !prefill_in_flight.is_empty() {
-            let key_id = prefill_in_flight.pop_front().unwrap();
+        // Handle prefill tracking. See the RESP recv loop for rationale.
+        if result.prefill {
+            let key_id = prefill_in_flight
+                .pop_front()
+                .or(result.key_id)
+                .expect("prefill response without key_id");
             if result.success {
                 confirm_prefill_key(state);
             } else {
@@ -2118,6 +2140,7 @@ fn map_momento_op(op: ringline_momento::CompletedOp) -> RequestResult {
                 hit,
                 key_id: Some(user_data as usize),
                 backfill: false,
+                prefill: false,
                 redirect: None,
             }
         }
@@ -2132,6 +2155,12 @@ fn map_momento_op(op: ringline_momento::CompletedOp) -> RequestResult {
                 Err(_) => (false, true),
             };
             let backfill = user_data & BACKFILL_MARKER != 0;
+            let prefill = user_data & PREFILL_MARKER != 0;
+            let key_id = if prefill {
+                Some((user_data & !PREFILL_MARKER & !BACKFILL_MARKER) as usize)
+            } else {
+                None
+            };
             RequestResult {
                 id: 0,
                 success,
@@ -2140,8 +2169,9 @@ fn map_momento_op(op: ringline_momento::CompletedOp) -> RequestResult {
                 ttfb_ns: None,
                 request_type: RequestType::Set,
                 hit: None,
-                key_id: None,
+                key_id,
                 backfill,
+                prefill,
                 redirect: None,
             }
         }
@@ -2162,6 +2192,7 @@ fn map_momento_op(op: ringline_momento::CompletedOp) -> RequestResult {
                 hit: None,
                 key_id: None,
                 backfill: false,
+                prefill: false,
                 redirect: None,
             }
         }
@@ -2249,6 +2280,23 @@ fn max_routing_attempts(num_endpoints: usize) -> usize {
 fn route_key(state: &TaskSharedState, key: &[u8]) -> usize {
     let slot_table = state.slot_table.read().unwrap();
     route_partition(&slot_table, &state.ring, state.endpoints.len(), key)
+}
+
+/// Drain in-flight prefill keys on disconnect and re-route each one against
+/// the current slot table before pushing back to the owning endpoint's
+/// queue. Mid-flight topology changes can mean the original endpoint no
+/// longer owns the slot; pushing back blindly would let the key stall in
+/// a queue that's never going to drain on this endpoint.
+fn requeue_drained_prefill(
+    state: &TaskSharedState,
+    key_buf: &mut [u8],
+    drained: impl IntoIterator<Item = usize>,
+) {
+    for key_id in drained {
+        write_key(key_buf, key_id);
+        let routed = route_key(state, key_buf);
+        state.prefill_queues.push_back(routed, key_id);
+    }
 }
 
 /// Route a key using the supplied slot table / ring directly. Used at init

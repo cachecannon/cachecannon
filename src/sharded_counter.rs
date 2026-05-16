@@ -172,9 +172,7 @@ impl Gauge {
     #[inline]
     pub fn add(&self, delta: i64) {
         let shard = shard_index();
-        self.shards[shard]
-            .value
-            .fetch_add(delta, Ordering::Relaxed);
+        self.shards[shard].value.fetch_add(delta, Ordering::Relaxed);
     }
 
     pub fn value(&self) -> i64 {
