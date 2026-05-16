@@ -331,6 +331,7 @@ fn build_config_from_saturate(args: &SaturateArgs) -> Result<Config, Box<dyn std
         start_rate: args.start_rate,
         step_multiplier: args.step,
         sample_window: Duration::from_secs(args.sample_window),
+        drain_window: Duration::from_millis(500),
         stop_after_failures: 3,
         max_rate: args.max_rate,
         min_throughput_ratio: 0.9,

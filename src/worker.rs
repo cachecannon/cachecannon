@@ -10,13 +10,12 @@ use crate::client::{MomentoSetup, RequestResult, RequestType};
 use crate::config::TimestampMode;
 use crate::config::{Config, Protocol as CacheProtocol};
 use crate::metrics;
-use ratelimit::Ratelimiter;
+use ratelimit::{Ratelimiter, TryWaitError};
 
 use ringline::{AsyncEventHandler, ConnCtx, DriverCtx, RegionId, SendGuard};
 
 use rand::prelude::*;
 use rand_xoshiro::Xoshiro256PlusPlus;
-use std::any::Any;
 use std::collections::VecDeque;
 use std::future::Future;
 use std::io;
@@ -211,28 +210,23 @@ pub struct BenchWorkerConfig {
     pub slot_table: Option<Vec<u16>>,
 }
 
-// ── Config channel (same pattern as server) ──────────────────────────────
+// ── Config channel ────────────────────────────────────────────────────────
 
-static CONFIG_CHANNEL: OnceLock<Mutex<Box<dyn Any + Send>>> = OnceLock::new();
+static CONFIG_CHANNEL: OnceLock<crossbeam_channel::Receiver<BenchWorkerConfig>> = OnceLock::new();
 
 /// Initialize the global config channel. Must be called before launch.
 pub fn init_config_channel(rx: crossbeam_channel::Receiver<BenchWorkerConfig>) {
-    let boxed: Box<dyn Any + Send> = Box::new(rx);
     CONFIG_CHANNEL
-        .set(Mutex::new(boxed))
+        .set(rx)
         .expect("init_config_channel called twice");
 }
 
 fn recv_config() -> BenchWorkerConfig {
-    let guard = CONFIG_CHANNEL
+    CONFIG_CHANNEL
         .get()
         .expect("config channel not initialized")
-        .lock()
-        .unwrap();
-    let rx = guard
-        .downcast_ref::<crossbeam_channel::Receiver<BenchWorkerConfig>>()
-        .expect("wrong config channel type");
-    rx.recv().expect("config channel closed")
+        .recv()
+        .expect("config channel closed")
 }
 
 // ── ValuePoolGuard ────────────────────────────────────────────────────────
@@ -284,6 +278,45 @@ fn make_value_guard(
 
 // ── Shared task state (Arc-wrapped, accessed by all connection tasks) ────
 
+/// Per-endpoint prefill key queues for a single worker.
+///
+/// At init time, the worker's assigned key range is partitioned by routing
+/// destination so a connection task to endpoint `i` draws only from
+/// `queues[i]`. This avoids the routing-miss thrashing the original
+/// single-shared-queue design suffered from in multi-endpoint setups, where
+/// every connection had to lock-pop, route-check, lock-push-back on most
+/// keys it saw.
+///
+/// For Momento (no routing) and single-endpoint setups, there is exactly one
+/// queue at index 0.
+struct PrefillQueues {
+    queues: Vec<Mutex<VecDeque<usize>>>,
+}
+
+impl PrefillQueues {
+    fn new(num: usize) -> Self {
+        let n = num.max(1);
+        Self {
+            queues: (0..n).map(|_| Mutex::new(VecDeque::new())).collect(),
+        }
+    }
+
+    fn push_back(&self, endpoint_idx: usize, key_id: usize) {
+        self.queues[endpoint_idx].lock().unwrap().push_back(key_id);
+    }
+
+    fn push_front(&self, endpoint_idx: usize, key_id: usize) {
+        self.queues[endpoint_idx]
+            .lock()
+            .unwrap()
+            .push_front(key_id);
+    }
+
+    fn pop_front(&self, endpoint_idx: usize) -> Option<usize> {
+        self.queues[endpoint_idx].lock().unwrap().pop_front()
+    }
+}
+
 /// State shared across all connection tasks spawned by a single worker.
 struct TaskSharedState {
     config: Config,
@@ -293,8 +326,8 @@ struct TaskSharedState {
     endpoints: Vec<SocketAddr>,
     ring: ketama::Ring,
     slot_table: RwLock<Option<Vec<u16>>>,
-    /// Shared prefill queue: tasks pop key IDs from here.
-    prefill_queue: Mutex<VecDeque<usize>>,
+    /// Per-endpoint prefill key queues. Indexed by endpoint_idx.
+    prefill_queues: PrefillQueues,
     /// Worker ID for logging.
     worker_id: usize,
     /// Whether backfill_on_miss is enabled.
@@ -453,27 +486,6 @@ impl AsyncEventHandler for BenchHandler {
         // Set metrics thread shard
         metrics::set_thread_shard(worker_id);
 
-        // Initialize prefill state
-        let (prefill_queue, prefill_total, prefill_done) = match cfg.prefill_range {
-            Some(range) => {
-                let pending: VecDeque<usize> = (range.start..range.end).collect();
-                let total = range.end - range.start;
-                cfg.shared.add_prefill_total(total);
-                tracing::debug!(
-                    worker_id = cfg.id,
-                    total,
-                    start = range.start,
-                    end = range.end,
-                    "prefill initialized"
-                );
-                (pending, total, total == 0)
-            }
-            None => {
-                cfg.shared.mark_prefill_complete();
-                (VecDeque::new(), 0, true)
-            }
-        };
-
         // Compute connection distribution
         let endpoints = cfg.config.target.endpoints.clone();
         let total_connections = cfg.config.connection.total_connections();
@@ -503,6 +515,44 @@ impl AsyncEventHandler for BenchHandler {
         let tls_enabled = cfg.config.target.tls;
         let tls_server_name = cfg.config.target.tls_hostname.clone();
 
+        // Initialize per-endpoint prefill queues. We partition this worker's
+        // prefill range by routing destination so each connection task draws
+        // only from its endpoint's sub-queue — avoiding the lock-pop /
+        // lock-push-back thrashing the original single-shared-queue design
+        // suffered from when most popped keys didn't route to the popping
+        // connection's endpoint.
+        let key_len = cfg.config.workload.keyspace.length;
+        let prefill_queues = PrefillQueues::new(endpoints.len());
+        let (prefill_total, prefill_done) = match cfg.prefill_range {
+            Some(range) => {
+                let total = range.end - range.start;
+                cfg.shared.add_prefill_total(total);
+                let mut key_buf = vec![0u8; key_len];
+                for key_id in range.start..range.end {
+                    write_key(&mut key_buf, key_id);
+                    let endpoint_idx = route_partition(
+                        &slot_table,
+                        &ring,
+                        endpoints.len(),
+                        &key_buf,
+                    );
+                    prefill_queues.push_back(endpoint_idx, key_id);
+                }
+                tracing::debug!(
+                    worker_id = cfg.id,
+                    total,
+                    start = range.start,
+                    end = range.end,
+                    "prefill initialized"
+                );
+                (total, total == 0)
+            }
+            None => {
+                cfg.shared.mark_prefill_complete();
+                (0, true)
+            }
+        };
+
         let task_state = Arc::new(TaskSharedState {
             config: cfg.config.clone(),
             shared: Arc::clone(&cfg.shared),
@@ -511,7 +561,7 @@ impl AsyncEventHandler for BenchHandler {
             endpoints,
             ring,
             slot_table: RwLock::new(slot_table),
-            prefill_queue: Mutex::new(prefill_queue),
+            prefill_queues,
             worker_id: cfg.id,
             backfill_on_miss,
             momento_setup: Mutex::new(None),
@@ -896,7 +946,8 @@ async fn drive_resp_workload(
     let value_len = config.workload.values.length;
     let pool_len = state.task_state.value_pool.len();
     let backfill_on_miss = state.task_state.backfill_on_miss;
-    let multi_endpoint = state.task_state.endpoints.len() > 1;
+    let num_endpoints = state.task_state.endpoints.len();
+    let multi_endpoint = num_endpoints > 1;
     let pipeline_depth = config.connection.pipeline_depth;
     let batch_size = config.connection.effective_batch_size();
     let mut prefill_in_flight: VecDeque<usize> = VecDeque::new();
@@ -913,28 +964,22 @@ async fn drive_resp_workload(
 
         // Fill pipeline
         if phase == Phase::Prefill && !state.is_prefill_done() {
-            let mut skips = 0usize;
             while want_fire && client.pending_count() < pipeline_depth {
-                let key_id = {
-                    let mut queue = state.task_state.prefill_queue.lock().unwrap();
-                    match queue.pop_front() {
-                        Some(id) => id,
-                        None => break,
-                    }
+                let Some(key_id) = state.task_state.prefill_queues.pop_front(endpoint_idx) else {
+                    break;
                 };
 
                 write_key(key_buf, key_id);
 
-                // Route key to correct endpoint in multi-endpoint setups
+                // Keys were partitioned to this endpoint at init time, so
+                // routing should always match. The only way it wouldn't is
+                // a slot-table update mid-prefill (RESP cluster topology
+                // change). In that case, hand the key to the new owner's
+                // queue and move on — no busy-loop.
                 if multi_endpoint {
                     let routed = route_key(&state.task_state, key_buf);
                     if routed != endpoint_idx {
-                        let mut queue = state.task_state.prefill_queue.lock().unwrap();
-                        queue.push_back(key_id);
-                        skips += 1;
-                        if skips >= pipeline_depth * 2 {
-                            break;
-                        }
+                        state.task_state.prefill_queues.push_back(routed, key_id);
                         continue;
                     }
                 }
@@ -948,8 +993,10 @@ async fn drive_resp_workload(
                         prefill_in_flight.push_back(key_id);
                     }
                     Err(_) => {
-                        let mut queue = state.task_state.prefill_queue.lock().unwrap();
-                        queue.push_front(key_id);
+                        state
+                            .task_state
+                            .prefill_queues
+                            .push_front(endpoint_idx, key_id);
                         break;
                     }
                 }
@@ -994,19 +1041,34 @@ async fn drive_resp_workload(
                     continue;
                 }
 
-                token_budget -= 1;
-
-                // Generate random key
-                let key_id = rng.random_range(0..key_count);
-                write_key(key_buf, key_id);
-
-                // Multi-endpoint routing
-                if multi_endpoint {
-                    let routed = route_key(&state.task_state, key_buf);
-                    if routed != endpoint_idx {
-                        continue;
+                // Generate a random key. In multi-endpoint setups, only keys
+                // that route to this connection's endpoint can be sent, so
+                // retry without consuming rate-limit tokens until one matches.
+                // A token consumed on a routing miss would be globally lost
+                // from a rate limiter shared across all workers.
+                let key_id = {
+                    let mut attempts = 0usize;
+                    let max_attempts = max_routing_attempts(num_endpoints);
+                    loop {
+                        let candidate = rng.random_range(0..key_count);
+                        write_key(key_buf, candidate);
+                        if !multi_endpoint
+                            || route_key(&state.task_state, key_buf) == endpoint_idx
+                        {
+                            break Some(candidate);
+                        }
+                        attempts += 1;
+                        if attempts >= max_attempts {
+                            break None;
+                        }
                     }
-                }
+                };
+                let Some(key_id) = key_id else {
+                    // No matching key found; yield to recv and try next cycle.
+                    break;
+                };
+
+                token_budget -= 1;
 
                 // Choose command
                 let roll = rng.random_range(0..100);
@@ -1038,20 +1100,14 @@ async fn drive_resp_workload(
         let op = match client.recv().await {
             Ok(op) => op,
             Err(ringline_redis::Error::ConnectionClosed) => {
-                if !prefill_in_flight.is_empty() {
-                    let mut queue = state.task_state.prefill_queue.lock().unwrap();
-                    for key_id in prefill_in_flight.drain(..) {
-                        queue.push_back(key_id);
-                    }
+                for key_id in prefill_in_flight.drain(..) {
+                    state.task_state.prefill_queues.push_back(endpoint_idx, key_id);
                 }
                 return Err(DisconnectReason::Eof);
             }
             Err(_) => {
-                if !prefill_in_flight.is_empty() {
-                    let mut queue = state.task_state.prefill_queue.lock().unwrap();
-                    for key_id in prefill_in_flight.drain(..) {
-                        queue.push_back(key_id);
-                    }
+                for key_id in prefill_in_flight.drain(..) {
+                    state.task_state.prefill_queues.push_back(endpoint_idx, key_id);
                 }
                 return Err(DisconnectReason::RecvError);
             }
@@ -1067,8 +1123,7 @@ async fn drive_resp_workload(
                 confirm_prefill_key(state);
             } else {
                 // Retry failed prefill SET
-                let mut queue = state.task_state.prefill_queue.lock().unwrap();
-                queue.push_back(key_id);
+                state.task_state.prefill_queues.push_back(endpoint_idx, key_id);
             }
         }
 
@@ -1351,7 +1406,8 @@ async fn drive_memcache_workload(
     let value_len = config.workload.values.length;
     let pool_len = state.task_state.value_pool.len();
     let backfill_on_miss = state.task_state.backfill_on_miss;
-    let multi_endpoint = state.task_state.endpoints.len() > 1;
+    let num_endpoints = state.task_state.endpoints.len();
+    let multi_endpoint = num_endpoints > 1;
     let pipeline_depth = config.connection.pipeline_depth;
     let batch_size = config.connection.effective_batch_size();
     let mut prefill_in_flight: VecDeque<usize> = VecDeque::new();
@@ -1368,28 +1424,20 @@ async fn drive_memcache_workload(
 
         // Fill pipeline
         if phase == Phase::Prefill && !state.is_prefill_done() {
-            let mut skips = 0usize;
             while want_fire && client.pending_count() < pipeline_depth {
-                let key_id = {
-                    let mut queue = state.task_state.prefill_queue.lock().unwrap();
-                    match queue.pop_front() {
-                        Some(id) => id,
-                        None => break,
-                    }
+                let Some(key_id) = state.task_state.prefill_queues.pop_front(endpoint_idx) else {
+                    break;
                 };
 
                 write_key(key_buf, key_id);
 
-                // Route key to correct endpoint in multi-endpoint setups
+                // Keys were partitioned to this endpoint at init time; only
+                // a slot-table change mid-prefill can land one here that no
+                // longer routes to us. Hand it to the new owner's queue.
                 if multi_endpoint {
                     let routed = route_key(&state.task_state, key_buf);
                     if routed != endpoint_idx {
-                        let mut queue = state.task_state.prefill_queue.lock().unwrap();
-                        queue.push_back(key_id);
-                        skips += 1;
-                        if skips >= pipeline_depth * 2 {
-                            break;
-                        }
+                        state.task_state.prefill_queues.push_back(routed, key_id);
                         continue;
                     }
                 }
@@ -1403,8 +1451,10 @@ async fn drive_memcache_workload(
                         prefill_in_flight.push_back(key_id);
                     }
                     Err(_) => {
-                        let mut queue = state.task_state.prefill_queue.lock().unwrap();
-                        queue.push_front(key_id);
+                        state
+                            .task_state
+                            .prefill_queues
+                            .push_front(endpoint_idx, key_id);
                         break;
                     }
                 }
@@ -1448,19 +1498,34 @@ async fn drive_memcache_workload(
                     continue;
                 }
 
-                token_budget -= 1;
-
-                // Generate random key
-                let key_id = rng.random_range(0..key_count);
-                write_key(key_buf, key_id);
-
-                // Multi-endpoint routing
-                if multi_endpoint {
-                    let routed = route_key(&state.task_state, key_buf);
-                    if routed != endpoint_idx {
-                        continue;
+                // Generate a random key. In multi-endpoint setups, only keys
+                // that route to this connection's endpoint can be sent, so
+                // retry without consuming rate-limit tokens until one matches.
+                // A token consumed on a routing miss would be globally lost
+                // from a rate limiter shared across all workers.
+                let key_id = {
+                    let mut attempts = 0usize;
+                    let max_attempts = max_routing_attempts(num_endpoints);
+                    loop {
+                        let candidate = rng.random_range(0..key_count);
+                        write_key(key_buf, candidate);
+                        if !multi_endpoint
+                            || route_key(&state.task_state, key_buf) == endpoint_idx
+                        {
+                            break Some(candidate);
+                        }
+                        attempts += 1;
+                        if attempts >= max_attempts {
+                            break None;
+                        }
                     }
-                }
+                };
+                let Some(key_id) = key_id else {
+                    // No matching key found; yield to recv and try next cycle.
+                    break;
+                };
+
+                token_budget -= 1;
 
                 // Choose command
                 let roll = rng.random_range(0..100);
@@ -1491,20 +1556,14 @@ async fn drive_memcache_workload(
         let op = match client.recv().await {
             Ok(op) => op,
             Err(ringline_memcache::Error::ConnectionClosed) => {
-                if !prefill_in_flight.is_empty() {
-                    let mut queue = state.task_state.prefill_queue.lock().unwrap();
-                    for key_id in prefill_in_flight.drain(..) {
-                        queue.push_back(key_id);
-                    }
+                for key_id in prefill_in_flight.drain(..) {
+                    state.task_state.prefill_queues.push_back(endpoint_idx, key_id);
                 }
                 return Err(DisconnectReason::Eof);
             }
             Err(_) => {
-                if !prefill_in_flight.is_empty() {
-                    let mut queue = state.task_state.prefill_queue.lock().unwrap();
-                    for key_id in prefill_in_flight.drain(..) {
-                        queue.push_back(key_id);
-                    }
+                for key_id in prefill_in_flight.drain(..) {
+                    state.task_state.prefill_queues.push_back(endpoint_idx, key_id);
                 }
                 return Err(DisconnectReason::RecvError);
             }
@@ -1520,8 +1579,7 @@ async fn drive_memcache_workload(
                 confirm_prefill_key(state);
             } else {
                 // Retry failed prefill SET
-                let mut queue = state.task_state.prefill_queue.lock().unwrap();
-                queue.push_back(key_id);
+                state.task_state.prefill_queues.push_back(endpoint_idx, key_id);
             }
         }
 
@@ -1731,14 +1789,28 @@ async fn drive_ping_workload(
             {
                 state.task_state.shared.mark_prefill_complete();
             }
+            // Yield so we don't monopolize the executor thread while waiting
+            // for the main thread to advance the phase.
+            ringline::sleep(Duration::from_millis(1)).await;
             continue;
         }
 
-        // Rate limiting
-        if let Some(ref rl) = state.task_state.ratelimiter
-            && rl.try_wait().is_err()
-        {
-            continue;
+        // Rate limiting. On miss, sleep until the next token would be
+        // available rather than tight-spinning — this is the only yield
+        // point on the ping hot path, and skipping it starves every other
+        // task sharing this executor thread.
+        if let Some(ref rl) = state.task_state.ratelimiter {
+            match rl.try_wait() {
+                Ok(()) => {}
+                Err(TryWaitError::Insufficient(wait)) => {
+                    ringline::sleep(wait.max(Duration::from_micros(50))).await;
+                    continue;
+                }
+                Err(_) => {
+                    ringline::sleep(Duration::from_millis(1)).await;
+                    continue;
+                }
+            }
         }
 
         metrics::REQUESTS_SENT.increment();
@@ -1765,12 +1837,7 @@ async fn momento_connection_task(state: Arc<SharedWorkerState>, _conn_idx: usize
 
     let mut rng = Xoshiro256PlusPlus::seed_from_u64(seed);
     let mut key_buf = vec![0u8; config.workload.keyspace.length];
-    let mut value_buf = vec![0u8; config.workload.values.length];
     let mut backfill_queue: Vec<usize> = Vec::new();
-
-    // Fill value buffer with random data
-    let mut init_rng = Xoshiro256PlusPlus::seed_from_u64(42);
-    init_rng.fill_bytes(&mut value_buf);
 
     loop {
         let phase = state.task_state.shared.phase();
@@ -1838,7 +1905,6 @@ async fn momento_connection_task(state: Arc<SharedWorkerState>, _conn_idx: usize
             &state,
             &mut rng,
             &mut key_buf,
-            &mut value_buf,
             &mut backfill_queue,
         )
         .await;
@@ -1863,7 +1929,6 @@ async fn drive_momento_session(
     state: &Arc<SharedWorkerState>,
     rng: &mut Xoshiro256PlusPlus,
     key_buf: &mut [u8],
-    value_buf: &mut [u8],
     backfill_queue: &mut Vec<usize>,
 ) -> Result<(), DisconnectReason> {
     let config = &state.task_state.config;
@@ -1875,6 +1940,10 @@ async fn drive_momento_session(
     let cache_name = &config.momento.cache_name;
     let ttl_ms = config.momento.ttl_seconds * 1000;
     let backfill_on_miss = state.task_state.backfill_on_miss;
+    let value_len = config.workload.values.length;
+    let value_pool = &state.task_state.value_pool;
+    let pool_len = value_pool.len();
+    let max_value_offset = pool_len - value_len;
     let mut prefill_in_flight: VecDeque<usize> = VecDeque::new();
 
     loop {
@@ -1887,28 +1956,24 @@ async fn drive_momento_session(
         // accumulate into a single coalesced send rather than one-per-response.
         let want_fire = pipeline_depth.saturating_sub(client.pending_count()) >= batch_size;
 
-        // Fill pipeline
+        // Fill pipeline (Momento: single queue, no routing)
         if phase == Phase::Prefill && !state.is_prefill_done() {
             while want_fire && client.pending_count() < pipeline_depth {
-                let key_id = {
-                    let mut queue = state.task_state.prefill_queue.lock().unwrap();
-                    match queue.pop_front() {
-                        Some(id) => id,
-                        None => break,
-                    }
+                let Some(key_id) = state.task_state.prefill_queues.pop_front(0) else {
+                    break;
                 };
 
                 write_key(key_buf, key_id);
-                rng.fill_bytes(value_buf);
+                let offset = rng.random_range(0..=max_value_offset);
+                let value = &value_pool[offset..offset + value_len];
 
-                match client.fire_set(cache_name, key_buf, value_buf, ttl_ms, 0) {
+                match client.fire_set(cache_name, key_buf, value, ttl_ms, 0) {
                     Ok(_) => {
                         metrics::REQUESTS_SENT.increment();
                         prefill_in_flight.push_back(key_id);
                     }
                     Err(_) => {
-                        let mut queue = state.task_state.prefill_queue.lock().unwrap();
-                        queue.push_front(key_id);
+                        state.task_state.prefill_queues.push_front(0, key_id);
                         break;
                     }
                 }
@@ -1934,12 +1999,13 @@ async fn drive_momento_session(
                 // Drain backfill queue first
                 if let Some(key_id) = backfill_queue.pop() {
                     write_key(key_buf, key_id);
-                    rng.fill_bytes(value_buf);
+                    let offset = rng.random_range(0..=max_value_offset);
+                    let value = &value_pool[offset..offset + value_len];
 
                     token_budget -= 1;
 
                     let user_data = key_id as u64 | BACKFILL_MARKER;
-                    match client.fire_set(cache_name, key_buf, value_buf, ttl_ms, user_data) {
+                    match client.fire_set(cache_name, key_buf, value, ttl_ms, user_data) {
                         Ok(_) => {
                             metrics::REQUESTS_SENT.increment();
                         }
@@ -1962,9 +2028,10 @@ async fn drive_momento_session(
                 } else if roll < get_ratio + delete_ratio {
                     client.fire_delete(cache_name, key_buf, 0).is_ok()
                 } else {
-                    rng.fill_bytes(value_buf);
+                    let offset = rng.random_range(0..=max_value_offset);
+                    let value = &value_pool[offset..offset + value_len];
                     client
-                        .fire_set(cache_name, key_buf, value_buf, ttl_ms, 0)
+                        .fire_set(cache_name, key_buf, value, ttl_ms, 0)
                         .is_ok()
                 };
 
@@ -1985,11 +2052,8 @@ async fn drive_momento_session(
         let op = match client.recv().await {
             Ok(op) => op,
             Err(_) => {
-                if !prefill_in_flight.is_empty() {
-                    let mut queue = state.task_state.prefill_queue.lock().unwrap();
-                    for key_id in prefill_in_flight.drain(..) {
-                        queue.push_back(key_id);
-                    }
+                for key_id in prefill_in_flight.drain(..) {
+                    state.task_state.prefill_queues.push_back(0, key_id);
                 }
                 return Err(DisconnectReason::Eof);
             }
@@ -2005,8 +2069,7 @@ async fn drive_momento_session(
                 confirm_prefill_key(state);
             } else {
                 // Retry failed prefill SET
-                let mut queue = state.task_state.prefill_queue.lock().unwrap();
-                queue.push_back(key_id);
+                state.task_state.prefill_queues.push_back(0, key_id);
             }
         }
 
@@ -2173,16 +2236,36 @@ fn record_counters(result: &RequestResult) {
     }
 }
 
+/// Upper bound on random-key draws when searching for one that routes to this
+/// endpoint. Expected draws to find a match is `num_endpoints` under uniform
+/// hashing; the multiplier provides enough headroom that hitting the cap is
+/// vanishingly unlikely in a healthy setup, while still bounding CPU if the
+/// hash distribution is degenerate (e.g. a tiny keyspace).
+fn max_routing_attempts(num_endpoints: usize) -> usize {
+    num_endpoints.saturating_mul(64).max(64)
+}
+
 /// Route a key to an endpoint index.
 fn route_key(state: &TaskSharedState, key: &[u8]) -> usize {
     let slot_table = state.slot_table.read().unwrap();
-    if let Some(ref table) = *slot_table {
+    route_partition(&slot_table, &state.ring, state.endpoints.len(), key)
+}
+
+/// Route a key using the supplied slot table / ring directly. Used at init
+/// time when partitioning the prefill queue, before `TaskSharedState` exists.
+fn route_partition(
+    slot_table: &Option<Vec<u16>>,
+    ring: &ketama::Ring,
+    num_endpoints: usize,
+    key: &[u8],
+) -> usize {
+    if let Some(table) = slot_table.as_ref() {
         let slot = resp_proto::hash_slot(key);
         table[slot as usize] as usize
-    } else if state.endpoints.len() == 1 {
+    } else if num_endpoints <= 1 {
         0
     } else {
-        state.ring.route(key)
+        ring.route(key)
     }
 }
 
@@ -2251,7 +2334,7 @@ mod tests {
             endpoints: vec!["127.0.0.1:6379".parse().unwrap()],
             ring: ketama::Ring::build(&["127.0.0.1:6379"]),
             slot_table: RwLock::new(None),
-            prefill_queue: Mutex::new(VecDeque::new()),
+            prefill_queues: PrefillQueues::new(1),
             worker_id,
             backfill_on_miss: false,
             momento_setup: Mutex::new(None),

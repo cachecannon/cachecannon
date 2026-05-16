@@ -8,7 +8,7 @@
 //! same group don't cause false sharing.
 
 use std::cell::Cell;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 
 const CACHE_LINE: usize = 128;
 const SLOTS: usize = CACHE_LINE / 8; // 16 counters per cache line
@@ -127,6 +127,77 @@ impl metriken::Metric for Counter {
 
     fn value(&self) -> Option<metriken::Value<'_>> {
         Some(metriken::Value::Counter(Counter::value(self)))
+    }
+}
+
+/// A sharded gauge backed by signed per-shard counters.
+///
+/// Supports increment/decrement/add semantics for values that go up and down
+/// (e.g. active connections). Each shard occupies its own cache line, so
+/// concurrent updates from different threads don't contend.
+#[repr(C, align(128))]
+struct GaugeShard {
+    value: AtomicI64,
+}
+
+pub struct Gauge {
+    shards: [GaugeShard; NUM_SHARDS],
+}
+
+// Safety: All fields are atomics, safe to share across threads
+unsafe impl Send for Gauge {}
+unsafe impl Sync for Gauge {}
+
+impl Gauge {
+    #[allow(clippy::declare_interior_mutable_const)]
+    pub const fn new() -> Self {
+        const SHARD: GaugeShard = GaugeShard {
+            value: AtomicI64::new(0),
+        };
+        Self {
+            shards: [SHARD; NUM_SHARDS],
+        }
+    }
+
+    #[inline]
+    pub fn increment(&self) {
+        self.add(1);
+    }
+
+    #[inline]
+    pub fn decrement(&self) {
+        self.add(-1);
+    }
+
+    #[inline]
+    pub fn add(&self, delta: i64) {
+        let shard = shard_index();
+        self.shards[shard]
+            .value
+            .fetch_add(delta, Ordering::Relaxed);
+    }
+
+    pub fn value(&self) -> i64 {
+        self.shards
+            .iter()
+            .map(|s| s.value.load(Ordering::Relaxed))
+            .sum()
+    }
+}
+
+impl Default for Gauge {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl metriken::Metric for Gauge {
+    fn as_any(&self) -> Option<&dyn std::any::Any> {
+        Some(self)
+    }
+
+    fn value(&self) -> Option<metriken::Value<'_>> {
+        Some(metriken::Value::Gauge(Gauge::value(self)))
     }
 }
 

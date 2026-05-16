@@ -235,6 +235,14 @@ pub struct SaturationSearch {
     /// Duration to sample at each rate level.
     #[serde(default = "default_sample_window", with = "humantime_serde")]
     pub sample_window: Duration,
+    /// Duration to wait after a rate change before sampling begins.
+    ///
+    /// When the rate advances, requests issued at the previous rate are still
+    /// in flight (up to `pipeline_depth` per connection). Their responses
+    /// would otherwise land in the new step's window and bias early
+    /// measurements. The drain window discards that period before sampling.
+    #[serde(default = "default_drain_window", with = "humantime_serde")]
+    pub drain_window: Duration,
     /// Number of consecutive SLO failures before stopping.
     #[serde(default = "default_stop_after_failures")]
     pub stop_after_failures: u32,
@@ -278,6 +286,10 @@ fn default_step_multiplier() -> f64 {
 
 fn default_sample_window() -> Duration {
     Duration::from_secs(5)
+}
+
+fn default_drain_window() -> Duration {
+    Duration::from_millis(500)
 }
 
 fn default_stop_after_failures() -> u32 {

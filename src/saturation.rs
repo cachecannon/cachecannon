@@ -26,11 +26,15 @@ pub struct SaturationSearchState {
     last_good_rate: Option<u64>,
     /// Consecutive SLO failures.
     consecutive_failures: u32,
-    /// When the current step started.
+    /// When the current step started (i.e. when the new rate was applied).
     step_start: Instant,
-    /// Histogram snapshot at step start (for delta calculation).
+    /// When the measurement baseline was captured (set once the drain window
+    /// has elapsed). `None` means we are still draining old-rate in-flight
+    /// requests and have not yet snapshotted the histogram/response baseline.
+    baseline_at: Option<Instant>,
+    /// Histogram snapshot at baseline capture (for delta calculation).
     step_histogram: Option<Histogram>,
-    /// Response count at step start.
+    /// Response count at baseline capture.
     step_responses: u64,
 
     /// All step results.
@@ -57,8 +61,9 @@ impl SaturationSearchState {
             last_good_rate: None,
             consecutive_failures: 0,
             step_start: Instant::now(),
-            step_histogram: metrics::RESPONSE_LATENCY.load(),
-            step_responses: metrics::RESPONSES_RECEIVED.value(),
+            baseline_at: None,
+            step_histogram: None,
+            step_responses: 0,
             results: Vec::new(),
             completed: false,
             header_printed: false,
@@ -73,8 +78,30 @@ impl SaturationSearchState {
             return false;
         }
 
-        // Check if sample window has elapsed
-        if self.step_start.elapsed() < self.config.sample_window {
+        // Snapshot the clock once and use it for both the window check and the
+        // rate denominator. Reading elapsed() twice would let slowness between
+        // the two reads (e.g. histogram math) inflate the denominator past the
+        // window the response count was sampled against.
+        let now = Instant::now();
+
+        // Drain phase: after a rate change, requests at the previous rate are
+        // still in flight. Wait `drain_window` before capturing the baseline
+        // so their responses don't bias the new step's measurements.
+        let baseline_at = match self.baseline_at {
+            Some(t) => t,
+            None => {
+                if now.saturating_duration_since(self.step_start) < self.config.drain_window {
+                    return false;
+                }
+                self.step_responses = metrics::RESPONSES_RECEIVED.value();
+                self.step_histogram = metrics::RESPONSE_LATENCY.load();
+                self.baseline_at = Some(now);
+                return false;
+            }
+        };
+
+        let elapsed = now.saturating_duration_since(baseline_at);
+        if elapsed < self.config.sample_window {
             return false;
         }
 
@@ -89,7 +116,7 @@ impl SaturationSearchState {
         let current_responses = metrics::RESPONSES_RECEIVED.value();
 
         let delta_responses = current_responses.saturating_sub(self.step_responses);
-        let elapsed_secs = self.step_start.elapsed().as_secs_f64();
+        let elapsed_secs = elapsed.as_secs_f64();
         let achieved_rate = delta_responses as f64 / elapsed_secs;
 
         // Get percentiles from delta histogram
@@ -177,10 +204,13 @@ impl SaturationSearchState {
         self.ratelimiter.set_rate(next_rate);
         metrics::TARGET_RATE.set(next_rate as i64);
 
-        // Reset step tracking
-        self.step_start = Instant::now();
-        self.step_histogram = current_histogram;
-        self.step_responses = current_responses;
+        // Reset step tracking. The new rate just took effect; the baseline
+        // will be captured after `drain_window` has elapsed so old-rate
+        // in-flight responses don't bias the new step.
+        self.step_start = now;
+        self.baseline_at = None;
+        self.step_histogram = None;
+        self.step_responses = 0;
 
         true
     }
@@ -334,6 +364,7 @@ mod tests {
             start_rate: 1000,
             step_multiplier: 1.05,
             sample_window: Duration::from_secs(5),
+            drain_window: Duration::from_millis(500),
             stop_after_failures: 3,
             max_rate: 100_000_000,
             min_throughput_ratio: 0.9,

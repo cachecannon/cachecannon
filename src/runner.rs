@@ -600,14 +600,15 @@ pub fn run_benchmark_full(
         }
 
         // Periodic reporting
-        if last_report.elapsed() >= report_interval {
+        let now = Instant::now();
+        if now.duration_since(last_report) >= report_interval {
             let responses = metrics::RESPONSES_RECEIVED.value();
             let errors = metrics::REQUEST_ERRORS.value();
             let conn_failures = metrics::CONNECTIONS_FAILED.value();
             let hits = metrics::CACHE_HITS.value();
             let misses = metrics::CACHE_MISSES.value();
 
-            let elapsed_secs = last_report.elapsed().as_secs_f64();
+            let elapsed_secs = now.duration_since(last_report).as_secs_f64();
 
             let delta_responses = responses - last_responses;
             let rate = delta_responses as f64 / elapsed_secs;
@@ -688,7 +689,7 @@ pub fn run_benchmark_full(
                 state.check_and_advance(&*formatter);
             }
 
-            last_report = Instant::now();
+            last_report = now;
         }
     }
 
