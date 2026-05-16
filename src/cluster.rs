@@ -110,8 +110,9 @@ fn build_topology(
         });
     }
 
-    // Build slot table: slot → endpoint index
-    let mut slot_table = vec![0u16; SLOT_COUNT as usize];
+    // Build slot table: slot → endpoint index. Use u16::MAX as the sentinel
+    // for "not yet assigned" so we can detect gaps in the response.
+    let mut slot_table = vec![u16::MAX; SLOT_COUNT as usize];
     for range in slot_map.ranges() {
         let addr: SocketAddr =
             range.primary.address.parse().map_err(|e| {
@@ -121,6 +122,15 @@ fn build_topology(
         for slot in range.start..=range.end {
             slot_table[slot as usize] = idx as u16;
         }
+    }
+
+    let unmapped = slot_table.iter().filter(|&&s| s == u16::MAX).count();
+    if unmapped > 0 {
+        return Err(format!(
+            "CLUSTER SLOTS response left {} of {} hash slots unmapped (cluster is degraded or partially migrated); refusing to run with silent slot-0 fallback",
+            unmapped, SLOT_COUNT
+        )
+        .into());
     }
 
     tracing::info!(

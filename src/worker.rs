@@ -1128,6 +1128,7 @@ async fn drive_resp_workload(
             && result.request_type == RequestType::Get
             && result.success
             && result.hit == Some(false)
+            && backfill_queue.len() < BACKFILL_QUEUE_CAP
             && let Some(key_id) = result.key_id
         {
             backfill_queue.push(key_id);
@@ -1156,6 +1157,11 @@ const BACKFILL_MARKER: u64 = 1 << 63;
 /// The remaining low bits carry the key_id so we can identify a prefill
 /// response without relying on FIFO assumptions across phases.
 const PREFILL_MARKER: u64 = 1 << 62;
+
+/// Per-connection cap on pending backfill-on-miss key IDs. Bounds memory
+/// when miss rate outpaces backfill drain (cold cache, large keyspace).
+/// Overflow drops the new miss; backfill is best-effort.
+const BACKFILL_QUEUE_CAP: usize = 1024;
 
 /// Map a ringline-redis `CompletedOp` to a `RequestResult`.
 fn map_resp_op(op: ringline_redis::CompletedOp) -> RequestResult {
@@ -1599,6 +1605,7 @@ async fn drive_memcache_workload(
             && result.request_type == RequestType::Get
             && result.success
             && result.hit == Some(false)
+            && backfill_queue.len() < BACKFILL_QUEUE_CAP
             && let Some(key_id) = result.key_id
         {
             backfill_queue.push(key_id);
@@ -2102,6 +2109,7 @@ async fn drive_momento_session(
             && result.request_type == RequestType::Get
             && result.success
             && result.hit == Some(false)
+            && backfill_queue.len() < BACKFILL_QUEUE_CAP
             && let Some(key_id) = result.key_id
         {
             backfill_queue.push(key_id);
