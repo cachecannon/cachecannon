@@ -68,7 +68,7 @@ ringline-ping = "0.2"
 # Metrics
 histogram = "1.1"
 metriken = "0.8"
-metriken-exposition = { version = "0.14", features = ["parquet"] }
+metriken-exposition = { version = "0.14", features = ["parquet", "msgpack"] }
 
 # TLS
 rustls = { version = "0.23", default-features = false, features = ["std", "ring"] }
