@@ -1,7 +1,7 @@
 //! Benchmark metrics using sharded counters.
 
 pub use crate::sharded_counter::set_thread_shard;
-use crate::sharded_counter::{Counter, CounterGroup};
+use crate::sharded_counter::{Counter, CounterGroup, Gauge as ShardedGauge};
 use metriken::{AtomicHistogram, Gauge, metric};
 
 // Counter groups
@@ -89,9 +89,11 @@ pub static DELETE_COUNT: Counter = Counter::new(&OPS, ops::DELETE);
 )]
 pub static BACKFILL_SET_COUNT: Counter = Counter::new(&OPS, ops::BACKFILL_SET);
 
-// Connection gauge (tracks current active connections; decremented on disconnect)
+// Connection gauge (tracks current active connections; decremented on disconnect).
+// Uses a sharded gauge so connect/disconnect from many worker threads doesn't
+// contend on a single cache line.
 #[metric(name = "connections_active", description = "Active connections")]
-pub static CONNECTIONS_ACTIVE: Gauge = Gauge::new();
+pub static CONNECTIONS_ACTIVE: ShardedGauge = ShardedGauge::new();
 
 #[metric(name = "connections_failed", description = "Failed connections")]
 pub static CONNECTIONS_FAILED: Counter = Counter::new(&CONNECTION, connection::FAILED);

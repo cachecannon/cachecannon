@@ -144,6 +144,9 @@ step_multiplier = 1.05
 # Duration to sample at each rate level
 sample_window = "5s"
 
+# Drain in-flight requests after a rate change before sampling
+drain_window = "500ms"
+
 # Stop after this many consecutive SLO violations
 stop_after_failures = 3
 

@@ -61,6 +61,7 @@ mode = "userspace"            # "userspace" (portable) or "software" (kernel SO_
 # start_rate = 1000             # Starting request rate (req/s)
 # step_multiplier = 1.05        # Increase rate by 5% each step
 # sample_window = "5s"          # Duration to sample at each rate level
+# drain_window = "500ms"        # Drain in-flight requests after rate change before sampling
 # stop_after_failures = 3       # Stop after N consecutive SLO violations
 # max_rate = 100000000          # Absolute maximum rate to try
 # min_throughput_ratio = 0.9    # Fail step if achieved < 90% of target
