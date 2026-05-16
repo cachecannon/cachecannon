@@ -306,10 +306,7 @@ impl PrefillQueues {
     }
 
     fn push_front(&self, endpoint_idx: usize, key_id: usize) {
-        self.queues[endpoint_idx]
-            .lock()
-            .unwrap()
-            .push_front(key_id);
+        self.queues[endpoint_idx].lock().unwrap().push_front(key_id);
     }
 
     fn pop_front(&self, endpoint_idx: usize) -> Option<usize> {
@@ -530,12 +527,8 @@ impl AsyncEventHandler for BenchHandler {
                 let mut key_buf = vec![0u8; key_len];
                 for key_id in range.start..range.end {
                     write_key(&mut key_buf, key_id);
-                    let endpoint_idx = route_partition(
-                        &slot_table,
-                        &ring,
-                        endpoints.len(),
-                        &key_buf,
-                    );
+                    let endpoint_idx =
+                        route_partition(&slot_table, &ring, endpoints.len(), &key_buf);
                     prefill_queues.push_back(endpoint_idx, key_id);
                 }
                 tracing::debug!(
@@ -1052,8 +1045,7 @@ async fn drive_resp_workload(
                     loop {
                         let candidate = rng.random_range(0..key_count);
                         write_key(key_buf, candidate);
-                        if !multi_endpoint
-                            || route_key(&state.task_state, key_buf) == endpoint_idx
+                        if !multi_endpoint || route_key(&state.task_state, key_buf) == endpoint_idx
                         {
                             break Some(candidate);
                         }
@@ -1100,19 +1092,11 @@ async fn drive_resp_workload(
         let op = match client.recv().await {
             Ok(op) => op,
             Err(ringline_redis::Error::ConnectionClosed) => {
-                requeue_drained_prefill(
-                    &state.task_state,
-                    key_buf,
-                    prefill_in_flight.drain(..),
-                );
+                requeue_drained_prefill(&state.task_state, key_buf, prefill_in_flight.drain(..));
                 return Err(DisconnectReason::Eof);
             }
             Err(_) => {
-                requeue_drained_prefill(
-                    &state.task_state,
-                    key_buf,
-                    prefill_in_flight.drain(..),
-                );
+                requeue_drained_prefill(&state.task_state, key_buf, prefill_in_flight.drain(..));
                 return Err(DisconnectReason::RecvError);
             }
         };
@@ -1132,7 +1116,10 @@ async fn drive_resp_workload(
                 confirm_prefill_key(state);
             } else {
                 // Retry failed prefill SET
-                state.task_state.prefill_queues.push_back(endpoint_idx, key_id);
+                state
+                    .task_state
+                    .prefill_queues
+                    .push_back(endpoint_idx, key_id);
             }
         }
 
@@ -1532,8 +1519,7 @@ async fn drive_memcache_workload(
                     loop {
                         let candidate = rng.random_range(0..key_count);
                         write_key(key_buf, candidate);
-                        if !multi_endpoint
-                            || route_key(&state.task_state, key_buf) == endpoint_idx
+                        if !multi_endpoint || route_key(&state.task_state, key_buf) == endpoint_idx
                         {
                             break Some(candidate);
                         }
@@ -1579,19 +1565,11 @@ async fn drive_memcache_workload(
         let op = match client.recv().await {
             Ok(op) => op,
             Err(ringline_memcache::Error::ConnectionClosed) => {
-                requeue_drained_prefill(
-                    &state.task_state,
-                    key_buf,
-                    prefill_in_flight.drain(..),
-                );
+                requeue_drained_prefill(&state.task_state, key_buf, prefill_in_flight.drain(..));
                 return Err(DisconnectReason::Eof);
             }
             Err(_) => {
-                requeue_drained_prefill(
-                    &state.task_state,
-                    key_buf,
-                    prefill_in_flight.drain(..),
-                );
+                requeue_drained_prefill(&state.task_state, key_buf, prefill_in_flight.drain(..));
                 return Err(DisconnectReason::RecvError);
             }
         };
@@ -1609,7 +1587,10 @@ async fn drive_memcache_workload(
                 confirm_prefill_key(state);
             } else {
                 // Retry failed prefill SET
-                state.task_state.prefill_queues.push_back(endpoint_idx, key_id);
+                state
+                    .task_state
+                    .prefill_queues
+                    .push_back(endpoint_idx, key_id);
             }
         }
 
