@@ -1,13 +1,13 @@
 use histogram::SampleQuantiles;
 use metriken_exposition::{
-    Counter as SnapCounter, Gauge as SnapGauge, Histogram as SnapHistogram, ParquetOptions,
-    ParquetSchema, Snapshot, SnapshotV2,
+    Counter as SnapCounter, Gauge as SnapGauge, Histogram as SnapHistogram, MsgpackToParquet,
+    ParquetOptions, Snapshot, SnapshotV2,
 };
 use std::collections::HashMap;
-use std::fs::File;
-use std::io;
+use std::fs::OpenOptions;
+use std::io::{self, BufWriter, Write};
 use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -58,10 +58,9 @@ impl AdminServer {
 
                     // Spawn Prometheus server if configured
                     if let Some(addr) = self.listen_addr {
-                        let shared = Arc::clone(&self.shared);
                         let stop_notify = Arc::clone(&self.stop_notify);
                         tasks.push(tokio::spawn(async move {
-                            if let Err(e) = run_prometheus_server(addr, shared, stop_notify).await {
+                            if let Err(e) = run_prometheus_server(addr, stop_notify).await {
                                 tracing::error!("prometheus server error: {}", e);
                             }
                         }));
@@ -120,11 +119,7 @@ impl Drop for AdminHandle {
     }
 }
 
-async fn run_prometheus_server(
-    addr: SocketAddr,
-    shared: Arc<SharedState>,
-    stop_notify: Arc<Notify>,
-) -> io::Result<()> {
+async fn run_prometheus_server(addr: SocketAddr, stop_notify: Arc<Notify>) -> io::Result<()> {
     let listener = TcpListener::bind(addr).await?;
     tracing::info!("prometheus server listening on {}", addr);
 
@@ -168,13 +163,6 @@ async fn run_prometheus_server(
             _ = stop_notify.notified() => {
                 break;
             }
-            _ = async {
-                while !shared.phase().should_stop() {
-                    tokio::time::sleep(Duration::from_millis(100)).await;
-                }
-            } => {
-                break;
-            }
         }
     }
 
@@ -182,6 +170,8 @@ async fn run_prometheus_server(
 }
 
 fn generate_prometheus_output() -> String {
+    use std::fmt::Write as _;
+
     let mut output = String::new();
 
     for metric in metriken::metrics().iter() {
@@ -190,34 +180,42 @@ fn generate_prometheus_output() -> String {
             Some(v) => v,
             None => continue,
         };
+        let description = metric.description();
 
         // Handle different metric types
         match value {
             metriken::Value::Counter(v) => {
-                output.push_str(&format!("# TYPE {} counter\n", name));
-                output.push_str(&format!("{} {}\n", name, v));
+                write_help(&mut output, name, description);
+                let _ = writeln!(output, "# TYPE {} counter", name);
+                let _ = writeln!(output, "{} {}", name, v);
             }
             metriken::Value::Gauge(v) => {
-                output.push_str(&format!("# TYPE {} gauge\n", name));
-                output.push_str(&format!("{} {}\n", name, v));
+                write_help(&mut output, name, description);
+                let _ = writeln!(output, "# TYPE {} gauge", name);
+                let _ = writeln!(output, "{} {}", name, v);
             }
             metriken::Value::Other(any) => {
-                // Try to downcast to AtomicHistogram
+                // Try to downcast to AtomicHistogram. We emit a "summary"
+                // (with `quantile="..."` rows) rather than a Prometheus
+                // "histogram" (which would require cumulative `_bucket{le=}`
+                // rows). The previous code declared `histogram` while
+                // emitting `quantile`, which is invalid exposition.
                 if let Some(histogram) = any.downcast_ref::<metriken::AtomicHistogram>()
                     && let Some(snapshot) = histogram.load()
                 {
-                    output.push_str(&format!("# TYPE {} histogram\n", name));
+                    write_help(&mut output, name, description);
+                    let _ = writeln!(output, "# TYPE {} summary", name);
 
-                    // Output quantiles as summary-style metrics
                     let quantiles = [0.50, 0.90, 0.95, 0.99, 0.999, 0.9999];
                     if let Ok(Some(results)) = snapshot.quantiles(&quantiles) {
                         for (quantile, bucket) in results.entries() {
-                            output.push_str(&format!(
-                                "{}{{quantile=\"{}\"}} {}\n",
+                            let _ = writeln!(
+                                output,
+                                "{}{{quantile=\"{}\"}} {}",
                                 name,
                                 quantile.as_f64(),
                                 bucket.end()
-                            ));
+                            );
                         }
                     }
 
@@ -231,8 +229,8 @@ fn generate_prometheus_output() -> String {
                         let midpoint = (bucket.start() as u128 + bucket.end() as u128) / 2;
                         sum += bucket_count as u128 * midpoint;
                     }
-                    output.push_str(&format!("{}_count {}\n", name, count));
-                    output.push_str(&format!("{}_sum {}\n", name, sum));
+                    let _ = writeln!(output, "{}_count {}", name, count);
+                    let _ = writeln!(output, "{}_sum {}", name, sum);
                 }
             }
             // Handle any future Value variants
@@ -241,6 +239,26 @@ fn generate_prometheus_output() -> String {
     }
 
     output
+}
+
+/// Emit a `# HELP` line if `description` is non-empty. The text is escaped
+/// per the Prometheus exposition format: backslashes and newlines only.
+fn write_help(out: &mut String, name: &str, description: Option<&str>) {
+    use std::fmt::Write as _;
+
+    let Some(desc) = description else { return };
+    if desc.is_empty() {
+        return;
+    }
+    let _ = write!(out, "# HELP {} ", name);
+    for ch in desc.chars() {
+        match ch {
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            c => out.push(c),
+        }
+    }
+    out.push('\n');
 }
 
 /// Create a snapshot with the `metric` key added to each metric's metadata.
@@ -338,74 +356,98 @@ async fn run_parquet_recorder(
     shared: Arc<SharedState>,
     stop_notify: Arc<Notify>,
 ) -> io::Result<()> {
-    // Collect snapshots during the run
-    let mut snapshots: Vec<Snapshot> = Vec::new();
+    // Stream snapshots to a temp msgpack file as they arrive, then convert
+    // to parquet at the end. This keeps peak memory at one snapshot rather
+    // than buffering the entire run's worth.
+    let temp_path = msgpack_temp_path(&path);
+    let temp_file = OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .read(true)
+        .open(&temp_path)?;
+    let mut writer = BufWriter::new(temp_file);
+    let mut snapshot_count: usize = 0;
 
-    tracing::info!("parquet recorder started, will write to {:?}", path);
+    tracing::info!(
+        "parquet recorder started, staging at {:?}, will write to {:?}",
+        temp_path,
+        path
+    );
 
     loop {
         tokio::select! {
             _ = tokio::time::sleep(interval) => {
                 // Only collect snapshots during the running phase (skip warmup)
                 if shared.phase().is_recording() {
-                    snapshots.push(create_snapshot());
+                    match append_snapshot(&mut writer, &create_snapshot()) {
+                        Ok(()) => snapshot_count += 1,
+                        Err(e) => tracing::warn!("failed to stage parquet snapshot: {}", e),
+                    }
                 }
             }
             _ = stop_notify.notified() => {
-                break;
-            }
-            _ = async {
-                while !shared.phase().should_stop() {
-                    tokio::time::sleep(Duration::from_millis(100)).await;
-                }
-            } => {
                 break;
             }
         }
     }
 
     // Final snapshot
-    snapshots.push(create_snapshot());
-
-    // Write all snapshots to parquet
-    if !snapshots.is_empty() {
-        // First pass: build schema
-        let mut schema = ParquetSchema::new();
-        for snapshot in &snapshots {
-            schema.push(snapshot.clone());
-        }
-
-        // Create file and writer
-        let file = File::create(&path).map_err(|e| io::Error::other(e.to_string()))?;
-
-        let metadata = HashMap::from([
-            (
-                "sampling_interval_ms".to_string(),
-                interval.as_millis().to_string(),
-            ),
-            ("source".to_string(), "cachecannon".to_string()),
-            ("version".to_string(), env!("CARGO_PKG_VERSION").to_string()),
-        ]);
-
-        let mut writer = schema
-            .finalize(file, ParquetOptions::new(), Some(metadata))
-            .map_err(|e| io::Error::other(e.to_string()))?;
-
-        // Second pass: write data
-        for snapshot in snapshots {
-            if let Err(e) = writer.push(snapshot) {
-                tracing::warn!("failed to write parquet snapshot: {}", e);
-            }
-        }
-
-        if let Err(e) = writer.finalize() {
-            tracing::warn!("failed to finalize parquet: {}", e);
-        }
-
-        tracing::info!("parquet recorder stopped, wrote {:?}", path);
-    } else {
-        tracing::info!("parquet recorder stopped, no snapshots to write");
+    match append_snapshot(&mut writer, &create_snapshot()) {
+        Ok(()) => snapshot_count += 1,
+        Err(e) => tracing::warn!("failed to stage final parquet snapshot: {}", e),
     }
 
+    // Flush staged snapshots to disk before converting.
+    let temp_file = writer.into_inner().map_err(|e| e.into_error())?;
+    temp_file.sync_all()?;
+    drop(temp_file);
+
+    if snapshot_count == 0 {
+        let _ = std::fs::remove_file(&temp_path);
+        tracing::info!("parquet recorder stopped, no snapshots to write");
+        return Ok(());
+    }
+
+    // Convert msgpack stream → parquet (two passes over the temp file).
+    let converter = MsgpackToParquet::with_options(ParquetOptions::new())
+        .metadata(
+            "sampling_interval_ms".to_string(),
+            interval.as_millis().to_string(),
+        )
+        .metadata("source".to_string(), "cachecannon".to_string())
+        .metadata("version".to_string(), env!("CARGO_PKG_VERSION").to_string());
+
+    match converter.convert_file_path(&temp_path, &path) {
+        Ok(rows) => {
+            tracing::info!(
+                "parquet recorder stopped, wrote {:?} ({} rows)",
+                path,
+                rows
+            );
+        }
+        Err(e) => {
+            tracing::warn!("failed to convert msgpack stream to parquet: {}", e);
+        }
+    }
+
+    let _ = std::fs::remove_file(&temp_path);
+
     Ok(())
+}
+
+/// Path used for the on-disk msgpack staging file alongside the final
+/// parquet output. Sits next to the destination so cleanup is obvious and
+/// the user's chosen output filesystem is reused (no /tmp surprises).
+fn msgpack_temp_path(parquet_path: &Path) -> PathBuf {
+    let mut buf = parquet_path.as_os_str().to_owned();
+    buf.push(".msgpack.tmp");
+    PathBuf::from(buf)
+}
+
+/// Serialize a snapshot to msgpack and append it to the staging file.
+fn append_snapshot<W: Write>(writer: &mut W, snapshot: &Snapshot) -> io::Result<()> {
+    let bytes =
+        Snapshot::to_msgpack(snapshot).map_err(|e| io::Error::other(e.to_string()))?;
+    writer.write_all(&bytes)
 }
