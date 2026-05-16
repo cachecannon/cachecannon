@@ -1838,7 +1838,9 @@ async fn drive_ping_workload(
             Err(ringline_ping::Error::ConnectionClosed) => {
                 return Err(DisconnectReason::Eof);
             }
-            Err(_) => {}
+            Err(_) => {
+                return Err(DisconnectReason::RecvError);
+            }
         }
     }
 }

@@ -555,6 +555,12 @@ impl Config {
         }
 
         if let Some(ref sat) = self.workload.saturation_search {
+            if sat.start_rate == 0 {
+                return Err(ConfigError::Validation(
+                    "saturation_search.start_rate must be > 0".to_string(),
+                ));
+            }
+
             if sat.step_multiplier <= 1.0 {
                 return Err(ConfigError::Validation(
                     "saturation_search.step_multiplier must be > 1.0".to_string(),
@@ -793,6 +799,22 @@ mod validation_tests {
         )
         .unwrap_err();
         assert!(err.to_string().contains("step_multiplier"));
+    }
+
+    #[test]
+    fn rejects_zero_start_rate() {
+        let err = parse_config(
+            r#"
+            [target]
+            endpoints = ["127.0.0.1:6379"]
+            [workload.saturation_search]
+            start_rate = 0
+            [workload.saturation_search.slo]
+            p99 = "1ms"
+            "#,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("start_rate"));
     }
 
     #[test]
