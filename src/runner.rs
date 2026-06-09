@@ -243,14 +243,23 @@ pub fn run_benchmark_full(
         ringline_config.timestamps = matches!(config.timestamps.mode, TimestampMode::Software);
     }
 
+    // Enter the precheck phase BEFORE launching workers. `launch()` starts the
+    // worker threads, which immediately run `on_start` → `connect()` → check
+    // `phase == Precheck` to decide whether to send the precheck PING. If we set
+    // the phase only after `launch()` returns, a worker whose connections
+    // establish inside that window observes the initial `Connect` phase, skips
+    // the PING permanently, and idle-spins in the workload loop — so its
+    // connections never mark precheck complete and the run fails with
+    // "no connectivity". Faster connection establishment (e.g. ringline 0.2)
+    // makes that race reliably lost. Setting the phase first closes the window.
+    shared.set_phase(Phase::Precheck);
+
     // Launch ringline workers (client-only, no bind)
     tracing::debug!(num_threads, "launching ringline workers");
     let (shutdown_handle, handles) =
         RinglineBuilder::new(ringline_config).launch::<crate::worker::BenchHandler>()?;
     tracing::debug!(workers = handles.len(), "ringline workers launched");
 
-    // Start in precheck phase
-    shared.set_phase(Phase::Precheck);
     formatter.print_precheck();
 
     // Early liveness check: give workers time to complete EventLoop::new(),
