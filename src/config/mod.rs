@@ -18,8 +18,6 @@ pub struct Config {
     pub timestamps: Timestamps,
     #[serde(default)]
     pub admin: Admin,
-    #[serde(default)]
-    pub momento: Momento,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -103,7 +101,6 @@ pub enum Protocol {
     /// Memcache binary protocol
     #[serde(alias = "memcache-binary")]
     MemcacheBinary,
-    Momento,
     /// Simple ASCII PING/PONG protocol
     Ping,
 }
@@ -459,38 +456,6 @@ fn default_parquet_interval() -> Duration {
     Duration::from_secs(1)
 }
 
-/// Momento-specific configuration.
-#[derive(Debug, Clone, Deserialize)]
-pub struct Momento {
-    /// Cache name to use for operations.
-    #[serde(default = "default_cache_name")]
-    pub cache_name: String,
-    /// Explicit endpoint (overrides MOMENTO_ENDPOINT env var).
-    #[serde(default)]
-    pub endpoint: Option<String>,
-    /// Default TTL for SET operations in seconds.
-    #[serde(default = "default_momento_ttl")]
-    pub ttl_seconds: u64,
-}
-
-impl Default for Momento {
-    fn default() -> Self {
-        Self {
-            cache_name: default_cache_name(),
-            endpoint: None,
-            ttl_seconds: default_momento_ttl(),
-        }
-    }
-}
-
-fn default_cache_name() -> String {
-    "default-cache".to_string()
-}
-
-fn default_momento_ttl() -> u64 {
-    3600 // 1 hour
-}
-
 impl Config {
     pub fn load<P: AsRef<Path>>(path: P) -> Result<Self, ConfigError> {
         let content =
@@ -503,9 +468,9 @@ impl Config {
 
     /// Validate config invariants that can't be expressed via serde alone.
     fn validate(&self) -> Result<(), ConfigError> {
-        if self.target.endpoints.is_empty() && self.target.protocol != Protocol::Momento {
+        if self.target.endpoints.is_empty() {
             return Err(ConfigError::Validation(
-                "endpoints must be specified for non-Momento protocols".to_string(),
+                "endpoints must be specified".to_string(),
             ));
         }
 

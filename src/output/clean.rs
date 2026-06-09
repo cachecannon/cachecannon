@@ -7,7 +7,7 @@ use super::{
     ColorMode, LatencyStats, OutputFormatter, PrefillDiagnostics, PrefillSample, PrefillStallCause,
     Results, Sample, SaturationResults, SaturationStep,
 };
-use crate::config::{Config, Protocol};
+use crate::config::Config;
 use std::io::{self, IsTerminal, Write};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
@@ -123,46 +123,35 @@ impl OutputFormatter for CleanFormatter {
         // Target line
         let protocol = format!("{:?}", config.target.protocol);
         let tls_suffix = if config.target.tls { ", TLS" } else { "" };
-        if config.target.protocol == Protocol::Momento {
-            let endpoint_display = crate::client::MomentoSetup::resolve_endpoint_display(config)
-                .unwrap_or_else(|| "<MOMENTO_API_KEY not set>".to_string());
-            println!(
-                "{}     {} ({})",
-                self.cyan("target"),
-                endpoint_display,
-                protocol
-            );
-        } else {
-            let endpoints: Vec<_> = config
+        let endpoints: Vec<_> = config
+            .target
+            .endpoints
+            .iter()
+            .map(|e| e.to_string())
+            .collect();
+        println!(
+            "{}     {}{}:{} ({}{})",
+            self.cyan("target"),
+            config
                 .target
                 .endpoints
-                .iter()
-                .map(|e| e.to_string())
-                .collect();
-            println!(
-                "{}     {}{}:{} ({}{})",
-                self.cyan("target"),
-                config
-                    .target
-                    .endpoints
-                    .first()
-                    .map(|e| e.ip())
-                    .unwrap_or(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)),
-                if endpoints.len() > 1 {
-                    format!(" (+{})", endpoints.len() - 1)
-                } else {
-                    String::new()
-                },
-                config
-                    .target
-                    .endpoints
-                    .first()
-                    .map(|e| e.port())
-                    .unwrap_or(6379),
-                protocol,
-                tls_suffix
-            );
-        }
+                .first()
+                .map(|e| e.ip())
+                .unwrap_or(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)),
+            if endpoints.len() > 1 {
+                format!(" (+{})", endpoints.len() - 1)
+            } else {
+                String::new()
+            },
+            config
+                .target
+                .endpoints
+                .first()
+                .map(|e| e.port())
+                .unwrap_or(6379),
+            protocol,
+            tls_suffix
+        );
 
         // Workload line
         let keyspace_count = format_count(config.workload.keyspace.count as u64);
@@ -210,7 +199,7 @@ impl OutputFormatter for CleanFormatter {
         let _ = io::stdout().flush();
     }
 
-    fn print_precheck_failed(&self, elapsed: Duration, conns_failed: u64, protocol: Protocol) {
+    fn print_precheck_failed(&self, elapsed: Duration, conns_failed: u64) {
         println!();
         println!(
             "{}",
@@ -230,13 +219,8 @@ impl OutputFormatter for CleanFormatter {
             ))
         );
         println!();
-        if protocol == Protocol::Momento {
-            println!("hint: check MOMENTO_API_KEY environment variable");
-            println!("hint: check momento.endpoint or MOMENTO_ENDPOINT configuration");
-        } else {
-            println!("hint: check that the server is running and reachable");
-            println!("hint: check firewall rules and target address in config");
-        }
+        println!("hint: check that the server is running and reachable");
+        println!("hint: check firewall rules and target address in config");
         let _ = io::stdout().flush();
     }
 

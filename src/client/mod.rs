@@ -1,7 +1,3 @@
-mod momento;
-
-pub use momento::MomentoSetup;
-
 /// Result of a completed request.
 #[derive(Debug, Clone)]
 pub struct RequestResult {

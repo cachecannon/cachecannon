@@ -1,7 +1,7 @@
 //! JSON (NDJSON) formatter for machine-readable output.
 
 use super::{OutputFormatter, PrefillDiagnostics, PrefillSample, Results, Sample};
-use crate::config::{Config, Protocol};
+use crate::config::Config;
 use serde::Serialize;
 use std::time::Duration;
 
@@ -98,18 +98,13 @@ struct ResultsOutput {
 
 impl OutputFormatter for JsonFormatter {
     fn print_config(&self, config: &Config) {
-        let target = if config.target.protocol == Protocol::Momento {
-            crate::client::MomentoSetup::resolve_endpoint_display(config)
-                .unwrap_or_else(|| "<MOMENTO_API_KEY not set>".to_string())
-        } else {
-            let endpoints: Vec<_> = config
-                .target
-                .endpoints
-                .iter()
-                .map(|e| e.to_string())
-                .collect();
-            endpoints.join(",")
-        };
+        let endpoints: Vec<_> = config
+            .target
+            .endpoints
+            .iter()
+            .map(|e| e.to_string())
+            .collect();
+        let target = endpoints.join(",");
 
         let output = ConfigOutput {
             msg_type: "config",

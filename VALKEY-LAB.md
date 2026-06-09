@@ -158,7 +158,7 @@ valkey-lab saturate --slo-p999 1ms --start-rate 100000 --step 1.1 -c 16 -P 32
 
 ## Relationship to cachecannon
 
-valkey-lab is an additive companion binary that ships alongside cachecannon. It provides a streamlined CLI for the most common use case — benchmarking Valkey/Redis servers — while cachecannon remains the full-featured tool supporting TOML configs, Memcache, Momento, and advanced workflow options.
+valkey-lab is an additive companion binary that ships alongside cachecannon. It provides a streamlined CLI for the most common use case — benchmarking Valkey/Redis servers — while cachecannon remains the full-featured tool supporting TOML configs, Memcache, and advanced workflow options.
 
 Both binaries share the same engine: io_uring workers, latency histograms, cluster discovery, prefill/backfill, saturation search, and Parquet output.
 

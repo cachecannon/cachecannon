@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Removed
+- Drop the Momento protocol, the `ringline-momento` client dependency, and the
+  Momento integration test. Momento now exposes a RESP/Valkey-compatible
+  endpoint, so it can be benchmarked through the existing RESP driver by
+  pointing it at the Momento RESP endpoint with the API token as the password.
+
 ## [0.0.14] - 2026-04-21
 
 ### Added

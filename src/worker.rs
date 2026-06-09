@@ -5,7 +5,7 @@
 //! requests, parses responses, and reconnects on failure. `on_tick()` handles
 //! phase transitions, diagnostics, and shutdown.
 
-use crate::client::{MomentoSetup, RequestResult, RequestType};
+use crate::client::{RequestResult, RequestType};
 #[cfg(target_os = "linux")]
 use crate::config::TimestampMode;
 use crate::config::{Config, Protocol as CacheProtocol};
@@ -287,8 +287,8 @@ fn make_value_guard(
 /// every connection had to lock-pop, route-check, lock-push-back on most
 /// keys it saw.
 ///
-/// For Momento (no routing) and single-endpoint setups, there is exactly one
-/// queue at index 0.
+/// For single-endpoint setups (no routing) there is exactly one queue at
+/// index 0.
 struct PrefillQueues {
     queues: Vec<Mutex<VecDeque<usize>>>,
 }
@@ -329,8 +329,6 @@ struct TaskSharedState {
     worker_id: usize,
     /// Whether backfill_on_miss is enabled.
     backfill_on_miss: bool,
-    /// Momento setup (resolved once, shared across tasks).
-    momento_setup: Mutex<Option<MomentoSetup>>,
     /// Whether TLS is enabled for connections.
     tls_enabled: bool,
     /// SNI server name for TLS connections.
@@ -409,9 +407,6 @@ impl AsyncEventHandler for BenchHandler {
 
         Some(Box::pin(async move {
             match protocol {
-                CacheProtocol::Momento => {
-                    spawn_momento_tasks(&worker_state, my_connections, worker_id);
-                }
                 CacheProtocol::Ping => {
                     spawn_protocol_tasks(&worker_state, my_connections, worker_id);
                 }
@@ -500,8 +495,8 @@ impl AsyncEventHandler for BenchHandler {
         let slot_table = cfg.slot_table;
 
         // Build ketama consistent hash ring from endpoint addresses.
-        // For Momento, endpoints is empty — use a dummy single-node ring
-        // (the ring is never consulted when there are no endpoints).
+        // An empty endpoint list would panic ketama::Ring::build, so fall back
+        // to a dummy single-node ring that is never consulted.
         let ring = if endpoints.is_empty() {
             ketama::Ring::build(&["_"])
         } else {
@@ -557,7 +552,6 @@ impl AsyncEventHandler for BenchHandler {
             prefill_queues,
             worker_id: cfg.id,
             backfill_on_miss,
-            momento_setup: Mutex::new(None),
             tls_enabled,
             tls_server_name,
         });
@@ -640,38 +634,6 @@ fn spawn_protocol_tasks(
                 }
                 _ => unreachable!(),
             }
-        });
-    }
-}
-
-/// Spawn one async task per Momento TLS connection.
-fn spawn_momento_tasks(
-    worker_state: &Arc<SharedWorkerState>,
-    my_connections: usize,
-    worker_id: usize,
-) {
-    // Resolve Momento setup once
-    {
-        let mut setup_guard = worker_state.task_state.momento_setup.lock().unwrap();
-        if setup_guard.is_none() {
-            match MomentoSetup::from_config(&worker_state.task_state.config) {
-                Ok(setup) => *setup_guard = Some(setup),
-                Err(e) => {
-                    tracing::error!("failed to resolve Momento config: {}", e);
-                    metrics::CONNECTIONS_FAILED.increment();
-                    return;
-                }
-            }
-        }
-    }
-
-    for i in 0..my_connections {
-        let state = Arc::clone(worker_state);
-        let session_seed = 42 + worker_id as u64 * 10000 + i as u64;
-        let conn_idx = i;
-
-        let _ = ringline::spawn(async move {
-            momento_connection_task(state, conn_idx, session_seed).await;
         });
     }
 }
@@ -795,29 +757,6 @@ fn make_ping_callback() -> impl Fn(&ringline_ping::CommandResult) {
         }
         let _ = metrics::RESPONSE_LATENCY.increment(r.latency_ns);
         let _ = metrics::GET_LATENCY.increment(r.latency_ns);
-    }
-}
-
-/// Create a Momento on_result callback that records latency and byte metrics.
-fn make_momento_callback() -> impl Fn(&ringline_momento::CommandResult) {
-    move |r| {
-        match r.command {
-            ringline_momento::CommandType::Get => {
-                let _ = metrics::GET_LATENCY.increment(r.latency_ns);
-                if let Some(ttfb) = r.ttfb_ns {
-                    let _ = metrics::GET_TTFB.increment(ttfb);
-                }
-            }
-            ringline_momento::CommandType::Set => {
-                let _ = metrics::SET_LATENCY.increment(r.latency_ns);
-            }
-            ringline_momento::CommandType::Delete => {
-                let _ = metrics::DELETE_LATENCY.increment(r.latency_ns);
-            }
-        }
-        let _ = metrics::RESPONSE_LATENCY.increment(r.latency_ns);
-        metrics::BYTES_TX.add(r.tx_bytes as u64);
-        metrics::BYTES_RX.add(r.rx_bytes as u64);
     }
 }
 
@@ -1852,363 +1791,6 @@ async fn drive_ping_workload(
     }
 }
 
-// ── Momento connection task ──────────────────────────────────────────────
-
-/// A single Momento connection task using ringline-momento.
-async fn momento_connection_task(state: Arc<SharedWorkerState>, _conn_idx: usize, seed: u64) {
-    let config = &state.task_state.config;
-    let credential = {
-        let setup_guard = state.task_state.momento_setup.lock().unwrap();
-        let setup = setup_guard.as_ref().unwrap();
-        setup.credential.clone()
-    };
-
-    let mut rng = Xoshiro256PlusPlus::seed_from_u64(seed);
-    let mut key_buf = vec![0u8; config.workload.keyspace.length];
-    let mut backfill_queue: Vec<usize> = Vec::new();
-
-    loop {
-        let phase = state.task_state.shared.phase();
-        if phase.should_stop() {
-            return;
-        }
-
-        // Connect via ringline-momento (handles TLS + auth internally)
-        let authenticated = match ringline_momento::Client::connect(&credential).await {
-            Ok(client) => client,
-            Err(e) => {
-                // During precheck, surface connection errors at warn level so they're
-                // visible without RUST_LOG=debug
-                if phase == Phase::Precheck {
-                    tracing::warn!(
-                        worker = state.task_state.worker_id,
-                        "Momento connect failed: {}",
-                        e
-                    );
-                } else {
-                    tracing::debug!(
-                        worker = state.task_state.worker_id,
-                        "Momento connect failed: {}",
-                        e
-                    );
-                }
-                metrics::CONNECTIONS_FAILED.increment();
-                ringline::sleep(Duration::from_millis(100)).await;
-                continue;
-            }
-        };
-
-        // Rebuild with on_result callback + (on Linux) kernel timestamps for latency recording
-        let builder = ringline_momento::Client::builder(authenticated.conn())
-            .on_result(make_momento_callback());
-        #[cfg(target_os = "linux")]
-        let builder =
-            builder.kernel_timestamps(matches!(config.timestamps.mode, TimestampMode::Software));
-        let mut client = builder.build();
-
-        metrics::CONNECTIONS_ACTIVE.increment();
-
-        tracing::debug!(worker = state.task_state.worker_id, "Momento connected");
-
-        // Precheck: successful connect already proves connectivity for Momento
-        if state.task_state.shared.phase() == Phase::Precheck && !state.is_precheck_done() {
-            tracing::debug!(
-                worker = state.task_state.worker_id,
-                "precheck ok (Momento connect succeeded)"
-            );
-            state.mark_precheck_done();
-            // Wait for phase to advance past Precheck
-            while state.task_state.shared.phase() == Phase::Precheck {
-                if state.task_state.shared.phase().should_stop() {
-                    metrics::CONNECTIONS_ACTIVE.decrement();
-                    return;
-                }
-                ringline::sleep(Duration::from_millis(10)).await;
-            }
-        }
-
-        // Drive workload
-        let result = drive_momento_session(
-            &mut client,
-            &state,
-            &mut rng,
-            &mut key_buf,
-            &mut backfill_queue,
-        )
-        .await;
-
-        metrics::CONNECTIONS_ACTIVE.decrement();
-
-        match result {
-            Ok(()) => return, // Clean shutdown
-            Err(_) => {
-                metrics::DISCONNECTS_CLOSED_EVENT.increment();
-            }
-        }
-
-        ringline::sleep(Duration::from_millis(100)).await;
-    }
-}
-
-/// Drive the Momento workload on a connected session.
-async fn drive_momento_session(
-    client: &mut ringline_momento::Client,
-    state: &Arc<SharedWorkerState>,
-    rng: &mut Xoshiro256PlusPlus,
-    key_buf: &mut [u8],
-    backfill_queue: &mut Vec<usize>,
-) -> Result<(), DisconnectReason> {
-    let config = &state.task_state.config;
-    let key_count = config.workload.keyspace.count;
-    let get_ratio = config.workload.commands.get as usize;
-    let delete_ratio = config.workload.commands.delete as usize;
-    let pipeline_depth = config.connection.pipeline_depth;
-    let batch_size = config.connection.effective_batch_size();
-    let cache_name = &config.momento.cache_name;
-    let ttl_ms = config.momento.ttl_seconds * 1000;
-    let backfill_on_miss = state.task_state.backfill_on_miss;
-    let value_len = config.workload.values.length;
-    let value_pool = &state.task_state.value_pool;
-    let pool_len = value_pool.len();
-    let max_value_offset = pool_len - value_len;
-    let mut prefill_in_flight: VecDeque<usize> = VecDeque::new();
-
-    loop {
-        let phase = state.task_state.shared.phase();
-        if phase.should_stop() {
-            return Ok(());
-        }
-
-        // Only refill when there's room for a full batch, so fire_* calls
-        // accumulate into a single coalesced send rather than one-per-response.
-        let want_fire = pipeline_depth.saturating_sub(client.pending_count()) >= batch_size;
-
-        // Fill pipeline (Momento: single queue, no routing)
-        if phase == Phase::Prefill && !state.is_prefill_done() {
-            while want_fire && client.pending_count() < pipeline_depth {
-                let Some(key_id) = state.task_state.prefill_queues.pop_front(0) else {
-                    break;
-                };
-
-                write_key(key_buf, key_id);
-                let offset = rng.random_range(0..=max_value_offset);
-                let value = &value_pool[offset..offset + value_len];
-
-                let user_data = key_id as u64 | PREFILL_MARKER;
-                match client.fire_set(cache_name, key_buf, value, ttl_ms, user_data) {
-                    Ok(_) => {
-                        metrics::REQUESTS_SENT.increment();
-                        prefill_in_flight.push_back(key_id);
-                    }
-                    Err(_) => {
-                        state.task_state.prefill_queues.push_front(0, key_id);
-                        break;
-                    }
-                }
-            }
-        } else if (phase == Phase::Warmup || phase == Phase::Running) && want_fire {
-            // Pre-acquire a full batch of rate-limit tokens up front so the
-            // fire loop produces a single coalesced send, rather than being
-            // broken into tiny partial flushes by per-iteration try_wait()
-            // rejections.
-            let mut token_budget = match state.task_state.ratelimiter {
-                Some(ref rl) => {
-                    let n = (batch_size as u64).min(rl.max_tokens());
-                    if n > 0 && rl.try_wait_n(n).is_ok() {
-                        n as usize
-                    } else {
-                        0
-                    }
-                }
-                None => batch_size,
-            };
-
-            while client.pending_count() < pipeline_depth && token_budget > 0 {
-                // Drain backfill queue first
-                if let Some(key_id) = backfill_queue.pop() {
-                    write_key(key_buf, key_id);
-                    let offset = rng.random_range(0..=max_value_offset);
-                    let value = &value_pool[offset..offset + value_len];
-
-                    token_budget -= 1;
-
-                    let user_data = key_id as u64 | BACKFILL_MARKER;
-                    match client.fire_set(cache_name, key_buf, value, ttl_ms, user_data) {
-                        Ok(_) => {
-                            metrics::REQUESTS_SENT.increment();
-                        }
-                        Err(_) => {
-                            backfill_queue.push(key_id);
-                            break;
-                        }
-                    }
-                    continue;
-                }
-
-                token_budget -= 1;
-
-                let key_id = rng.random_range(0..key_count);
-                write_key(key_buf, key_id);
-
-                let roll = rng.random_range(0..100);
-                let sent = if roll < get_ratio {
-                    client.fire_get(cache_name, key_buf, key_id as u64).is_ok()
-                } else if roll < get_ratio + delete_ratio {
-                    client.fire_delete(cache_name, key_buf, 0).is_ok()
-                } else {
-                    let offset = rng.random_range(0..=max_value_offset);
-                    let value = &value_pool[offset..offset + value_len];
-                    client
-                        .fire_set(cache_name, key_buf, value, ttl_ms, 0)
-                        .is_ok()
-                };
-
-                if sent {
-                    metrics::REQUESTS_SENT.increment();
-                } else {
-                    break;
-                }
-            }
-        }
-
-        // Wait for one response (yield if idle to avoid starving other connections)
-        if client.pending_count() == 0 {
-            ringline::sleep(Duration::from_micros(100)).await;
-            continue;
-        }
-
-        let op = match client.recv().await {
-            Ok(op) => op,
-            Err(_) => {
-                for key_id in prefill_in_flight.drain(..) {
-                    state.task_state.prefill_queues.push_back(0, key_id);
-                }
-                return Err(DisconnectReason::Eof);
-            }
-        };
-
-        // Map CompletedOp to RequestResult
-        let result = map_momento_op(op);
-
-        // Handle prefill tracking. See the RESP recv loop for rationale.
-        if result.prefill {
-            let key_id = prefill_in_flight
-                .pop_front()
-                .or(result.key_id)
-                .expect("prefill response without key_id");
-            if result.success {
-                confirm_prefill_key(state);
-            } else {
-                // Retry failed prefill SET
-                state.task_state.prefill_queues.push_back(0, key_id);
-            }
-        }
-
-        // Handle backfill-on-miss
-        if backfill_on_miss
-            && result.request_type == RequestType::Get
-            && result.success
-            && result.hit == Some(false)
-            && backfill_queue.len() < BACKFILL_QUEUE_CAP
-            && let Some(key_id) = result.key_id
-        {
-            backfill_queue.push(key_id);
-        }
-
-        // Handle backfill SET tracking
-        if result.backfill && result.request_type == RequestType::Set && result.success {
-            metrics::BACKFILL_SET_COUNT.increment();
-            let _ = metrics::BACKFILL_SET_LATENCY.increment(result.latency_ns);
-        }
-
-        // Record counter metrics (latency is recorded by the on_result callback)
-        record_counters(&result);
-    }
-}
-
-/// Map a ringline-momento CompletedOp to a RequestResult.
-fn map_momento_op(op: ringline_momento::CompletedOp) -> RequestResult {
-    match op {
-        ringline_momento::CompletedOp::Get {
-            result,
-            user_data,
-            latency_ns,
-            ..
-        } => {
-            let (success, is_error, hit) = match result {
-                Ok(Some(_)) => (true, false, Some(true)),
-                Ok(None) => (true, false, Some(false)),
-                Err(_) => (false, true, None),
-            };
-            RequestResult {
-                id: 0,
-                success,
-                is_error_response: is_error,
-                latency_ns,
-                ttfb_ns: None,
-                request_type: RequestType::Get,
-                hit,
-                key_id: Some((user_data & !PREFILL_MARKER & !BACKFILL_MARKER) as usize),
-                backfill: false,
-                prefill: false,
-                redirect: None,
-            }
-        }
-        ringline_momento::CompletedOp::Set {
-            result,
-            user_data,
-            latency_ns,
-            ..
-        } => {
-            let (success, is_error) = match result {
-                Ok(()) => (true, false),
-                Err(_) => (false, true),
-            };
-            let backfill = user_data & BACKFILL_MARKER != 0;
-            let prefill = user_data & PREFILL_MARKER != 0;
-            let key_id = if prefill {
-                Some((user_data & !PREFILL_MARKER & !BACKFILL_MARKER) as usize)
-            } else {
-                None
-            };
-            RequestResult {
-                id: 0,
-                success,
-                is_error_response: is_error,
-                latency_ns,
-                ttfb_ns: None,
-                request_type: RequestType::Set,
-                hit: None,
-                key_id,
-                backfill,
-                prefill,
-                redirect: None,
-            }
-        }
-        ringline_momento::CompletedOp::Delete {
-            result, latency_ns, ..
-        } => {
-            let (success, is_error) = match result {
-                Ok(()) => (true, false),
-                Err(_) => (false, true),
-            };
-            RequestResult {
-                id: 0,
-                success,
-                is_error_response: is_error,
-                latency_ns,
-                ttfb_ns: None,
-                request_type: RequestType::Delete,
-                hit: None,
-                key_id: None,
-                backfill: false,
-                prefill: false,
-                redirect: None,
-            }
-        }
-    }
-}
-
 // ── Prefill helpers ──────────────────────────────────────────────────────
 
 /// Confirm a single prefill key was successfully stored.
@@ -2395,7 +1977,6 @@ mod tests {
             prefill_queues: PrefillQueues::new(1),
             worker_id,
             backfill_on_miss: false,
-            momento_setup: Mutex::new(None),
             tls_enabled: false,
             tls_server_name: None,
         });

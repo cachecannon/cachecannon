@@ -68,7 +68,7 @@ cachecannon view results.parquet
 
 ## Features
 
-- **Multiple protocols** — Valkey/Redis RESP2/RESP3, Memcache ASCII/binary, Momento gRPC, Ping
+- **Multiple protocols** — Valkey/Redis RESP2/RESP3, Memcache ASCII/binary, Ping
 - **io_uring I/O** — Same high-performance ringline framework as the server (Linux 6.0+)
 - **Request pipelining** — Configurable pipeline depth per connection
 - **Latency histograms** — p50, p90, p99, p99.9, p99.99 with userspace or kernel timestamps
@@ -136,7 +136,6 @@ cachecannon config/valkey.toml
 | `quick-test.toml` | 5-second smoke test — start here to verify connectivity |
 | `valkey.toml` | Standard Valkey/Redis RESP protocol benchmark |
 | `memcache.toml` | Memcache protocol benchmark (ASCII; binary protocol shown as comment) |
-| `momento.toml` | Momento cloud cache (requires `MOMENTO_API_KEY`) |
 | `ping.toml` | Simple PING/PONG baseline latency test |
 | `example.toml` | Reference config with all available options commented |
 | `valkey-cluster.toml` | Valkey/Redis Cluster with topology discovery and prefill |
@@ -150,7 +149,7 @@ cachecannon config/valkey.toml
 |---------|-------------------|-----------------|-------------------|
 | io_uring support | Yes | No | No |
 | Zero-copy send | Yes | No | No |
-| Multiple protocols | RESP, Memcache, Momento | RESP only | RESP, Memcache |
+| Multiple protocols | RESP, Memcache | RESP only | RESP, Memcache |
 | Parquet export | Yes | No | No |
 | Web dashboard | Yes | No | No |
 | Saturation search | Yes | No | No |
