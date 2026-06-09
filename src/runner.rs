@@ -167,6 +167,17 @@ pub fn run_benchmark_full(
         shared.add_prefill_total(key_count);
     }
 
+    // Build the shared per-endpoint key-id lists once (full keyspace,
+    // partitioned by owning endpoint). Connection tasks index these for O(1)
+    // steady-state key selection instead of rejection-sampling+re-routing
+    // random keys. Empty for single-endpoint setups (plain random key-id).
+    let endpoint_keys = Arc::new(crate::worker::build_endpoint_keys(
+        key_count,
+        config.workload.keyspace.length,
+        &config.target.endpoints,
+        &slot_table,
+    ));
+
     // Allocate shared value pool: 1GB of random bytes shared across all workers.
     // Workers pick random offsets into this pool for SET values, avoiding per-worker
     // copies. The pool is seeded deterministically for reproducibility.
@@ -193,6 +204,7 @@ pub fn run_benchmark_full(
                 ratelimiter: ratelimiter.clone(),
                 recording: false,
                 prefill_queues: Arc::clone(&prefill_queues),
+                endpoint_keys: Arc::clone(&endpoint_keys),
                 cpu_ids: cpu_ids.clone(),
                 value_pool: Arc::clone(&value_pool),
                 slot_table: slot_table.clone(),
