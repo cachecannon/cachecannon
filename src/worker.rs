@@ -200,8 +200,9 @@ pub struct BenchWorkerConfig {
     pub ratelimiter: Option<Arc<Ratelimiter>>,
     /// Whether to record metrics (only true during Running phase)
     pub recording: bool,
-    /// Range of key IDs this worker should prefill (start..end).
-    pub prefill_range: Option<std::ops::Range<usize>>,
+    /// Shared per-endpoint prefill queues (full keyspace, built once by the
+    /// runner). All workers share the same `Arc`.
+    pub(crate) prefill_queues: Arc<PrefillQueues>,
     /// CPU IDs for pinning (if configured).
     pub cpu_ids: Option<Vec<usize>>,
     /// Shared 1GB random value pool (all workers share the same Arc).
@@ -289,7 +290,7 @@ fn make_value_guard(
 ///
 /// For single-endpoint setups (no routing) there is exactly one queue at
 /// index 0.
-struct PrefillQueues {
+pub(crate) struct PrefillQueues {
     queues: Vec<Mutex<VecDeque<usize>>>,
 }
 
@@ -323,8 +324,12 @@ struct TaskSharedState {
     endpoints: Vec<SocketAddr>,
     ring: ketama::Ring,
     slot_table: RwLock<Option<Vec<u16>>>,
-    /// Per-endpoint prefill key queues. Indexed by endpoint_idx.
-    prefill_queues: PrefillQueues,
+    /// Per-endpoint prefill key queues, SHARED across all workers (one queue
+    /// per endpoint, each internally locked). Built once in the runner with
+    /// the full keyspace so any worker's connection-task can drain the queue
+    /// for the endpoint it serves — required when connections-per-worker is
+    /// fewer than the number of cluster nodes.
+    prefill_queues: Arc<PrefillQueues>,
     /// Worker ID for logging.
     worker_id: usize,
     /// Whether backfill_on_miss is enabled.
@@ -513,33 +518,16 @@ impl AsyncEventHandler for BenchHandler {
         // lock-push-back thrashing the original single-shared-queue design
         // suffered from when most popped keys didn't route to the popping
         // connection's endpoint.
-        let key_len = cfg.config.workload.keyspace.length;
-        let prefill_queues = PrefillQueues::new(endpoints.len());
-        let (prefill_total, prefill_done) = match cfg.prefill_range {
-            Some(range) => {
-                let total = range.end - range.start;
-                cfg.shared.add_prefill_total(total);
-                let mut key_buf = vec![0u8; key_len];
-                for key_id in range.start..range.end {
-                    write_key(&mut key_buf, key_id);
-                    let endpoint_idx =
-                        route_partition(&slot_table, &ring, endpoints.len(), &key_buf);
-                    prefill_queues.push_back(endpoint_idx, key_id);
-                }
-                tracing::debug!(
-                    worker_id = cfg.id,
-                    total,
-                    start = range.start,
-                    end = range.end,
-                    "prefill initialized"
-                );
-                (total, total == 0)
-            }
-            None => {
-                cfg.shared.mark_prefill_complete();
-                (0, true)
-            }
-        };
+        // Prefill queues are SHARED across all workers (built once by the
+        // runner with the full keyspace, partitioned by endpoint). Every
+        // worker drains them for the endpoints it serves; prefill completion
+        // is gated globally on confirmed >= total in the runner. Per-worker
+        // prefill_total stays 0 so the per-worker completion path in
+        // `confirm_prefill_key` is inert and `is_prefill_done()` stays false
+        // for the whole prefill phase (the phase gate ends prefill).
+        let prefill_queues = cfg.prefill_queues;
+        let prefill_total = 0usize;
+        let prefill_done = false;
 
         let task_state = Arc::new(TaskSharedState {
             config: cfg.config.clone(),
@@ -1909,6 +1897,37 @@ fn route_partition(
     }
 }
 
+/// Build the shared per-endpoint prefill queues for the full keyspace.
+///
+/// Called once by the runner. Each key id `0..key_count` is routed to its
+/// owning endpoint (slot table in cluster mode, ketama ring otherwise) and
+/// pushed to that endpoint's queue. All workers then share the result via
+/// `Arc`, so any worker's connection-task can drain the queue for the
+/// endpoint it serves — fixing the stall when connections-per-worker is fewer
+/// than the cluster node count.
+pub(crate) fn build_prefill_queues(
+    key_count: usize,
+    key_len: usize,
+    endpoints: &[SocketAddr],
+    slot_table: &Option<Vec<u16>>,
+) -> PrefillQueues {
+    let n = endpoints.len().max(1);
+    let ring = if endpoints.is_empty() {
+        ketama::Ring::build(&["_"])
+    } else {
+        let ids: Vec<String> = endpoints.iter().map(|a| a.to_string()).collect();
+        ketama::Ring::build(&ids.iter().map(|s| s.as_str()).collect::<Vec<_>>())
+    };
+    let queues = PrefillQueues::new(n);
+    let mut key_buf = vec![0u8; key_len];
+    for key_id in 0..key_count {
+        write_key(&mut key_buf, key_id);
+        let ep = route_partition(slot_table, &ring, n, &key_buf);
+        queues.push_back(ep, key_id);
+    }
+    queues
+}
+
 /// Write a numeric key ID into the buffer as hex.
 fn write_key(buf: &mut [u8], id: usize) {
     const HEX: &[u8; 16] = b"0123456789abcdef";
@@ -1974,7 +1993,7 @@ mod tests {
             endpoints: vec!["127.0.0.1:6379".parse().unwrap()],
             ring: ketama::Ring::build(&["127.0.0.1:6379"]),
             slot_table: RwLock::new(None),
-            prefill_queues: PrefillQueues::new(1),
+            prefill_queues: Arc::new(PrefillQueues::new(1)),
             worker_id,
             backfill_on_miss: false,
             tls_enabled: false,

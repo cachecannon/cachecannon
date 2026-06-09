@@ -138,44 +138,35 @@ pub fn run_benchmark_full(
     // using the same distribution formula as worker.rs create_for_worker().
     let prefill_enabled = config.workload.prefill;
     let key_count = config.workload.keyspace.count;
-    let prefill_ranges: Vec<Option<std::ops::Range<usize>>> = if prefill_enabled {
-        let base_conns = total_connections / num_threads;
-        let conn_remainder = total_connections % num_threads;
-        let workers_with_conns = if base_conns > 0 {
-            num_threads
-        } else {
-            conn_remainder.min(num_threads)
-        };
+    let num_endpoints = config.target.endpoints.len();
 
-        let keys_per_worker = key_count / workers_with_conns;
-        let key_remainder = key_count % workers_with_conns;
+    // Guardrail: prefill is drained from shared per-endpoint queues, so it can
+    // only complete if every node has at least one connection across all
+    // workers. Fewer connections than nodes leaves a node's queue with no
+    // draining task — fail loud at startup instead of stalling silently
+    // mid-prefill at conns/nodes progress.
+    if prefill_enabled && num_endpoints > 1 && total_connections < num_endpoints {
+        return Err(format!(
+            "cluster prefill needs at least one connection per node, but \
+             --connections={} < {} cluster nodes. Increase --connections to >= {} \
+             (ideally >= threads x nodes for an even spread).",
+            total_connections, num_endpoints, num_endpoints
+        )
+        .into());
+    }
 
-        // Track which effective worker index we're at (among workers with conns)
-        let mut effective_id = 0usize;
-        (0..num_threads)
-            .map(|id| {
-                let has_conns = id < conn_remainder || base_conns > 0;
-                if !has_conns {
-                    return None;
-                }
-                let eid = effective_id;
-                effective_id += 1;
-                let start = if eid < key_remainder {
-                    eid * (keys_per_worker + 1)
-                } else {
-                    key_remainder * (keys_per_worker + 1) + (eid - key_remainder) * keys_per_worker
-                };
-                let count = if eid < key_remainder {
-                    keys_per_worker + 1
-                } else {
-                    keys_per_worker
-                };
-                Some(start..start + count)
-            })
-            .collect()
-    } else {
-        vec![None; num_threads]
-    };
+    // Build the shared per-endpoint prefill queues once: the full keyspace,
+    // partitioned by owning endpoint. All workers share this `Arc` and drain
+    // the queues for whichever endpoints their connections serve.
+    let prefill_queues = Arc::new(crate::worker::build_prefill_queues(
+        if prefill_enabled { key_count } else { 0 },
+        config.workload.keyspace.length,
+        &config.target.endpoints,
+        &slot_table,
+    ));
+    if prefill_enabled {
+        shared.add_prefill_total(key_count);
+    }
 
     // Allocate shared value pool: 1GB of random bytes shared across all workers.
     // Workers pick random offsets into this pool for SET values, avoiding per-worker
@@ -202,7 +193,7 @@ pub fn run_benchmark_full(
                 shared: Arc::clone(&shared),
                 ratelimiter: ratelimiter.clone(),
                 recording: false,
-                prefill_range: prefill_ranges[id].clone(),
+                prefill_queues: Arc::clone(&prefill_queues),
                 cpu_ids: cpu_ids.clone(),
                 value_pool: Arc::clone(&value_pool),
                 slot_table: slot_table.clone(),
@@ -430,8 +421,14 @@ pub fn run_benchmark_full(
 
         // Handle prefill -> warmup transition
         if current_phase == Phase::Prefill {
-            let prefill_complete = shared.prefill_complete_count();
-            if prefill_complete >= num_threads {
+            let confirmed = shared.prefill_keys_confirmed();
+            let total = shared.prefill_keys_total();
+
+            // Prefill is a global operation drained from shared per-endpoint
+            // queues; it completes when all assigned keys are confirmed — NOT
+            // when N per-worker markers fire, since a worker may serve only a
+            // subset of cluster nodes and would never reach a per-worker total.
+            if total > 0 && confirmed >= total {
                 shared.set_phase(Phase::Warmup);
                 current_phase = Phase::Warmup;
                 warmup_start = Some(Instant::now());
@@ -439,8 +436,6 @@ pub fn run_benchmark_full(
                 continue;
             }
 
-            let confirmed = shared.prefill_keys_confirmed();
-            let total = shared.prefill_keys_total();
             let elapsed = prefill_start.elapsed();
 
             // Progress reporting
@@ -514,7 +509,7 @@ pub fn run_benchmark_full(
 
                 let conns_failed = metrics::CONNECTIONS_FAILED.value();
                 prefill_timeout_diag = Some(PrefillDiagnostics {
-                    workers_complete: prefill_complete,
+                    workers_complete: shared.prefill_complete_count(),
                     workers_total: num_threads,
                     keys_confirmed: confirmed,
                     keys_total: total,
