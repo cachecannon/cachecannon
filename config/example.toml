@@ -1,7 +1,7 @@
 # Example configuration — all available options shown
 #
 # This is a comprehensive reference. For quick-start configs, see:
-#   valkey.toml, memcache.toml, momento.toml, ping.toml
+#   valkey.toml, memcache.toml, ping.toml
 
 [general]
 duration = "60s"
@@ -12,7 +12,7 @@ threads = 1
 
 [target]
 endpoints = ["127.0.0.1:6379"]
-protocol = "resp"         # "resp", "resp3", "memcache", "memcache_binary", "momento", "ping"
+protocol = "resp"         # "resp", "resp3", "memcache", "memcache_binary", "ping"
 # tls = false             # Enable TLS encryption for connections
 # tls_hostname = "cache.example.com"  # Explicit SNI hostname (defaults to endpoint IP)
 # tls_verify = true       # Verify server certificate (set false for self-signed certs)

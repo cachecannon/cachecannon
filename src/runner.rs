@@ -214,8 +214,7 @@ pub fn run_benchmark_full(
     // Build ringline config (client-only, no bind).
     // With guard-based sends for SET values, the copy pool only holds small
     // protocol framing data, so the default 16KB slot size is sufficient.
-    // Momento always needs TLS (ringline-momento::Client::connect() uses ringline::connect_tls)
-    let needs_tls = config.target.tls || config.target.protocol == CacheProtocol::Momento;
+    let needs_tls = config.target.tls;
     let tls_client = if needs_tls {
         let mut root_store = rustls::RootCertStore::empty();
         root_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
@@ -405,7 +404,7 @@ pub fn run_benchmark_full(
             let elapsed = precheck_start.unwrap().elapsed();
             if elapsed >= precheck_timeout {
                 let conns_failed = metrics::CONNECTIONS_FAILED.value();
-                formatter.print_precheck_failed(elapsed, conns_failed, config.target.protocol);
+                formatter.print_precheck_failed(elapsed, conns_failed);
                 shared.set_phase(Phase::Stop);
 
                 // Shutdown workers cleanly

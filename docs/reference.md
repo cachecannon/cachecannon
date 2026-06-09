@@ -44,7 +44,6 @@ endpoints = ["127.0.0.1:6379"]
 # "resp3" - Valkey/Redis RESP3 protocol
 # "memcache" - Memcache ASCII protocol
 # "memcache_binary" - Memcache binary protocol
-# "momento" - Momento cache (cloud)
 # "ping" - Simple PING/PONG
 protocol = "resp"
 
@@ -191,42 +190,6 @@ format = "clean"
 color = "auto"
 ```
 
-### Momento-Specific Settings
-
-```toml
-[momento]
-# Cache name on Momento
-cache_name = "my-cache"
-
-# Momento endpoint (overrides MOMENTO_ENDPOINT env var)
-endpoint = "cell-us-east-1-1.prod.a.momentohq.com"
-
-# TTL for SET operations (seconds)
-ttl_seconds = 3600
-
-# Wire format: "grpc" or "protosocket"
-wire_format = "grpc"
-
-# Use private (VPC) endpoints instead of public endpoints
-# When true, connections route through your VPC endpoint rather than
-# the public internet, reducing latency and keeping traffic private
-use_private_endpoints = false
-
-# Availability zone for filtering private endpoints (e.g., "usw2-az1")
-# Only relevant when use_private_endpoints = true
-# Routes traffic to the endpoint in your AZ, minimizing cross-AZ latency
-# Can also be set via the MOMENTO_AZ environment variable
-availability_zone = "usw2-az1"
-```
-
-**Required environment variables:**
-
-| Variable | Description |
-|----------|-------------|
-| `MOMENTO_API_KEY` | Your Momento API key (required) |
-| `MOMENTO_ENDPOINT` | Cache endpoint (optional, can be set in config) |
-| `MOMENTO_AZ` | Availability zone filter for private endpoints (optional, can be set in config) |
-
 ## Output Formats
 
 ### Clean (Default)
@@ -308,14 +271,6 @@ Supported commands:
 - `set key flags exptime bytes\r\nvalue` — Store value
 
 ASCII protocol by default. Use `protocol = "memcache_binary"` for binary protocol.
-
-### Momento
-
-Supported commands:
-- `Get(key)` — Retrieve value
-- `Set(key, value, ttl)` — Store value with TTL
-
-Requires `MOMENTO_API_KEY` environment variable. Optionally set `MOMENTO_ENDPOINT`.
 
 ### Ping
 
