@@ -193,6 +193,31 @@ jobs:
           echo "${{ secrets.GPG_PRIVATE_KEY }}" | gpg --batch --import
           GPG_KEY_ID=$(gpg --list-secret-keys --keyid-format LONG | grep sec | head -1 | awk '{print $2}' | cut -d'/' -f2)
           echo "GPG_KEY_ID=$GPG_KEY_ID" >> $GITHUB_ENV
+      - name: Sign .rpm package headers
+        env:
+          GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
+        run: |
+          sudo apt-get update && sudo apt-get install -y rpm
+          # Allow non-interactive (loopback) pinentry for the passphrase-protected key
+          mkdir -p ~/.gnupg && chmod 700 ~/.gnupg
+          echo "allow-loopback-pinentry" >> ~/.gnupg/gpg-agent.conf
+          gpg-connect-agent reloadagent /bye
+          # rpmsign drives gpg via these macros; %{...} are rpm macros (not shell)
+          cat > ~/.rpmmacros <<EOF
+          %_signature gpg
+          %_gpg_name ${GPG_KEY_ID}
+          %__gpg_sign_cmd %{__gpg} gpg --batch --no-armor --pinentry-mode loopback --passphrase "${GPG_PASSPHRASE}" --no-secmem-warning -u "%{_gpg_name}" -sbo %{__signature_filename} %{__plaintext_filename}
+          EOF
+          for rpm in rpms/*.rpm; do
+            echo "Signing header: $rpm"
+            rpmsign --addsign "$rpm"
+          done
+          # Verify the embedded header signatures against the public key
+          gpg --armor --export "${GPG_KEY_ID}" > /tmp/RPM-GPG-KEY-cachecannon
+          sudo rpm --import /tmp/RPM-GPG-KEY-cachecannon
+          for rpm in rpms/*.rpm; do
+            rpm --checksig "$rpm"
+          done
       - name: Sign .deb packages
         run: |
           for deb in debs/*.deb; do

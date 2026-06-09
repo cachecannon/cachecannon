@@ -1,10 +1,10 @@
 name: Momento Integration Test
 
+# Disabled on push/PR: the Momento account/key is currently unusable (auth
+# loop in the console, and the free/legacy plan appears to have been retired),
+# which makes the precheck hang in CI. Keep the workflow runnable on demand so
+# it can be re-enabled once a valid key/plan is sorted out.
 on:
-  push:
-    branches: [main]
-  pull_request:
-    branches: [main]
   workflow_dispatch:
 
 env:
