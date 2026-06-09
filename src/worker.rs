@@ -277,6 +277,33 @@ fn make_value_guard(
     }
 }
 
+/// Minimum value size at which a zero-copy `SendGuard` (SendMsgZc) send is
+/// worth it. Each ZC send costs two CQEs (send completion + ZC notification),
+/// pins the buffer (`get_user_pages`), and holds an in-flight slab slot until
+/// the notification lands. For small values that overhead dwarfs a memcpy and
+/// caps pipelined SET throughput, so below this threshold we use the
+/// copy-based `fire_set` path (one CQE, no pinning) instead. ZC only pays off
+/// once the value is large enough to amortize the per-send cost.
+const ZC_VALUE_THRESHOLD: usize = 4096;
+
+/// Borrow a random `value_len`-byte slice of the value pool, for the
+/// copy-based `fire_set` path (the bytes are copied into the send pool
+/// synchronously, so the borrow only needs to outlive the fire call).
+fn value_slice<'a>(
+    rng: &mut Xoshiro256PlusPlus,
+    value_pool: &'a Arc<Vec<u8>>,
+    value_len: usize,
+    pool_len: usize,
+) -> &'a [u8] {
+    debug_assert!(
+        value_len > 0 && value_len <= pool_len,
+        "value_len ({value_len}) must be in 1..={pool_len}"
+    );
+    let max_offset = pool_len - value_len;
+    let offset = rng.random_range(0..=max_offset);
+    &value_pool[offset..offset + value_len]
+}
+
 // ── Shared task state (Arc-wrapped, accessed by all connection tasks) ────
 
 /// Per-endpoint prefill key queues for a single worker.
@@ -903,11 +930,16 @@ async fn drive_resp_workload(
                     }
                 }
 
-                let guard =
-                    make_value_guard(rng, &state.task_state.value_pool, value_len, pool_len);
-
                 let user_data = key_id as u64 | PREFILL_MARKER;
-                match client.fire_set_with_guard(key_buf, guard, user_data) {
+                let res = if value_len >= ZC_VALUE_THRESHOLD {
+                    let guard =
+                        make_value_guard(rng, &state.task_state.value_pool, value_len, pool_len);
+                    client.fire_set_with_guard(key_buf, guard, user_data)
+                } else {
+                    let value = value_slice(rng, &state.task_state.value_pool, value_len, pool_len);
+                    client.fire_set(key_buf, value, user_data)
+                };
+                match res {
                     Ok(_) => {
                         metrics::REQUESTS_SENT.increment();
                         prefill_in_flight.push_back(key_id);
@@ -942,14 +974,25 @@ async fn drive_resp_workload(
                 // Drain backfill queue first
                 if let Some(key_id) = backfill_queue.pop() {
                     write_key(key_buf, key_id);
-                    let guard =
-                        make_value_guard(rng, &state.task_state.value_pool, value_len, pool_len);
 
                     token_budget -= 1;
 
                     // user_data encodes key_id with backfill marker (high bit set)
                     let user_data = key_id as u64 | BACKFILL_MARKER;
-                    match client.fire_set_with_guard(key_buf, guard, user_data) {
+                    let res = if value_len >= ZC_VALUE_THRESHOLD {
+                        let guard = make_value_guard(
+                            rng,
+                            &state.task_state.value_pool,
+                            value_len,
+                            pool_len,
+                        );
+                        client.fire_set_with_guard(key_buf, guard, user_data)
+                    } else {
+                        let value =
+                            value_slice(rng, &state.task_state.value_pool, value_len, pool_len);
+                        client.fire_set(key_buf, value, user_data)
+                    };
+                    match res {
                         Ok(_) => {
                             metrics::REQUESTS_SENT.increment();
                         }
@@ -996,10 +1039,13 @@ async fn drive_resp_workload(
                     client.fire_get(key_buf, key_id as u64).is_ok()
                 } else if roll < get_ratio + delete_ratio {
                     client.fire_del(key_buf, 0).is_ok()
-                } else {
+                } else if value_len >= ZC_VALUE_THRESHOLD {
                     let guard =
                         make_value_guard(rng, &state.task_state.value_pool, value_len, pool_len);
                     client.fire_set_with_guard(key_buf, guard, 0).is_ok()
+                } else {
+                    let value = value_slice(rng, &state.task_state.value_pool, value_len, pool_len);
+                    client.fire_set(key_buf, value, 0).is_ok()
                 };
 
                 if sent {
