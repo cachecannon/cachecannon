@@ -12,7 +12,6 @@ use crate::{
 use ratelimit::Ratelimiter;
 
 use chrono::Utc;
-use histogram::SampleQuantiles;
 use metriken::{AtomicHistogram, histogram::Histogram};
 use rand::RngCore;
 use rand_xoshiro::Xoshiro256PlusPlus;
@@ -168,6 +167,17 @@ pub fn run_benchmark_full(
         shared.add_prefill_total(key_count);
     }
 
+    // Build the shared per-endpoint key-id lists once (full keyspace,
+    // partitioned by owning endpoint). Connection tasks index these for O(1)
+    // steady-state key selection instead of rejection-sampling+re-routing
+    // random keys. Empty for single-endpoint setups (plain random key-id).
+    let endpoint_keys = Arc::new(crate::worker::build_endpoint_keys(
+        key_count,
+        config.workload.keyspace.length,
+        &config.target.endpoints,
+        &slot_table,
+    ));
+
     // Allocate shared value pool: 1GB of random bytes shared across all workers.
     // Workers pick random offsets into this pool for SET values, avoiding per-worker
     // copies. The pool is seeded deterministically for reproducibility.
@@ -194,6 +204,7 @@ pub fn run_benchmark_full(
                 ratelimiter: ratelimiter.clone(),
                 recording: false,
                 prefill_queues: Arc::clone(&prefill_queues),
+                endpoint_keys: Arc::clone(&endpoint_keys),
                 cpu_ids: cpu_ids.clone(),
                 value_pool: Arc::clone(&value_pool),
                 slot_table: slot_table.clone(),
@@ -244,14 +255,23 @@ pub fn run_benchmark_full(
         ringline_config.timestamps = matches!(config.timestamps.mode, TimestampMode::Software);
     }
 
+    // Enter the precheck phase BEFORE launching workers. `launch()` starts the
+    // worker threads, which immediately run `on_start` → `connect()` → check
+    // `phase == Precheck` to decide whether to send the precheck PING. If we set
+    // the phase only after `launch()` returns, a worker whose connections
+    // establish inside that window observes the initial `Connect` phase, skips
+    // the PING permanently, and idle-spins in the workload loop — so its
+    // connections never mark precheck complete and the run fails with
+    // "no connectivity". Faster connection establishment (e.g. ringline 0.2)
+    // makes that race reliably lost. Setting the phase first closes the window.
+    shared.set_phase(Phase::Precheck);
+
     // Launch ringline workers (client-only, no bind)
     tracing::debug!(num_threads, "launching ringline workers");
     let (shutdown_handle, handles) =
         RinglineBuilder::new(ringline_config).launch::<crate::worker::BenchHandler>()?;
     tracing::debug!(workers = handles.len(), "ringline workers launched");
 
-    // Start in precheck phase
-    shared.set_phase(Phase::Precheck);
     formatter.print_precheck();
 
     // Early liveness check: give workers time to complete EventLoop::new(),

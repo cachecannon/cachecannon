@@ -203,6 +203,14 @@ pub struct BenchWorkerConfig {
     /// Shared per-endpoint prefill queues (full keyspace, built once by the
     /// runner). All workers share the same `Arc`.
     pub(crate) prefill_queues: Arc<PrefillQueues>,
+    /// Per-endpoint key-id lists for steady-state key selection, SHARED across
+    /// all workers (built once by the runner). `endpoint_keys[ep]` is the set of
+    /// key-ids whose slot is owned by endpoint `ep`, so a connection task can
+    /// pick a key for its endpoint with an O(1) random index instead of
+    /// rejection-sampling random keys and re-routing each one (which made CRC16
+    /// slot routing ~40% of CPU at high pipeline depth). Empty for the
+    /// single-endpoint case (callers fall back to a plain random key-id).
+    pub(crate) endpoint_keys: Arc<Vec<Vec<u32>>>,
     /// CPU IDs for pinning (if configured).
     pub cpu_ids: Option<Vec<usize>>,
     /// Shared 1GB random value pool (all workers share the same Arc).
@@ -277,6 +285,33 @@ fn make_value_guard(
     }
 }
 
+/// Minimum value size at which a zero-copy `SendGuard` (SendMsgZc) send is
+/// worth it. Each ZC send costs two CQEs (send completion + ZC notification),
+/// pins the buffer (`get_user_pages`), and holds an in-flight slab slot until
+/// the notification lands. For small values that overhead dwarfs a memcpy and
+/// caps pipelined SET throughput, so below this threshold we use the
+/// copy-based `fire_set` path (one CQE, no pinning) instead. ZC only pays off
+/// once the value is large enough to amortize the per-send cost.
+const ZC_VALUE_THRESHOLD: usize = 4096;
+
+/// Borrow a random `value_len`-byte slice of the value pool, for the
+/// copy-based `fire_set` path (the bytes are copied into the send pool
+/// synchronously, so the borrow only needs to outlive the fire call).
+fn value_slice<'a>(
+    rng: &mut Xoshiro256PlusPlus,
+    value_pool: &'a Arc<Vec<u8>>,
+    value_len: usize,
+    pool_len: usize,
+) -> &'a [u8] {
+    debug_assert!(
+        value_len > 0 && value_len <= pool_len,
+        "value_len ({value_len}) must be in 1..={pool_len}"
+    );
+    let max_offset = pool_len - value_len;
+    let offset = rng.random_range(0..=max_offset);
+    &value_pool[offset..offset + value_len]
+}
+
 // ── Shared task state (Arc-wrapped, accessed by all connection tasks) ────
 
 /// Per-endpoint prefill key queues for a single worker.
@@ -330,6 +365,9 @@ struct TaskSharedState {
     /// for the endpoint it serves — required when connections-per-worker is
     /// fewer than the number of cluster nodes.
     prefill_queues: Arc<PrefillQueues>,
+    /// Per-endpoint key-id lists for steady-state key selection (see
+    /// `BenchWorkerConfig::endpoint_keys`). Empty for single-endpoint setups.
+    endpoint_keys: Arc<Vec<Vec<u32>>>,
     /// Worker ID for logging.
     worker_id: usize,
     /// Whether backfill_on_miss is enabled.
@@ -526,6 +564,7 @@ impl AsyncEventHandler for BenchHandler {
         // `confirm_prefill_key` is inert and `is_prefill_done()` stays false
         // for the whole prefill phase (the phase gate ends prefill).
         let prefill_queues = cfg.prefill_queues;
+        let endpoint_keys = cfg.endpoint_keys;
         let prefill_total = 0usize;
         let prefill_done = false;
 
@@ -538,6 +577,7 @@ impl AsyncEventHandler for BenchHandler {
             ring,
             slot_table: RwLock::new(slot_table),
             prefill_queues,
+            endpoint_keys,
             worker_id: cfg.id,
             backfill_on_miss,
             tls_enabled,
@@ -903,11 +943,16 @@ async fn drive_resp_workload(
                     }
                 }
 
-                let guard =
-                    make_value_guard(rng, &state.task_state.value_pool, value_len, pool_len);
-
                 let user_data = key_id as u64 | PREFILL_MARKER;
-                match client.fire_set_with_guard(key_buf, guard, user_data) {
+                let res = if value_len >= ZC_VALUE_THRESHOLD {
+                    let guard =
+                        make_value_guard(rng, &state.task_state.value_pool, value_len, pool_len);
+                    client.fire_set_with_guard(key_buf, guard, user_data)
+                } else {
+                    let value = value_slice(rng, &state.task_state.value_pool, value_len, pool_len);
+                    client.fire_set(key_buf, value, user_data)
+                };
+                match res {
                     Ok(_) => {
                         metrics::REQUESTS_SENT.increment();
                         prefill_in_flight.push_back(key_id);
@@ -942,14 +987,25 @@ async fn drive_resp_workload(
                 // Drain backfill queue first
                 if let Some(key_id) = backfill_queue.pop() {
                     write_key(key_buf, key_id);
-                    let guard =
-                        make_value_guard(rng, &state.task_state.value_pool, value_len, pool_len);
 
                     token_budget -= 1;
 
                     // user_data encodes key_id with backfill marker (high bit set)
                     let user_data = key_id as u64 | BACKFILL_MARKER;
-                    match client.fire_set_with_guard(key_buf, guard, user_data) {
+                    let res = if value_len >= ZC_VALUE_THRESHOLD {
+                        let guard = make_value_guard(
+                            rng,
+                            &state.task_state.value_pool,
+                            value_len,
+                            pool_len,
+                        );
+                        client.fire_set_with_guard(key_buf, guard, user_data)
+                    } else {
+                        let value =
+                            value_slice(rng, &state.task_state.value_pool, value_len, pool_len);
+                        client.fire_set(key_buf, value, user_data)
+                    };
+                    match res {
                         Ok(_) => {
                             metrics::REQUESTS_SENT.increment();
                         }
@@ -961,31 +1017,24 @@ async fn drive_resp_workload(
                     continue;
                 }
 
-                // Generate a random key. In multi-endpoint setups, only keys
-                // that route to this connection's endpoint can be sent, so
-                // retry without consuming rate-limit tokens until one matches.
-                // A token consumed on a routing miss would be globally lost
-                // from a rate limiter shared across all workers.
-                let key_id = {
-                    let mut attempts = 0usize;
-                    let max_attempts = max_routing_attempts(num_endpoints);
-                    loop {
-                        let candidate = rng.random_range(0..key_count);
-                        write_key(key_buf, candidate);
-                        if !multi_endpoint || route_key(&state.task_state, key_buf) == endpoint_idx
-                        {
-                            break Some(candidate);
-                        }
-                        attempts += 1;
-                        if attempts >= max_attempts {
-                            break None;
-                        }
+                // Pick a key owned by this connection's endpoint. In cluster /
+                // multi-endpoint mode, index a precomputed per-endpoint key-id
+                // list (O(1)) rather than rejection-sampling random keys and
+                // re-routing each one until one lands on this endpoint — that
+                // rejection sampling made CRC16 slot routing ~40% of CPU at
+                // high pipeline depth. Single-endpoint: any key works.
+                let key_id = if multi_endpoint {
+                    let bucket = &state.task_state.endpoint_keys[endpoint_idx];
+                    if bucket.is_empty() {
+                        // Endpoint owns no keys (degenerate keyspace); yield to
+                        // recv and try the next cycle.
+                        break;
                     }
+                    bucket[rng.random_range(0..bucket.len())] as usize
+                } else {
+                    rng.random_range(0..key_count)
                 };
-                let Some(key_id) = key_id else {
-                    // No matching key found; yield to recv and try next cycle.
-                    break;
-                };
+                write_key(key_buf, key_id);
 
                 token_budget -= 1;
 
@@ -996,10 +1045,13 @@ async fn drive_resp_workload(
                     client.fire_get(key_buf, key_id as u64).is_ok()
                 } else if roll < get_ratio + delete_ratio {
                     client.fire_del(key_buf, 0).is_ok()
-                } else {
+                } else if value_len >= ZC_VALUE_THRESHOLD {
                     let guard =
                         make_value_guard(rng, &state.task_state.value_pool, value_len, pool_len);
                     client.fire_set_with_guard(key_buf, guard, 0).is_ok()
+                } else {
+                    let value = value_slice(rng, &state.task_state.value_pool, value_len, pool_len);
+                    client.fire_set(key_buf, value, 0).is_ok()
                 };
 
                 if sent {
@@ -1183,6 +1235,8 @@ fn map_resp_op(op: ringline_redis::CompletedOp) -> RequestResult {
                 redirect,
             }
         }
+        // cachecannon only fires Get/Set/Del; `CompletedOp` is #[non_exhaustive].
+        _ => unreachable!("unexpected ringline-redis CompletedOp variant"),
     }
 }
 
@@ -1627,6 +1681,8 @@ fn map_memcache_op(op: ringline_memcache::CompletedOp) -> RequestResult {
                 redirect: None,
             }
         }
+        // cachecannon only fires Get/Set/Delete; `CompletedOp` is #[non_exhaustive].
+        _ => unreachable!("unexpected ringline-memcache CompletedOp variant"),
     }
 }
 
@@ -1928,6 +1984,41 @@ pub(crate) fn build_prefill_queues(
     queues
 }
 
+/// Partition the full keyspace into per-endpoint key-id lists for steady-state
+/// key selection. `result[ep]` holds every key-id whose slot is owned by
+/// endpoint `ep`, letting a connection task pick a key for its endpoint by
+/// indexing a precomputed list (O(1)) instead of rejection-sampling random
+/// keys and re-routing each one — the latter made CRC16 slot routing ~40% of
+/// CPU at high pipeline depth on a multi-shard cluster.
+///
+/// Returns an empty vector for the single-endpoint case; callers fall back to a
+/// plain random key-id over the whole keyspace (no routing needed). Routing
+/// uses the same slot table / ketama ring as `build_prefill_queues`, so the
+/// partition matches the prefill partition.
+pub(crate) fn build_endpoint_keys(
+    key_count: usize,
+    key_len: usize,
+    endpoints: &[SocketAddr],
+    slot_table: &Option<Vec<u16>>,
+) -> Vec<Vec<u32>> {
+    let n = endpoints.len();
+    if n <= 1 {
+        return Vec::new();
+    }
+    let ring = {
+        let ids: Vec<String> = endpoints.iter().map(|a| a.to_string()).collect();
+        ketama::Ring::build(&ids.iter().map(|s| s.as_str()).collect::<Vec<_>>())
+    };
+    let mut buckets: Vec<Vec<u32>> = vec![Vec::new(); n];
+    let mut key_buf = vec![0u8; key_len];
+    for key_id in 0..key_count {
+        write_key(&mut key_buf, key_id);
+        let ep = route_partition(slot_table, &ring, n, &key_buf);
+        buckets[ep].push(key_id as u32);
+    }
+    buckets
+}
+
 /// Write a numeric key ID into the buffer as hex.
 fn write_key(buf: &mut [u8], id: usize) {
     const HEX: &[u8; 16] = b"0123456789abcdef";
@@ -1994,6 +2085,7 @@ mod tests {
             ring: ketama::Ring::build(&["127.0.0.1:6379"]),
             slot_table: RwLock::new(None),
             prefill_queues: Arc::new(PrefillQueues::new(1)),
+            endpoint_keys: Arc::new(Vec::new()),
             worker_id,
             backfill_on_miss: false,
             tls_enabled: false,

@@ -8,7 +8,6 @@ use crate::metrics;
 use crate::output::{OutputFormatter, SaturationResults, SaturationStep};
 use ratelimit::Ratelimiter;
 
-use histogram::SampleQuantiles;
 use metriken::histogram::Histogram;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
