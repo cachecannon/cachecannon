@@ -198,25 +198,35 @@ jobs:
           GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
         run: |
           sudo apt-get update && sudo apt-get install -y rpm
+          # Diagnostics: rpm version and crypto backend (libgcrypt vs sequoia).
+          # Ubuntu 24.04's rpm verifies via Sequoia, which is far stricter than
+          # the GnuPG that creates the signature below.
+          rpm --version
+          echo "pgp backend: $(rpm --eval '%{?_pgpbackend}')"
           # Allow non-interactive (loopback) pinentry for the passphrase-protected key
           mkdir -p ~/.gnupg && chmod 700 ~/.gnupg
           echo "allow-loopback-pinentry" >> ~/.gnupg/gpg-agent.conf
           gpg-connect-agent reloadagent /bye
-          # rpmsign drives gpg via these macros; %{...} are rpm macros (not shell)
+          # rpmsign drives gpg via these macros; %{...} are rpm macros (not shell).
+          # Force SHA-256 for the signature digest so the Sequoia verifier accepts it.
           cat > ~/.rpmmacros <<EOF
           %_signature gpg
           %_gpg_name ${GPG_KEY_ID}
-          %__gpg_sign_cmd %{__gpg} gpg --batch --no-armor --pinentry-mode loopback --passphrase "${GPG_PASSPHRASE}" --no-secmem-warning -u "%{_gpg_name}" -sbo %{__signature_filename} %{__plaintext_filename}
+          %_gpg_digest_algo sha256
+          %__gpg_sign_cmd %{__gpg} gpg --batch --no-armor --pinentry-mode loopback --passphrase "${GPG_PASSPHRASE}" --no-secmem-warning --digest-algo SHA256 -u "%{_gpg_name}" -sbo %{__signature_filename} %{__plaintext_filename}
           EOF
           for rpm in rpms/*.rpm; do
             echo "Signing header: $rpm"
             rpmsign --addsign "$rpm"
           done
-          # Verify the embedded header signatures against the public key
+          # Verify the embedded header signatures against the public key. Import
+          # and verify both as root so they share the same rpmdb keyring, and use
+          # -v so a failure reports which sub-check (header/payload/digest) failed.
           gpg --armor --export "${GPG_KEY_ID}" > /tmp/RPM-GPG-KEY-cachecannon
           sudo rpm --import /tmp/RPM-GPG-KEY-cachecannon
+          sudo rpm -q gpg-pubkey --qf '%{NAME}-%{VERSION}-%{RELEASE} %{SUMMARY}\n'
           for rpm in rpms/*.rpm; do
-            rpm --checksig "$rpm"
+            sudo rpm --checksig -v "$rpm"
           done
       - name: Sign .deb packages
         run: |
