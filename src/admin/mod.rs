@@ -1,4 +1,3 @@
-use histogram::SampleQuantiles;
 use metriken_exposition::{
     Counter as SnapCounter, Gauge as SnapGauge, Histogram as SnapHistogram, MsgpackToParquet,
     ParquetOptions, Snapshot, SnapshotV2,

@@ -1183,6 +1183,8 @@ fn map_resp_op(op: ringline_redis::CompletedOp) -> RequestResult {
                 redirect,
             }
         }
+        // cachecannon only fires Get/Set/Del; `CompletedOp` is #[non_exhaustive].
+        _ => unreachable!("unexpected ringline-redis CompletedOp variant"),
     }
 }
 
@@ -1627,6 +1629,8 @@ fn map_memcache_op(op: ringline_memcache::CompletedOp) -> RequestResult {
                 redirect: None,
             }
         }
+        // cachecannon only fires Get/Set/Delete; `CompletedOp` is #[non_exhaustive].
+        _ => unreachable!("unexpected ringline-memcache CompletedOp variant"),
     }
 }
 

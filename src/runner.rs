@@ -12,7 +12,6 @@ use crate::{
 use ratelimit::Ratelimiter;
 
 use chrono::Utc;
-use histogram::SampleQuantiles;
 use metriken::{AtomicHistogram, histogram::Histogram};
 use rand::RngCore;
 use rand_xoshiro::Xoshiro256PlusPlus;
