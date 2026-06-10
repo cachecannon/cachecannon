@@ -7,11 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.15] - 2026-06-10
+
+### Changed
+- Upgrade valkey-lab to ringline 0.2 / client crates 0.3 (#93)
+- Bump rustls-webpki to 0.103.13 (#86)
+
+### Fixed
+- Fix cluster SET throughput by precomputing per-endpoint key lists and
+  dropping rejection sampling; copy-send small SET values instead of using
+  the zero-copy guard (#93)
+- Share prefill queues across connections with global completion tracking
+  and a connection guardrail (#92)
+- Sign RPM package headers with rpmsign in the release workflow (#90)
+- Detect cluster slot gaps and bound the per-connection backfill queue (#89)
+- Mask marker bits when reading the GET key_id from user_data (#88)
+- Validate saturation `start_rate` and reconnect on ping protocol errors (#87)
+- Address output/admin audit findings (#85)
+- Correct connection-lifecycle metrics and prefill bookkeeping (#84)
+- Address design-review findings for perf and measurement correctness (#83)
+
 ### Removed
 - Drop the Momento protocol, the `ringline-momento` client dependency, and the
   Momento integration test. Momento now exposes a RESP/Valkey-compatible
   endpoint, so it can be benchmarked through the existing RESP driver by
-  pointing it at the Momento RESP endpoint with the API token as the password.
+  pointing it at the Momento RESP endpoint with the API token as the password (#91)
 
 ## [0.0.14] - 2026-04-21
 
