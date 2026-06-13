@@ -1316,7 +1316,9 @@ async fn memcache_connection_task(state: Arc<SharedWorkerState>, endpoint_idx: u
             };
 
         metrics::CONNECTIONS_ACTIVE.increment();
-        let builder = ringline_memcache::Client::builder(conn).on_result(make_memcache_callback());
+        let builder = ringline_memcache::Client::builder(conn)
+            .on_result(make_memcache_callback())
+            .max_batch_size(config.connection.effective_batch_size());
         #[cfg(target_os = "linux")]
         let builder =
             builder.kernel_timestamps(matches!(config.timestamps.mode, TimestampMode::Software));

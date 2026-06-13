@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- Memcache client now honors `batch_size` for fire/recv coalescing (wires
+  `max_batch_size` from `effective_batch_size`, mirroring the redis client).
+- Bump `ringline-redis`/`ringline-memcache` to 0.4 (memcache coalescing,
+  `zc_threshold` guard fold, zero-allocation encode paths). Rig-validated:
+  memcache GET coalescing ~10× at P16/64B.
+
 ## [0.0.15] - 2026-06-10
 
 ### Changed

@@ -60,8 +60,8 @@ crossbeam-channel = "0.5"
 resp-proto = { version = "0.0.1", features = ["resp3"] }
 
 # Client crates
-ringline-redis = "0.3"
-ringline-memcache = "0.3"
+ringline-redis = "0.4"
+ringline-memcache = "0.4"
 ringline-ping = "0.3"
 
 # Metrics
@@ -88,8 +88,8 @@ rand_xoshiro = "0.7"
 # Kernel SO_TIMESTAMPING support is Linux-only.
 [target.'cfg(target_os = "linux")'.dependencies]
 ringline = { version = "0.2", features = ["timestamps"] }
-ringline-redis = { version = "0.3", features = ["timestamps"] }
-ringline-memcache = { version = "0.3", features = ["timestamps"] }
+ringline-redis = { version = "0.4", features = ["timestamps"] }
+ringline-memcache = { version = "0.4", features = ["timestamps"] }
 ringline-ping = { version = "0.3", features = ["timestamps"] }
 
 # Jemalloc allocator (glibc only — not needed on musl/macOS/Windows).
