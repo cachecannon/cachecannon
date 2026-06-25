@@ -646,6 +646,26 @@ impl OutputFormatter for CleanFormatter {
             step.slo_percentile_label,
             self.bold(&slo_p_str)
         );
+        println!(
+            "Perceived: p99={}",
+            self.bold(&format_latency_us(step.perceived_p99_us))
+        );
+        let mut transitions: Vec<&str> = Vec::new();
+        if step.throughput_rollover {
+            transitions.push("throughput rollover");
+        }
+        if step.slip_onset {
+            transitions.push("slip onset");
+        }
+        if step.slo_breach {
+            transitions.push("first SLO breach");
+        }
+        if !transitions.is_empty() {
+            println!(
+                "{}",
+                self.yellow(&format!("Transitions: {}", transitions.join(", ")))
+            );
+        }
 
         // Fail reason: yellow for throughput, red for latency
         if !step.slo_passed && !step.fail_reason.is_empty() && is_throughput_fail {

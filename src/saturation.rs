@@ -35,8 +35,16 @@ pub struct SaturationSearchState {
     step_histogram: Option<Histogram>,
     /// Perceived-latency histogram snapshot at baseline capture.
     step_perceived: Option<Histogram>,
+    /// Schedule-slip histogram snapshot at baseline capture.
+    step_slip: Option<Histogram>,
     /// Response count at baseline capture.
     step_responses: u64,
+    /// Achieved rate of the previous recorded step (0.0 before the first).
+    prev_achieved: f64,
+    /// Whether schedule slip has crossed the onset threshold yet.
+    slip_seen: bool,
+    /// Whether an SLO breach has occurred yet.
+    breach_seen: bool,
 
     /// All step results.
     results: Vec<SaturationStep>,
@@ -196,7 +204,11 @@ impl SaturationSearchState {
             baseline_at: None,
             step_histogram: None,
             step_perceived: None,
+            step_slip: None,
             step_responses: 0,
+            prev_achieved: 0.0,
+            slip_seen: false,
+            breach_seen: false,
             results: Vec::new(),
             completed: false,
             header_printed: false,
@@ -229,6 +241,7 @@ impl SaturationSearchState {
                 self.step_responses = metrics::RESPONSES_RECEIVED.value();
                 self.step_histogram = metrics::RESPONSE_LATENCY.load();
                 self.step_perceived = metrics::PERCEIVED_LATENCY.load();
+                self.step_slip = metrics::SCHEDULE_SLIP.load();
                 self.baseline_at = Some(now);
                 return false;
             }
@@ -317,6 +330,20 @@ impl SaturationSearchState {
             latency_reason.unwrap_or_default()
         };
 
+        // Per-step schedule-slip p99 (delta over the step window), in µs.
+        let current_slip = metrics::SCHEDULE_SLIP.load();
+        let slip_p99_us = match (&current_slip, &self.step_slip) {
+            (Some(current), Some(previous)) => match current.wrapping_sub(previous) {
+                Ok(delta) => percentile_from_histogram(&delta, 0.99),
+                Err(_) => 0.0,
+            },
+            (Some(current), None) => percentile_from_histogram(current, 0.99),
+            _ => 0.0,
+        };
+        let throughput_rollover = self.prev_achieved > 0.0 && achieved_rate < self.prev_achieved;
+        let slip_onset = !self.slip_seen && slip_p99_us > 1000.0; // first >1ms slip
+        let slo_breach = !slo_passed && !self.breach_seen; // first SLO breach only
+
         // Record step
         let (slo_percentile_label, slo_percentile_us) = self.slo_percentile(p50, p99, p999);
         let step = SaturationStep {
@@ -331,9 +358,21 @@ impl SaturationSearchState {
             slo_threshold_us: self.slo_threshold_us(),
             slo_percentile_label,
             slo_percentile_us,
+            perceived_p99_us: perc_p99,
+            throughput_rollover,
+            slip_onset,
+            slo_breach,
         };
         formatter.print_saturation_step(&step);
         self.results.push(step);
+
+        self.prev_achieved = achieved_rate;
+        if slip_p99_us > 1000.0 {
+            self.slip_seen = true;
+        }
+        if !slo_passed {
+            self.breach_seen = true;
+        }
 
         // Drive the rate-search state machine.
         match self.search.advance(slo_passed) {
@@ -356,6 +395,7 @@ impl SaturationSearchState {
         self.baseline_at = None;
         self.step_histogram = None;
         self.step_perceived = None;
+        self.step_slip = None;
         self.step_responses = 0;
 
         true
