@@ -232,28 +232,27 @@ pub fn run_benchmark_full(
                 .with_no_client_auth()
         };
 
-        Some(ringline::TlsClientConfig {
-            client_config: std::sync::Arc::new(tls_config),
-        })
+        Some(ringline::TlsClientConfig::new(std::sync::Arc::new(
+            tls_config,
+        )))
     } else {
         None
     };
 
-    #[cfg_attr(not(target_os = "linux"), allow(unused_mut))]
-    let mut ringline_config = ringline::Config {
-        worker: ringline::WorkerConfig {
-            threads: num_threads,
-            pin_to_core: false, // We pin in create_for_worker instead
-            core_offset: 0,
-        },
-        tcp_nodelay: true,
-        tls_client,
-        ..Default::default()
-    };
+    let mut ringline_builder = ringline::ConfigBuilder::new()
+        .workers(num_threads)
+        .pin_to_core(false) // We pin in create_for_worker instead
+        .core_offset(0)
+        .tcp_nodelay(true);
+    if let Some(tls_client) = tls_client {
+        ringline_builder = ringline_builder.tls_client(tls_client);
+    }
     #[cfg(target_os = "linux")]
     {
-        ringline_config.timestamps = matches!(config.timestamps.mode, TimestampMode::Software);
+        ringline_builder =
+            ringline_builder.timestamps(matches!(config.timestamps.mode, TimestampMode::Software));
     }
+    let ringline_config = ringline_builder.build()?;
 
     // Enter the precheck phase BEFORE launching workers. `launch()` starts the
     // worker threads, which immediately run `on_start` → `connect()` → check
