@@ -102,11 +102,6 @@ impl RateSearch {
         }
     }
 
-    /// The rate currently being measured.
-    pub fn current_rate(&self) -> u64 {
-        self.current_rate
-    }
-
     /// Record the SLO result for `current_rate` and decide the next move.
     pub fn advance(&mut self, passed: bool) -> SearchOutcome {
         if passed {
@@ -607,5 +602,51 @@ mod rate_search_tests {
     fn climb_to_max_rate_without_failure_reports_max() {
         let found = run_to_completion(10_000_000);
         assert_eq!(found, Some(1_000_000));
+    }
+
+    #[test]
+    fn knee_invariant_holds_across_a_sweep() {
+        // For any knee — below start, in range, above max, unreachable — the
+        // reported knee (if any) must be a rate that actually passed (<= knee),
+        // and the search must terminate quickly.
+        for &knee in &[0u64, 500, 1000, 1500, 7777, 30_000, 999_999, 5_000_000] {
+            let mut s = RateSearch::new(1000, 2.0, 1_000_000, 0.05, 8);
+            let mut rate = 1000u64;
+            let mut probes = 0;
+            let found = loop {
+                probes += 1;
+                assert!(probes < 200, "must terminate for knee={knee}");
+                match s.advance(rate <= knee) {
+                    SearchOutcome::Probe(next) => rate = next,
+                    SearchOutcome::Done { knee: k } => break k,
+                }
+            };
+            if let Some(k) = found {
+                assert!(k <= knee, "reported knee {k} did not pass for true knee {knee}");
+            }
+        }
+    }
+
+    #[test]
+    fn everything_fails_reports_no_knee() {
+        // start_rate already fails the SLO (knee below start): no compliant rate.
+        let found = run_to_completion(0);
+        assert_eq!(found, None);
+    }
+
+    #[test]
+    fn zero_tolerance_and_zero_max_steps_still_terminate() {
+        // tolerance 0 forces termination via max_bisect_steps / hi-lo<=1.
+        let mut s = RateSearch::new(1000, 2.0, 1_000_000, 0.0, 0);
+        let mut rate = 1000u64;
+        let mut probes = 0;
+        loop {
+            probes += 1;
+            assert!(probes < 200, "must terminate with zero knobs");
+            match s.advance(rate <= 12_345) {
+                SearchOutcome::Probe(next) => rate = next,
+                SearchOutcome::Done { .. } => break,
+            }
+        }
     }
 }
