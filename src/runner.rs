@@ -322,6 +322,7 @@ pub fn run_benchmark_full(
     let mut baseline_get_ttfb: Option<Histogram> = None;
     let mut baseline_set_latency: Option<Histogram> = None;
     let mut baseline_backfill_set_latency: Option<Histogram> = None;
+    let mut baseline_requests_dropped = 0u64;
     let mut current_phase = Phase::Precheck;
 
     let mut actual_duration = duration;
@@ -591,6 +592,10 @@ pub fn run_benchmark_full(
             baseline_get_ttfb = metrics::GET_TTFB.load();
             baseline_set_latency = metrics::SET_LATENCY.load();
             baseline_backfill_set_latency = metrics::BACKFILL_SET_LATENCY.load();
+            baseline_requests_dropped = ratelimiter
+                .as_ref()
+                .map(|rl| rl.dropped())
+                .unwrap_or(0);
 
             last_responses = baseline_responses;
             last_errors = baseline_errors;
@@ -700,6 +705,10 @@ pub fn run_benchmark_full(
                 "main thread diagnostic"
             );
 
+            if let Some(ref rl) = ratelimiter {
+                metrics::REQUESTS_DROPPED.set(rl.dropped() as i64);
+            }
+
             if let Some(ref mut state) = saturation_state {
                 state.check_and_advance(&*formatter);
             }
@@ -766,6 +775,11 @@ pub fn run_benchmark_full(
     let failed = conn_failures;
     let elapsed_secs = actual_duration.as_secs_f64();
 
+    let requests_dropped = ratelimiter
+        .as_ref()
+        .map(|rl| rl.dropped().saturating_sub(baseline_requests_dropped))
+        .unwrap_or(0);
+
     let get_latencies = delta_latency_stats(&metrics::GET_LATENCY, &baseline_get_latency);
     let get_ttfb = delta_latency_stats(&metrics::GET_TTFB, &baseline_get_ttfb);
     let set_latencies = delta_latency_stats(&metrics::SET_LATENCY, &baseline_set_latency);
@@ -793,6 +807,7 @@ pub fn run_benchmark_full(
         conns_active: active,
         conns_failed: failed,
         conns_total: total_connections as u64,
+        requests_dropped,
     };
 
     formatter.print_results(&results);
