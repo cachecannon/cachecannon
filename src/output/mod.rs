@@ -148,6 +148,10 @@ pub struct Results {
     pub conns_total: u64,
     /// Requests shed by the rate limiter under overload (bucket overflow).
     pub requests_dropped: u64,
+    /// Schedule slip percentiles (microseconds). Zero when no rate limit.
+    pub schedule_slip: LatencyStats,
+    /// Perceived (arrival-relative, CO-honest) response latency percentiles (µs).
+    pub perceived_latency: LatencyStats,
 }
 
 impl Results {
@@ -238,6 +242,8 @@ mod overload_tests {
             conns_failed: 0,
             conns_total: 0,
             requests_dropped: dropped,
+            schedule_slip: Default::default(),
+            perceived_latency: Default::default(),
         }
     }
 

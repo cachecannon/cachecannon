@@ -322,6 +322,8 @@ pub fn run_benchmark_full(
     let mut baseline_get_ttfb: Option<Histogram> = None;
     let mut baseline_set_latency: Option<Histogram> = None;
     let mut baseline_backfill_set_latency: Option<Histogram> = None;
+    let mut baseline_schedule_slip: Option<Histogram> = None;
+    let mut baseline_perceived: Option<Histogram> = None;
     let mut baseline_requests_dropped = 0u64;
     let mut current_phase = Phase::Precheck;
 
@@ -592,6 +594,8 @@ pub fn run_benchmark_full(
             baseline_get_ttfb = metrics::GET_TTFB.load();
             baseline_set_latency = metrics::SET_LATENCY.load();
             baseline_backfill_set_latency = metrics::BACKFILL_SET_LATENCY.load();
+            baseline_schedule_slip = metrics::SCHEDULE_SLIP.load();
+            baseline_perceived = metrics::PERCEIVED_LATENCY.load();
             baseline_requests_dropped = ratelimiter
                 .as_ref()
                 .map(|rl| rl.dropped())
@@ -787,6 +791,8 @@ pub fn run_benchmark_full(
         &metrics::BACKFILL_SET_LATENCY,
         &baseline_backfill_set_latency,
     );
+    let schedule_slip = delta_latency_stats(&metrics::SCHEDULE_SLIP, &baseline_schedule_slip);
+    let perceived_latency = delta_latency_stats(&metrics::PERCEIVED_LATENCY, &baseline_perceived);
 
     let results = Results {
         duration_secs: elapsed_secs,
@@ -808,6 +814,8 @@ pub fn run_benchmark_full(
         conns_failed: failed,
         conns_total: total_connections as u64,
         requests_dropped,
+        schedule_slip,
+        perceived_latency,
     };
 
     formatter.print_results(&results);

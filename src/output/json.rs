@@ -94,6 +94,12 @@ struct ResultsOutput {
     backfill_set: Option<LatencyOutput>,
     conns_active: i64,
     conns_failed: u64,
+    requests_dropped: u64,
+    offered: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    schedule_slip: Option<LatencyOutput>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    perceived_latency: Option<LatencyOutput>,
 }
 
 impl OutputFormatter for JsonFormatter {
@@ -307,6 +313,36 @@ impl OutputFormatter for JsonFormatter {
             },
             conns_active: results.conns_active,
             conns_failed: results.conns_failed,
+            requests_dropped: results.requests_dropped,
+            offered: results.offered(),
+            schedule_slip: if results.schedule_slip.p99_us > 0.0 || results.requests_dropped > 0 {
+                Some(LatencyOutput {
+                    count: 0,
+                    p50_us: results.schedule_slip.p50_us as u64,
+                    p90_us: results.schedule_slip.p90_us as u64,
+                    p99_us: results.schedule_slip.p99_us as u64,
+                    p999_us: results.schedule_slip.p999_us as u64,
+                    p9999_us: results.schedule_slip.p9999_us as u64,
+                    max_us: results.schedule_slip.max_us as u64,
+                })
+            } else {
+                None
+            },
+            perceived_latency: if results.schedule_slip.p99_us > 0.0
+                || results.requests_dropped > 0
+            {
+                Some(LatencyOutput {
+                    count: 0,
+                    p50_us: results.perceived_latency.p50_us as u64,
+                    p90_us: results.perceived_latency.p90_us as u64,
+                    p99_us: results.perceived_latency.p99_us as u64,
+                    p999_us: results.perceived_latency.p999_us as u64,
+                    p9999_us: results.perceived_latency.p9999_us as u64,
+                    max_us: results.perceived_latency.max_us as u64,
+                })
+            } else {
+                None
+            },
         };
 
         match serde_json::to_string(&output) {
