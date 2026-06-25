@@ -789,6 +789,8 @@ fn make_ping_callback() -> impl Fn(&ringline_ping::CommandResult) {
         }
         let _ = metrics::RESPONSE_LATENCY.increment(r.latency_ns);
         let _ = metrics::GET_LATENCY.increment(r.latency_ns);
+        let _ = metrics::PERCEIVED_LATENCY
+            .increment(r.latency_ns + metrics::CURRENT_SLIP_NS.value() as u64);
     }
 }
 
@@ -1860,7 +1862,14 @@ async fn drive_ping_workload(
             }
         }
 
+        let slip_ns = match state.task_state.ratelimiter {
+            Some(ref rl) => crate::metrics::slip_ns(rl.available(), rl.rate()),
+            None => 0,
+        };
+        crate::metrics::CURRENT_SLIP_NS.set(slip_ns as i64);
+
         metrics::REQUESTS_SENT.increment();
+        let _ = metrics::SCHEDULE_SLIP.increment(slip_ns);
         match client.ping().await {
             Ok(()) => {}
             Err(ringline_ping::Error::ConnectionClosed) => {
