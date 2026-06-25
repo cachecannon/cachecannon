@@ -55,6 +55,13 @@ impl SaturationSearchState {
         ratelimiter.set_rate(start_rate);
         metrics::TARGET_RATE.set(start_rate as i64);
 
+        if config.stop_after_failures != crate::config::default_stop_after_failures() {
+            tracing::warn!(
+                "saturation_search.stop_after_failures is deprecated and ignored; \
+                 termination is now governed by bisect_tolerance / max_bisect_steps"
+            );
+        }
+
         Self {
             config,
             ratelimiter,
@@ -394,6 +401,8 @@ mod tests {
             stop_after_failures: 3,
             max_rate: 100_000_000,
             min_throughput_ratio: 0.9,
+            bisect_tolerance: 0.05,
+            max_bisect_steps: 8,
         };
 
         let rl = Arc::new(
