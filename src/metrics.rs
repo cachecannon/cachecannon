@@ -205,6 +205,31 @@ pub static GET_TTFB: AtomicHistogram = AtomicHistogram::new(7, 64);
 )]
 pub static BACKFILL_SET_LATENCY: AtomicHistogram = AtomicHistogram::new(7, 64);
 
+// ── Coordinated-omission metrics ─────────────────────────────────────────
+#[metric(
+    name = "schedule_slip",
+    description = "Per-request schedule slip histogram (nanoseconds): queueing time the latency clock omits, from the rate limiter backlog"
+)]
+pub static SCHEDULE_SLIP: AtomicHistogram = AtomicHistogram::new(7, 64);
+
+#[metric(
+    name = "perceived_latency",
+    description = "Arrival-relative (CO-honest) response latency histogram (nanoseconds): response_latency + schedule slip"
+)]
+pub static PERCEIVED_LATENCY: AtomicHistogram = AtomicHistogram::new(7, 64);
+
+#[metric(
+    name = "current_slip_ns",
+    description = "Current schedule slip in nanoseconds (rate limiter backlog / rate)"
+)]
+pub static CURRENT_SLIP_NS: Gauge = Gauge::new();
+
+#[metric(
+    name = "requests_dropped",
+    description = "Requests shed by the rate limiter under overload (bucket overflow)"
+)]
+pub static REQUESTS_DROPPED: Gauge = Gauge::new();
+
 #[cfg(test)]
 mod co_tests {
     use super::slip_ns;
