@@ -254,6 +254,12 @@ pub struct SaturationSearch {
     /// Default is 0.9 (90%).
     #[serde(default = "default_min_throughput_ratio")]
     pub min_throughput_ratio: f64,
+    /// Relative interval width at which bisection stops (0.0-1.0).
+    #[serde(default = "default_bisect_tolerance")]
+    pub bisect_tolerance: f64,
+    /// Hard cap on the number of bisection probes.
+    #[serde(default = "default_max_bisect_steps")]
+    pub max_bisect_steps: u32,
 }
 
 /// SLO thresholds for latency percentiles.
@@ -289,7 +295,7 @@ fn default_drain_window() -> Duration {
     Duration::from_millis(500)
 }
 
-fn default_stop_after_failures() -> u32 {
+pub(crate) fn default_stop_after_failures() -> u32 {
     3
 }
 
@@ -299,6 +305,14 @@ fn default_max_rate() -> u64 {
 
 fn default_min_throughput_ratio() -> f64 {
     0.9
+}
+
+pub(crate) fn default_bisect_tolerance() -> f64 {
+    0.05
+}
+
+pub(crate) fn default_max_bisect_steps() -> u32 {
+    8
 }
 
 fn default_prefill_timeout() -> Duration {

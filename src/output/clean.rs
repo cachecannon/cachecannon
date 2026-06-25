@@ -404,6 +404,38 @@ impl OutputFormatter for CleanFormatter {
             }
         }
 
+        // CO-honest sections — suppressed when there is no rate limit (slip ≡ 0)
+        if results.schedule_slip.p99_us > 0.0 || results.requests_dropped > 0 {
+            println!();
+            println!(
+                "{}",
+                self.cyan("Schedule Slip (queueing the latency clock omits)")
+            );
+            println!(
+                "{}",
+                format_latency_row(&self.cyan(&pad_name("slip")), &results.schedule_slip)
+            );
+            println!(
+                "{}",
+                self.cyan("Perceived Latency (arrival-relative, CO-honest)")
+            );
+            println!(
+                "{}",
+                format_latency_row(
+                    &self.cyan(&pad_name("perceived")),
+                    &results.perceived_latency
+                )
+            );
+            if results.requests_dropped > 0 {
+                println!(
+                    "Overload: {} of {} offered dropped ({:.1}%)",
+                    results.requests_dropped,
+                    results.offered(),
+                    results.overload_pct()
+                );
+            }
+        }
+
         println!();
 
         // Connections line
@@ -617,6 +649,27 @@ impl OutputFormatter for CleanFormatter {
             step.slo_percentile_label,
             self.bold(&slo_p_str)
         );
+        println!(
+            "Perceived: {}={}",
+            step.slo_percentile_label,
+            self.bold(&format_latency_us(step.perceived_slo_us))
+        );
+        let mut transitions: Vec<&str> = Vec::new();
+        if step.throughput_rollover {
+            transitions.push("throughput rollover");
+        }
+        if step.slip_onset {
+            transitions.push("slip onset");
+        }
+        if step.slo_breach {
+            transitions.push("first SLO breach");
+        }
+        if !transitions.is_empty() {
+            println!(
+                "{}",
+                self.yellow(&format!("Transitions: {}", transitions.join(", ")))
+            );
+        }
 
         // Fail reason: yellow for throughput, red for latency
         if !step.slo_passed && !step.fail_reason.is_empty() && is_throughput_fail {

@@ -745,6 +745,8 @@ fn make_resp_callback() -> impl Fn(&ringline_redis::CommandResult) {
             _ => {}
         }
         let _ = metrics::RESPONSE_LATENCY.increment(r.latency_ns);
+        let _ = metrics::PERCEIVED_LATENCY
+            .increment(r.latency_ns + metrics::CURRENT_SLIP_NS.value() as u64);
         metrics::BYTES_TX.add(r.tx_bytes as u64);
         metrics::BYTES_RX.add(r.rx_bytes as u64);
     }
@@ -770,6 +772,8 @@ fn make_memcache_callback() -> impl Fn(&ringline_memcache::CommandResult) {
             _ => {}
         }
         let _ = metrics::RESPONSE_LATENCY.increment(r.latency_ns);
+        let _ = metrics::PERCEIVED_LATENCY
+            .increment(r.latency_ns + metrics::CURRENT_SLIP_NS.value() as u64);
         metrics::BYTES_TX.add(r.tx_bytes as u64);
         metrics::BYTES_RX.add(r.rx_bytes as u64);
     }
@@ -785,6 +789,8 @@ fn make_ping_callback() -> impl Fn(&ringline_ping::CommandResult) {
         }
         let _ = metrics::RESPONSE_LATENCY.increment(r.latency_ns);
         let _ = metrics::GET_LATENCY.increment(r.latency_ns);
+        let _ = metrics::PERCEIVED_LATENCY
+            .increment(r.latency_ns + metrics::CURRENT_SLIP_NS.value() as u64);
     }
 }
 
@@ -983,6 +989,15 @@ async fn drive_resp_workload(
                 None => batch_size,
             };
 
+            // Coordinated omission: publish the current schedule slip (rate
+            // limiter backlog) so each sent request can be charged a sample
+            // and the result callback can compute perceived latency.
+            let slip_ns = match state.task_state.ratelimiter {
+                Some(ref rl) => crate::metrics::slip_ns(rl.available(), rl.rate()),
+                None => 0,
+            };
+            crate::metrics::CURRENT_SLIP_NS.set(slip_ns as i64);
+
             while client.pending_count() < pipeline_depth && token_budget > 0 {
                 // Drain backfill queue first
                 if let Some(key_id) = backfill_queue.pop() {
@@ -1008,6 +1023,7 @@ async fn drive_resp_workload(
                     match res {
                         Ok(_) => {
                             metrics::REQUESTS_SENT.increment();
+                            let _ = metrics::SCHEDULE_SLIP.increment(slip_ns);
                         }
                         Err(_) => {
                             backfill_queue.push(key_id);
@@ -1056,10 +1072,19 @@ async fn drive_resp_workload(
 
                 if sent {
                     metrics::REQUESTS_SENT.increment();
+                    let _ = metrics::SCHEDULE_SLIP.increment(slip_ns);
                 } else {
                     break;
                 }
             }
+        }
+
+        // Refresh the slip gauge every iteration (including when the pipeline
+        // is full and we did not fire) so perceived latency reflects a still-
+        // growing backlog.
+        if let Some(ref rl) = state.task_state.ratelimiter {
+            crate::metrics::CURRENT_SLIP_NS
+                .set(crate::metrics::slip_ns(rl.available(), rl.rate()) as i64);
         }
 
         // Wait for one response (yield if idle to avoid starving other connections)
@@ -1475,6 +1500,12 @@ async fn drive_memcache_workload(
                 None => batch_size,
             };
 
+            let slip_ns = match state.task_state.ratelimiter {
+                Some(ref rl) => crate::metrics::slip_ns(rl.available(), rl.rate()),
+                None => 0,
+            };
+            crate::metrics::CURRENT_SLIP_NS.set(slip_ns as i64);
+
             while client.pending_count() < pipeline_depth && token_budget > 0 {
                 // Drain backfill queue first
                 if let Some(key_id) = backfill_queue.pop() {
@@ -1488,6 +1519,7 @@ async fn drive_memcache_workload(
                     match client.fire_set_with_guard(key_buf, guard, 0, 0, user_data) {
                         Ok(_) => {
                             metrics::REQUESTS_SENT.increment();
+                            let _ = metrics::SCHEDULE_SLIP.increment(slip_ns);
                         }
                         Err(_) => {
                             backfill_queue.push(key_id);
@@ -1539,10 +1571,16 @@ async fn drive_memcache_workload(
 
                 if sent {
                     metrics::REQUESTS_SENT.increment();
+                    let _ = metrics::SCHEDULE_SLIP.increment(slip_ns);
                 } else {
                     break;
                 }
             }
+        }
+
+        if let Some(ref rl) = state.task_state.ratelimiter {
+            crate::metrics::CURRENT_SLIP_NS
+                .set(crate::metrics::slip_ns(rl.available(), rl.rate()) as i64);
         }
 
         // Wait for one response (yield if idle to avoid starving other connections)
@@ -1824,7 +1862,14 @@ async fn drive_ping_workload(
             }
         }
 
+        let slip_ns = match state.task_state.ratelimiter {
+            Some(ref rl) => crate::metrics::slip_ns(rl.available(), rl.rate()),
+            None => 0,
+        };
+        crate::metrics::CURRENT_SLIP_NS.set(slip_ns as i64);
+
         metrics::REQUESTS_SENT.increment();
+        let _ = metrics::SCHEDULE_SLIP.increment(slip_ns);
         match client.ping().await {
             Ok(()) => {}
             Err(ringline_ping::Error::ConnectionClosed) => {

@@ -157,6 +157,17 @@ pub mod cluster {
 )]
 pub static CLUSTER_REDIRECTS: Counter = Counter::new(&CLUSTER, cluster::REDIRECTS);
 
+/// Omitted schedule slip in nanoseconds, derived from the rate limiter's
+/// backlog. `available` overdue tokens at `rate` req/s represent
+/// `available / rate` seconds of queueing the latency clock did not see.
+/// Returns 0 when `rate == 0` (no schedule configured).
+pub fn slip_ns(available: u64, rate: u64) -> u64 {
+    if rate == 0 {
+        return 0;
+    }
+    available.saturating_mul(1_000_000_000) / rate
+}
+
 // Latency histograms (kept as metriken AtomicHistogram)
 #[metric(
     name = "response_latency",
@@ -193,3 +204,49 @@ pub static GET_TTFB: AtomicHistogram = AtomicHistogram::new(7, 64);
     description = "Backfill SET latency histogram (nanoseconds)"
 )]
 pub static BACKFILL_SET_LATENCY: AtomicHistogram = AtomicHistogram::new(7, 64);
+
+// ── Coordinated-omission metrics ─────────────────────────────────────────
+#[metric(
+    name = "schedule_slip",
+    description = "Per-request schedule slip histogram (nanoseconds): queueing time the latency clock omits, from the rate limiter backlog"
+)]
+pub static SCHEDULE_SLIP: AtomicHistogram = AtomicHistogram::new(7, 64);
+
+#[metric(
+    name = "perceived_latency",
+    description = "Arrival-relative (CO-honest) response latency histogram (nanoseconds): response_latency + schedule slip"
+)]
+pub static PERCEIVED_LATENCY: AtomicHistogram = AtomicHistogram::new(7, 64);
+
+#[metric(
+    name = "current_slip_ns",
+    description = "Current schedule slip in nanoseconds (rate limiter backlog / rate)"
+)]
+pub static CURRENT_SLIP_NS: Gauge = Gauge::new();
+
+#[metric(
+    name = "requests_dropped",
+    description = "Requests shed by the rate limiter under overload (bucket overflow)"
+)]
+pub static REQUESTS_DROPPED: Gauge = Gauge::new();
+
+#[cfg(test)]
+mod co_tests {
+    use super::slip_ns;
+
+    #[test]
+    fn slip_is_backlog_over_rate_in_ns() {
+        // 1000 overdue tokens at 1000 req/s = 1.0s = 1e9 ns.
+        assert_eq!(slip_ns(1000, 1000), 1_000_000_000);
+        // 50 tokens at 1000 req/s = 50ms.
+        assert_eq!(slip_ns(50, 1000), 50_000_000);
+        // No backlog = no slip.
+        assert_eq!(slip_ns(0, 1000), 0);
+    }
+
+    #[test]
+    fn slip_handles_zero_rate_without_panicking() {
+        // Rate 0 (unlimited / not configured): no schedule, no slip.
+        assert_eq!(slip_ns(1234, 0), 0);
+    }
+}

@@ -127,6 +127,35 @@ impl OutputFormatter for VerboseFormatter {
             results.set_latencies.p9999_us,
             results.set_latencies.max_us,
         );
+        // CO-honest sections — suppressed when there is no rate limit (slip ≡ 0)
+        if results.schedule_slip.p99_us > 0.0 || results.requests_dropped > 0 {
+            tracing::info!(
+                "schedule_slip: p50={:.0}us p90={:.0}us p99={:.0}us p99.9={:.0}us p99.99={:.0}us max={:.0}us",
+                results.schedule_slip.p50_us,
+                results.schedule_slip.p90_us,
+                results.schedule_slip.p99_us,
+                results.schedule_slip.p999_us,
+                results.schedule_slip.p9999_us,
+                results.schedule_slip.max_us,
+            );
+            tracing::info!(
+                "perceived_latency: p50={:.0}us p90={:.0}us p99={:.0}us p99.9={:.0}us p99.99={:.0}us max={:.0}us",
+                results.perceived_latency.p50_us,
+                results.perceived_latency.p90_us,
+                results.perceived_latency.p99_us,
+                results.perceived_latency.p999_us,
+                results.perceived_latency.p9999_us,
+                results.perceived_latency.max_us,
+            );
+            if results.requests_dropped > 0 {
+                tracing::info!(
+                    "overload: {} of {} offered dropped ({:.1}%)",
+                    results.requests_dropped,
+                    results.offered(),
+                    results.overload_pct()
+                );
+            }
+        }
         tracing::info!(
             "connections: {} active, {} failed",
             results.conns_active,

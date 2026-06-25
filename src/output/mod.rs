@@ -146,6 +146,12 @@ pub struct Results {
     pub conns_active: i64,
     pub conns_failed: u64,
     pub conns_total: u64,
+    /// Requests shed by the rate limiter under overload (bucket overflow).
+    pub requests_dropped: u64,
+    /// Schedule slip percentiles (microseconds). Zero when no rate limit.
+    pub schedule_slip: LatencyStats,
+    /// Perceived (arrival-relative, CO-honest) response latency percentiles (µs).
+    pub perceived_latency: LatencyStats,
 }
 
 impl Results {
@@ -194,6 +200,66 @@ impl Results {
             0.0
         }
     }
+
+    /// Total requests offered = sent + dropped.
+    pub fn offered(&self) -> u64 {
+        self.requests + self.requests_dropped
+    }
+
+    /// Percentage of offered requests shed under overload (0.0-100.0).
+    pub fn overload_pct(&self) -> f64 {
+        let offered = self.offered();
+        if offered > 0 {
+            (self.requests_dropped as f64 / offered as f64) * 100.0
+        } else {
+            0.0
+        }
+    }
+}
+
+#[cfg(test)]
+mod overload_tests {
+    use super::Results;
+
+    fn results_with(requests: u64, dropped: u64) -> Results {
+        Results {
+            duration_secs: 1.0,
+            requests,
+            responses: requests,
+            errors: 0,
+            hits: 0,
+            misses: 0,
+            bytes_tx: 0,
+            bytes_rx: 0,
+            get_count: 0,
+            set_count: 0,
+            get_latencies: Default::default(),
+            get_ttfb: Default::default(),
+            set_latencies: Default::default(),
+            backfill_set_count: 0,
+            backfill_set_latencies: Default::default(),
+            conns_active: 0,
+            conns_failed: 0,
+            conns_total: 0,
+            requests_dropped: dropped,
+            schedule_slip: Default::default(),
+            perceived_latency: Default::default(),
+        }
+    }
+
+    #[test]
+    fn offered_is_sent_plus_dropped() {
+        let r = results_with(900, 100);
+        assert_eq!(r.offered(), 1000);
+        assert!((r.overload_pct() - 10.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn overload_pct_zero_when_nothing_offered() {
+        let r = results_with(0, 0);
+        assert_eq!(r.offered(), 0);
+        assert_eq!(r.overload_pct(), 0.0);
+    }
 }
 
 /// A single step in saturation search.
@@ -221,6 +287,14 @@ pub struct SaturationStep {
     pub slo_percentile_label: &'static str,
     /// Measured value at the SLO percentile, in microseconds.
     pub slo_percentile_us: f64,
+    /// Perceived (CO-honest) latency at the SLO-governed percentile, in µs.
+    pub perceived_slo_us: f64,
+    /// Achieved rate fell vs the previous step.
+    pub throughput_rollover: bool,
+    /// Schedule slip first crossed a small threshold at this step.
+    pub slip_onset: bool,
+    /// First SLO breach occurred at this step.
+    pub slo_breach: bool,
 }
 
 /// Results from saturation search.

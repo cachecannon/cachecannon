@@ -335,6 +335,8 @@ fn build_config_from_saturate(args: &SaturateArgs) -> Result<Config, Box<dyn std
         stop_after_failures: 3,
         max_rate: args.max_rate,
         min_throughput_ratio: 0.9,
+        bisect_tolerance: 0.05,
+        max_bisect_steps: 8,
     });
 
     Ok(config)
