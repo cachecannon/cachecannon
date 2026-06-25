@@ -33,6 +33,8 @@ pub struct SaturationSearchState {
     baseline_at: Option<Instant>,
     /// Histogram snapshot at baseline capture (for delta calculation).
     step_histogram: Option<Histogram>,
+    /// Perceived-latency histogram snapshot at baseline capture.
+    step_perceived: Option<Histogram>,
     /// Response count at baseline capture.
     step_responses: u64,
 
@@ -62,6 +64,7 @@ impl SaturationSearchState {
             step_start: Instant::now(),
             baseline_at: None,
             step_histogram: None,
+            step_perceived: None,
             step_responses: 0,
             results: Vec::new(),
             completed: false,
@@ -94,6 +97,7 @@ impl SaturationSearchState {
                 }
                 self.step_responses = metrics::RESPONSES_RECEIVED.value();
                 self.step_histogram = metrics::RESPONSE_LATENCY.load();
+                self.step_perceived = metrics::PERCEIVED_LATENCY.load();
                 self.baseline_at = Some(now);
                 return false;
             }
@@ -112,6 +116,7 @@ impl SaturationSearchState {
 
         // Calculate delta histogram for this step
         let current_histogram = metrics::RESPONSE_LATENCY.load();
+        let current_perceived = metrics::PERCEIVED_LATENCY.load();
         let current_responses = metrics::RESPONSES_RECEIVED.value();
 
         let delta_responses = current_responses.saturating_sub(self.step_responses);
@@ -139,12 +144,33 @@ impl SaturationSearchState {
             _ => (0.0, 0.0, 0.0),
         };
 
+        // Get percentiles from perceived (CO-honest) delta histogram
+        let (perc_p50, perc_p99, perc_p999) = match (&current_perceived, &self.step_perceived) {
+            (Some(current), Some(previous)) => match current.wrapping_sub(previous) {
+                Ok(delta) => (
+                    percentile_from_histogram(&delta, 0.50),
+                    percentile_from_histogram(&delta, 0.99),
+                    percentile_from_histogram(&delta, 0.999),
+                ),
+                Err(e) => {
+                    tracing::warn!("histogram delta computation failed: {e}");
+                    (0.0, 0.0, 0.0)
+                }
+            },
+            (Some(current), None) => (
+                percentile_from_histogram(current, 0.50),
+                percentile_from_histogram(current, 0.99),
+                percentile_from_histogram(current, 0.999),
+            ),
+            _ => (0.0, 0.0, 0.0),
+        };
+
         // Check throughput ratio (detect saturation)
         let throughput_ratio = achieved_rate / self.current_rate as f64;
         let throughput_ok = throughput_ratio >= self.config.min_throughput_ratio;
 
         // Check SLO compliance (latency + throughput)
-        let latency_reason = self.slo_fail_reason(p50, p99, p999);
+        let latency_reason = self.slo_fail_reason(perc_p50, perc_p99, perc_p999);
         let slo_passed = throughput_ok && latency_reason.is_none();
 
         // Build failure reason
@@ -209,6 +235,7 @@ impl SaturationSearchState {
         self.step_start = now;
         self.baseline_at = None;
         self.step_histogram = None;
+        self.step_perceived = None;
         self.step_responses = 0;
 
         true
