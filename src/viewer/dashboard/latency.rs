@@ -35,6 +35,18 @@ pub fn generate(
         "histogram_percentiles([0.5, 0.9, 0.99, 0.999, 0.9999], delete_latency)".to_string(),
     );
 
+    // Schedule slip (queueing the latency clock omits)
+    latency.plot_promql(
+        PlotOpts::scatter("Schedule Slip", "schedule-slip-pct", Unit::Time).with_log_scale(true),
+        "histogram_percentiles([0.5, 0.9, 0.99, 0.999, 0.9999], schedule_slip)".to_string(),
+    );
+
+    // Perceived (arrival-relative, CO-honest) latency
+    latency.plot_promql(
+        PlotOpts::scatter("Perceived", "perceived-latency-pct", Unit::Time).with_log_scale(true),
+        "histogram_percentiles([0.5, 0.9, 0.99, 0.999, 0.9999], perceived_latency)".to_string(),
+    );
+
     view.group(latency);
 
     view
