@@ -287,8 +287,8 @@ pub struct SaturationStep {
     pub slo_percentile_label: &'static str,
     /// Measured value at the SLO percentile, in microseconds.
     pub slo_percentile_us: f64,
-    /// Perceived (CO-honest) p99 latency in microseconds.
-    pub perceived_p99_us: f64,
+    /// Perceived (CO-honest) latency at the SLO-governed percentile, in µs.
+    pub perceived_slo_us: f64,
     /// Achieved rate fell vs the previous step.
     pub throughput_rollover: bool,
     /// Schedule slip first crossed a small threshold at this step.

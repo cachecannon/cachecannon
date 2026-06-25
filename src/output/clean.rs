@@ -650,8 +650,9 @@ impl OutputFormatter for CleanFormatter {
             self.bold(&slo_p_str)
         );
         println!(
-            "Perceived: p99={}",
-            self.bold(&format_latency_us(step.perceived_p99_us))
+            "Perceived: {}={}",
+            step.slo_percentile_label,
+            self.bold(&format_latency_us(step.perceived_slo_us))
         );
         let mut transitions: Vec<&str> = Vec::new();
         if step.throughput_rollover {

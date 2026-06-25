@@ -168,6 +168,11 @@ impl RateSearch {
         }
     }
 
+    /// Whether the search is still in the geometric climb phase.
+    pub fn is_climbing(&self) -> bool {
+        self.phase == SearchPhase::Climb
+    }
+
     fn bisect_probe(&mut self) -> SearchOutcome {
         let mid = self.lo + (self.hi - self.lo) / 2;
         let mid = mid.max(self.lo + 1).min(self.hi.saturating_sub(1)).max(1);
@@ -344,9 +349,12 @@ impl SaturationSearchState {
             (Some(current), None) => percentile_from_histogram(current, 0.99),
             _ => 0.0,
         };
-        let throughput_rollover = self.prev_achieved > 0.0 && achieved_rate < self.prev_achieved;
+        let throughput_rollover = self.search.is_climbing()
+            && self.prev_achieved > 0.0
+            && achieved_rate < self.prev_achieved;
         let slip_onset = !self.slip_seen && slip_p99_us > 1000.0; // first >1ms slip
         let slo_breach = !slo_passed && !self.breach_seen; // first SLO breach only
+        let (_, perceived_slo_us) = self.slo_percentile(perc_p50, perc_p99, perc_p999);
 
         // Record step
         let (slo_percentile_label, slo_percentile_us) = self.slo_percentile(p50, p99, p999);
@@ -362,7 +370,7 @@ impl SaturationSearchState {
             slo_threshold_us: self.slo_threshold_us(),
             slo_percentile_label,
             slo_percentile_us,
-            perceived_p99_us: perc_p99,
+            perceived_slo_us,
             throughput_rollover,
             slip_onset,
             slo_breach,
