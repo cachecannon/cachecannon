@@ -23,8 +23,8 @@ pub struct SaturationSearchState {
     current_rate: u64,
     /// Last rate that met SLO.
     last_good_rate: Option<u64>,
-    /// Consecutive SLO failures.
-    consecutive_failures: u32,
+    /// Rate-search state machine (climb + bisect).
+    search: RateSearch,
     /// When the current step started (i.e. when the new rate was applied).
     step_start: Instant,
     /// When the measurement baseline was captured (set once the drain window
@@ -46,6 +46,129 @@ pub struct SaturationSearchState {
     header_printed: bool,
 }
 
+/// Phase of the rate search.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SearchPhase {
+    /// Geometric climb until the first SLO failure.
+    Climb,
+    /// Bisecting [lo, hi] to pin the knee.
+    Bisect,
+}
+
+/// What to do after measuring the current rate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SearchOutcome {
+    /// Measure this next rate.
+    Probe(u64),
+    /// Search finished; `knee` is the highest rate that met SLO (if any).
+    Done { knee: Option<u64> },
+}
+
+/// Pure rate-search state machine: geometric climb to the first failure,
+/// then bisection between the last good rate and the failed rate until the
+/// interval closes within `bisect_tolerance` or `max_bisect_steps` is hit.
+pub struct RateSearch {
+    phase: SearchPhase,
+    current_rate: u64,
+    last_good: Option<u64>,
+    lo: u64,
+    hi: u64,
+    bisect_steps: u32,
+    step_multiplier: f64,
+    max_rate: u64,
+    bisect_tolerance: f64,
+    max_bisect_steps: u32,
+}
+
+impl RateSearch {
+    pub fn new(
+        start_rate: u64,
+        step_multiplier: f64,
+        max_rate: u64,
+        bisect_tolerance: f64,
+        max_bisect_steps: u32,
+    ) -> Self {
+        Self {
+            phase: SearchPhase::Climb,
+            current_rate: start_rate,
+            last_good: None,
+            lo: 0,
+            hi: 0,
+            bisect_steps: 0,
+            step_multiplier,
+            max_rate,
+            bisect_tolerance,
+            max_bisect_steps,
+        }
+    }
+
+    /// The rate currently being measured.
+    pub fn current_rate(&self) -> u64 {
+        self.current_rate
+    }
+
+    /// Record the SLO result for `current_rate` and decide the next move.
+    pub fn advance(&mut self, passed: bool) -> SearchOutcome {
+        if passed {
+            self.last_good = Some(self.current_rate);
+        }
+        match self.phase {
+            SearchPhase::Climb => {
+                if !passed {
+                    // First failure: bisect between last good and here.
+                    let lo = self.last_good.unwrap_or(0);
+                    self.lo = lo;
+                    self.hi = self.current_rate;
+                    self.phase = SearchPhase::Bisect;
+                    return self.bisect_probe();
+                }
+                // Climb to the next rate; cap at max_rate, terminate there.
+                let next = ((self.current_rate as f64) * self.step_multiplier) as u64;
+                if next >= self.max_rate {
+                    if self.current_rate >= self.max_rate {
+                        return SearchOutcome::Done {
+                            knee: self.last_good,
+                        };
+                    }
+                    self.current_rate = self.max_rate;
+                    return SearchOutcome::Probe(self.current_rate);
+                }
+                self.current_rate = next.max(self.current_rate + 1);
+                SearchOutcome::Probe(self.current_rate)
+            }
+            SearchPhase::Bisect => {
+                if passed {
+                    self.lo = self.current_rate;
+                } else {
+                    self.hi = self.current_rate;
+                }
+                self.bisect_steps += 1;
+                let width = if self.hi > 0 {
+                    (self.hi - self.lo) as f64 / self.hi as f64
+                } else {
+                    0.0
+                };
+                if width <= self.bisect_tolerance
+                    || self.bisect_steps >= self.max_bisect_steps
+                    || self.hi.saturating_sub(self.lo) <= 1
+                {
+                    return SearchOutcome::Done {
+                        knee: if self.lo > 0 { Some(self.lo) } else { self.last_good },
+                    };
+                }
+                self.bisect_probe()
+            }
+        }
+    }
+
+    fn bisect_probe(&mut self) -> SearchOutcome {
+        let mid = self.lo + (self.hi - self.lo) / 2;
+        let mid = mid.max(self.lo + 1).min(self.hi.saturating_sub(1)).max(1);
+        self.current_rate = mid;
+        SearchOutcome::Probe(mid)
+    }
+}
+
 impl SaturationSearchState {
     /// Create a new saturation search state.
     pub fn new(config: SaturationSearch, ratelimiter: Arc<Ratelimiter>) -> Self {
@@ -63,11 +186,17 @@ impl SaturationSearchState {
         }
 
         Self {
-            config,
+            config: config.clone(),
             ratelimiter,
             current_rate: start_rate,
             last_good_rate: None,
-            consecutive_failures: 0,
+            search: RateSearch::new(
+                start_rate,
+                config.step_multiplier,
+                config.max_rate,
+                config.bisect_tolerance,
+                config.max_bisect_steps,
+            ),
             step_start: Instant::now(),
             baseline_at: None,
             step_histogram: None,
@@ -211,30 +340,19 @@ impl SaturationSearchState {
         formatter.print_saturation_step(&step);
         self.results.push(step);
 
-        // Update state based on SLO result
-        if slo_passed {
-            self.last_good_rate = Some(self.current_rate);
-            self.consecutive_failures = 0;
-        } else {
-            self.consecutive_failures += 1;
+        // Drive the rate-search state machine.
+        match self.search.advance(slo_passed) {
+            SearchOutcome::Done { knee } => {
+                self.last_good_rate = knee;
+                self.completed = true;
+                return true;
+            }
+            SearchOutcome::Probe(next_rate) => {
+                self.current_rate = next_rate;
+                self.ratelimiter.set_rate(next_rate);
+                metrics::TARGET_RATE.set(next_rate as i64);
+            }
         }
-
-        // Check if we should stop
-        if self.consecutive_failures >= self.config.stop_after_failures {
-            self.completed = true;
-            return true;
-        }
-
-        // Advance to next rate
-        let next_rate = (self.current_rate as f64 * self.config.step_multiplier) as u64;
-        if next_rate > self.config.max_rate {
-            self.completed = true;
-            return true;
-        }
-
-        self.current_rate = next_rate;
-        self.ratelimiter.set_rate(next_rate);
-        metrics::TARGET_RATE.set(next_rate as i64);
 
         // Reset step tracking. The new rate just took effect; the baseline
         // will be captured after `drain_window` has elapsed so old-rate
@@ -436,5 +554,58 @@ mod tests {
             format_duration_short(Duration::from_micros(1_500_000)),
             "1.5s"
         );
+    }
+}
+
+#[cfg(test)]
+mod rate_search_tests {
+    use super::{RateSearch, SearchOutcome};
+
+    // Oracle: every rate <= `knee` passes, every rate above fails.
+    fn run_to_completion(knee: u64) -> Option<u64> {
+        let mut s = RateSearch::new(
+            /* start_rate */ 1000,
+            /* step_multiplier */ 2.0,
+            /* max_rate */ 1_000_000,
+            /* bisect_tolerance */ 0.05,
+            /* max_bisect_steps */ 8,
+        );
+        let mut rate = 1000u64;
+        loop {
+            let passed = rate <= knee;
+            match s.advance(passed) {
+                SearchOutcome::Probe(next) => rate = next,
+                SearchOutcome::Done { knee } => return knee,
+            }
+        }
+    }
+
+    #[test]
+    fn converges_near_the_true_knee() {
+        let found = run_to_completion(30_000).expect("a knee");
+        let rel = (found as f64 - 30_000.0).abs() / 30_000.0;
+        assert!(rel <= 0.05, "found {found}, rel error {rel}");
+        assert!(found <= 30_000, "reported knee must actually pass SLO");
+    }
+
+    #[test]
+    fn stops_within_max_bisect_steps() {
+        let mut s = RateSearch::new(1000, 2.0, 1_000_000, 0.0, 4);
+        let mut rate = 1000u64;
+        let mut probes = 0;
+        loop {
+            probes += 1;
+            assert!(probes < 100, "must terminate");
+            match s.advance(rate <= 12_345) {
+                SearchOutcome::Probe(next) => rate = next,
+                SearchOutcome::Done { .. } => break,
+            }
+        }
+    }
+
+    #[test]
+    fn climb_to_max_rate_without_failure_reports_max() {
+        let found = run_to_completion(10_000_000);
+        assert_eq!(found, Some(1_000_000));
     }
 }
