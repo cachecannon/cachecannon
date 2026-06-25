@@ -596,10 +596,7 @@ pub fn run_benchmark_full(
             baseline_backfill_set_latency = metrics::BACKFILL_SET_LATENCY.load();
             baseline_schedule_slip = metrics::SCHEDULE_SLIP.load();
             baseline_perceived = metrics::PERCEIVED_LATENCY.load();
-            baseline_requests_dropped = ratelimiter
-                .as_ref()
-                .map(|rl| rl.dropped())
-                .unwrap_or(0);
+            baseline_requests_dropped = ratelimiter.as_ref().map(|rl| rl.dropped()).unwrap_or(0);
 
             last_responses = baseline_responses;
             last_errors = baseline_errors;

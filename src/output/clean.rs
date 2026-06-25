@@ -421,7 +421,10 @@ impl OutputFormatter for CleanFormatter {
             );
             println!(
                 "{}",
-                format_latency_row(&self.cyan(&pad_name("perceived")), &results.perceived_latency)
+                format_latency_row(
+                    &self.cyan(&pad_name("perceived")),
+                    &results.perceived_latency
+                )
             );
             if results.requests_dropped > 0 {
                 println!(

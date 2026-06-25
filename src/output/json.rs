@@ -328,8 +328,7 @@ impl OutputFormatter for JsonFormatter {
             } else {
                 None
             },
-            perceived_latency: if results.schedule_slip.p99_us > 0.0
-                || results.requests_dropped > 0
+            perceived_latency: if results.schedule_slip.p99_us > 0.0 || results.requests_dropped > 0
             {
                 Some(LatencyOutput {
                     count: 0,

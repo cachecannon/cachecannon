@@ -156,7 +156,11 @@ impl RateSearch {
                     || self.hi.saturating_sub(self.lo) <= 1
                 {
                     return SearchOutcome::Done {
-                        knee: if self.lo > 0 { Some(self.lo) } else { self.last_good },
+                        knee: if self.lo > 0 {
+                            Some(self.lo)
+                        } else {
+                            self.last_good
+                        },
                     };
                 }
                 self.bisect_probe()
@@ -599,10 +603,8 @@ mod rate_search_tests {
     // Oracle: every rate <= `knee` passes, every rate above fails.
     fn run_to_completion(knee: u64) -> Option<u64> {
         let mut s = RateSearch::new(
-            /* start_rate */ 1000,
-            /* step_multiplier */ 2.0,
-            /* max_rate */ 1_000_000,
-            /* bisect_tolerance */ 0.05,
+            /* start_rate */ 1000, /* step_multiplier */ 2.0,
+            /* max_rate */ 1_000_000, /* bisect_tolerance */ 0.05,
             /* max_bisect_steps */ 8,
         );
         let mut rate = 1000u64;
@@ -662,7 +664,10 @@ mod rate_search_tests {
                 }
             };
             if let Some(k) = found {
-                assert!(k <= knee, "reported knee {k} did not pass for true knee {knee}");
+                assert!(
+                    k <= knee,
+                    "reported knee {k} did not pass for true knee {knee}"
+                );
             }
         }
     }
