@@ -8,6 +8,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Changed
+- Migrate to ringline 0.3 (clients: ringline-redis/-memcache 0.5, ringline-ping 0.4).
+  `ringline::Config` is now opaque, so the runtime config is built via
+  `ConfigBuilder` (`.workers()/.tcp_nodelay()/.tls_client()/.build()`), and
+  `TlsClientConfig` is constructed via `::new()`.
 - Memcache client now honors `batch_size` for fire/recv coalescing (wires
   `max_batch_size` from `effective_batch_size`, mirroring the redis client).
 - Bump `ringline-redis`/`ringline-memcache` to 0.4 (memcache coalescing,
