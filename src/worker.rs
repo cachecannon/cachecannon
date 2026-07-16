@@ -1269,10 +1269,9 @@ fn map_resp_op(op: ringline_redis::CompletedOp) -> RequestResult {
 fn parse_resp_redirect(msg: &str) -> Option<resp_proto::Redirect> {
     let (kind, rest) = if let Some(rest) = msg.strip_prefix("MOVED ") {
         (resp_proto::RedirectKind::Moved, rest)
-    } else if let Some(rest) = msg.strip_prefix("ASK ") {
-        (resp_proto::RedirectKind::Ask, rest)
     } else {
-        return None;
+        let rest = msg.strip_prefix("ASK ")?;
+        (resp_proto::RedirectKind::Ask, rest)
     };
 
     let mut parts = rest.splitn(2, ' ');
