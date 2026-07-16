@@ -7,16 +7,58 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.16] - 2026-07-16
+
+### Added
+- Coordinated-omission honesty for rate-limited and saturation runs. New
+  `schedule_slip` and `perceived_latency` histograms (plus `current_slip_ns`
+  and `requests_dropped`) derive the queueing time the per-request latency
+  clock omits from the rate limiter backlog (`available()/rate`), where
+  `perceived = response_latency + slip`. Surfaced in the clean/verbose/json
+  reports and the viewer latency dashboard, and suppressed on
+  non-rate-limited runs (existing latency metrics are unchanged). (#99)
+- Overload accounting: requests shed by the rate limiter under sustained
+  overload are counted (`requests_dropped`) and reported as
+  "Overload: N of M offered dropped". (#99)
+- Saturation search bisect refinement: after the geometric climb finds the
+  first SLO failure, the knee is pinned by bisection
+  (`saturation_search.bisect_tolerance` / `max_bisect_steps`). Transition
+  flags (throughput rollover, slip onset, first SLO breach) mark where
+  saturation set in. (#99)
+
 ### Changed
+- Migrate to ringline 0.4 (clients: ringline-redis/-memcache 0.6,
+  ringline-ping 0.5). Rig-validated: fixes a hard worker stall with values
+  over 1MiB — on ringline 0.3 an oversized GET response wedged the whole
+  worker (throughput to zero on all connections, workers failing to shut
+  down); on 0.4 the failure is contained to the affected connection.
+
+### Fixed
+- Redis (RESP) values over 1MiB now work: require ringline-redis 0.6.1,
+  which lifts the client's RESP bulk-string parse cap (resp-proto
+  `DEFAULT_MAX_BULK_STRING_LEN` = 1MiB) that made every oversized GET fail
+  the connection. Rig-validated A/B at 4MiB values: 0.6.0 → 0% hit rate
+  with ~47 reconnects/s; 0.6.1 → 100% hit rate, stable connections. Note:
+  memcache values remain capped at 1MiB by the client's hard-coded
+  `MAX_VALUE_LEN` (matching memcached's default `-I` limit) pending a
+  configurable limit upstream.
+- Saturation search now evaluates its SLO against perceived (CO-honest)
+  latency, so it stops at the true knee instead of climbing on artificially
+  low send-relative tails. Displayed per-step percentiles remain
+  send-relative. (#99)
 - Migrate to ringline 0.3 (clients: ringline-redis/-memcache 0.5, ringline-ping 0.4).
   `ringline::Config` is now opaque, so the runtime config is built via
   `ConfigBuilder` (`.workers()/.tcp_nodelay()/.tls_client()/.build()`), and
-  `TlsClientConfig` is constructed via `::new()`.
+  `TlsClientConfig` is constructed via `::new()`. (#98)
 - Memcache client now honors `batch_size` for fire/recv coalescing (wires
-  `max_batch_size` from `effective_batch_size`, mirroring the redis client).
+  `max_batch_size` from `effective_batch_size`, mirroring the redis client). (#97)
 - Bump `ringline-redis`/`ringline-memcache` to 0.4 (memcache coalescing,
   `zc_threshold` guard fold, zero-allocation encode paths). Rig-validated:
-  memcache GET coalescing ~10× at P16/64B.
+  memcache GET coalescing ~10× at P16/64B. (#97)
+
+### Deprecated
+- `saturation_search.stop_after_failures` is deprecated and ignored;
+  termination is now governed by `bisect_tolerance` / `max_bisect_steps`. (#99)
 
 ## [0.0.15] - 2026-06-10
 
