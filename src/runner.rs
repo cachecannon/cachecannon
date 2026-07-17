@@ -244,6 +244,23 @@ pub fn run_benchmark_full(
         .pin_to_core(false) // We pin in create_for_worker instead
         .core_offset(0)
         .tcp_nodelay(true);
+    // Provided recv-buffer sizing: rig-measured (2026-07, systemslab)
+    // large-value GET throughput tracks per-CQE buffer size, not ring
+    // capacity — 16KiB buffers cap ~2.4 Gbps at 16MB values vs ~4.9 Gbps
+    // at 256KiB, with entry count irrelevant (256 vs 4096 identical).
+    // Derive the buffer size from the configured value length so the
+    // generator is never the bottleneck; small-value workloads keep
+    // ringline's default (256 × 16KiB = 4MiB/worker). Worst-case pinned
+    // memory at 256 × 256KiB is 64MiB/worker, paid only for ≥1MiB values.
+    let value_len = config.workload.values.length;
+    if value_len >= 64 * 1024 {
+        let buffer_size: u32 = if value_len >= 1024 * 1024 {
+            256 * 1024
+        } else {
+            64 * 1024
+        };
+        ringline_builder = ringline_builder.recv_buffer(256, buffer_size);
+    }
     if let Some(tls_client) = tls_client {
         ringline_builder = ringline_builder.tls_client(tls_client);
     }
@@ -741,6 +758,12 @@ pub fn run_benchmark_full(
         return Err("prefill failed: timed out or stalled".into());
     }
 
+    // Sample the active-connections gauge BEFORE initiating shutdown:
+    // teardown closes connections (each close decrements the gauge), so a
+    // post-join read reports whatever subset happened to close cleanly
+    // rather than the connection count the benchmark actually ran with.
+    let active = metrics::CONNECTIONS_ACTIVE.value();
+
     // Shutdown ringline workers
     shutdown_handle.shutdown();
 
@@ -772,7 +795,6 @@ pub fn run_benchmark_full(
     let get_count = metrics::GET_COUNT.value() - baseline_get_count;
     let set_count = metrics::SET_COUNT.value() - baseline_set_count;
     let backfill_set_count = metrics::BACKFILL_SET_COUNT.value() - baseline_backfill_set_count;
-    let active = metrics::CONNECTIONS_ACTIVE.value();
     let failed = conn_failures;
     let elapsed_secs = actual_duration.as_secs_f64();
 
