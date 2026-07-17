@@ -7,21 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.17] - 2026-07-17
+
 ### Changed
 - Provided recv-buffer size is now derived from `workload.values.length`
   (64KiB buffers for ≥64KiB values, 256KiB for ≥1MiB; ringline default
   otherwise). Rig-measured: large-value GET throughput tracks per-CQE
   buffer size, not ring capacity — 16KiB buffers cap ~2.4 Gbps at 16MB
   values vs ~4.9 Gbps at 256KiB. No user-facing knob; the generator
-  should never be the bottleneck.
-- Require ringline-memcache 0.6.1: the client-side 1MiB `MAX_VALUE_LEN`
-  send cap was removed upstream, so memcache values over 1MiB now go on
-  the wire (the server's `-I` limit is authoritative).
+  should never be the bottleneck. (#104)
+- Upgrade to the ringline 0.5.0 coordinated release: ringline 0.5,
+  ringline-redis/-memcache 0.6.2, ringline-ping 0.5.1. Pulls in the
+  ENOBUFS fallback recv (graceful degradation when a provided recv ring
+  is smaller than one response — rig-validated 7–13× on deliberately
+  starved rings; dormant on the auto-derived buffers above) and the
+  `NeedAtLeast` accumulator reserve-once path (RESP bulk-length header
+  pre-sizes the recv accumulator, eliminating the doubling-regrowth
+  cascade on multi-MB values). Memcache values over 1MiB now go on the
+  wire (the server's `-I` limit is authoritative). (#105)
 
 ### Fixed
 - The final `connections N active` report sampled the gauge after worker
   shutdown had begun, under-reporting by however many connections had
-  already torn down. The gauge is now sampled before shutdown.
+  already torn down. The gauge is now sampled before shutdown. (#104)
 
 ## [0.0.16] - 2026-07-16
 
