@@ -244,6 +244,31 @@ pub fn run_benchmark_full(
         .pin_to_core(false) // We pin in create_for_worker instead
         .core_offset(0)
         .tcp_nodelay(true);
+
+    // Scale the provided-buffer recv ring to the workload's value size.
+    // Ringline's default (256 buffers x 16 KiB = 4 MiB per worker) is sized
+    // for small responses; a single multi-MiB GET response cycles through the
+    // whole ring several times, throttling recv on ENOBUFS between refills.
+    // Budget: enough buffers for every connection on a worker to hold a full
+    // pipeline of responses in flight, with 2x headroom. Values <= 1 MiB keep
+    // the stock configuration: 16 KiB buffers measurably beat 64 KiB there
+    // (~4% req/s, ~10% p99 at 128 KiB), and the default ring is deep enough.
+    // Rig-measured (c8gn.16xlarge pair, 16 MiB values, -c 32 -P 1 -t 16):
+    // ~59-73 Gbps RX with the default ring vs ~111-123 Gbps with the scaled
+    // ring (roughly 2x req/s, p50 halved).
+    let value_len = config.workload.values.length;
+    if value_len > (1 << 20) {
+        let recv_buffer_size: u32 = 65536;
+        let bufs_per_response = (value_len + 64) // RESP bulk-string framing overhead
+            .div_ceil(recv_buffer_size as usize)
+            .max(1);
+        let conns_per_worker = total_connections.div_ceil(num_threads.max(1)).max(1);
+        let recv_ring_size: u16 =
+            (bufs_per_response * conns_per_worker * config.connection.pipeline_depth.max(1) * 2)
+                .next_power_of_two()
+                .clamp(256, 32768) as u16;
+        ringline_builder = ringline_builder.recv_buffer(recv_ring_size, recv_buffer_size);
+    }
     if let Some(tls_client) = tls_client {
         ringline_builder = ringline_builder.tls_client(tls_client);
     }
