@@ -1914,9 +1914,9 @@ dependencies = [
 
 [[package]]
 name = "ringline-memcache"
-version = "0.6.0"
+version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "11eca8b93b984cac700b3faf50caef22cd6859ff20bb7ca7fc23fd49533b5dcc"
+checksum = "08b5df3956c0a7d4afda8577d049714aa084029e5faf0c1ea35dfd1ae6797365"
 dependencies = [
  "bytes",
  "histogram 0.11.5",
