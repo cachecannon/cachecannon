@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.18] - 2026-07-17
+
+### Changed
+- Upgrade to the ringline 0.5.1 coordinated release: ringline 0.5.1,
+  ringline-redis/-memcache 0.6.3, ringline-ping 0.5.2. Fixes an
+  O(N·K) re-copy in the recv accumulator (ringline #279): a large
+  response streamed across many recv completions was re-copying the
+  whole accumulated buffer on every chunk, and the reserve-once path
+  added in the previous release was latently unreachable behind it.
+  Rig-measured in cachecannon (systemslab, loopback, GET-only 100%
+  hit, 8 conns): 64MiB values ~4.2 → ~5.6 Gbps (+33%), GET p50
+  2.66s → 2.08s.
+
 ## [0.0.17] - 2026-07-17
 
 ### Changed
