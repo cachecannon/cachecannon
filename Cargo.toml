@@ -48,7 +48,7 @@ http = "1"
 ctrlc = { version = "3", features = ["termination"] }
 
 # I/O event loop (io_uring on Linux, mio on other platforms)
-ringline = "0.4"
+ringline = "0.5"
 
 # Consistent hashing
 ketama = "0.0.1"
@@ -62,11 +62,11 @@ resp-proto = { version = "0.0.1", features = ["resp3"] }
 # Client crates
 # 0.6.1 minimum: 0.6.0's RESP parser caps bulk strings at 1MiB, so larger
 # GET responses fail the connection (0% hits + reconnect churn).
-ringline-redis = "0.6.1"
+ringline-redis = "0.6.2"
 # 0.6.1 minimum: 0.6.0 rejects values over 1MiB at send time (MAX_VALUE_LEN);
 # 0.6.1 removes the cap and lets the server enforce its own -I limit.
-ringline-memcache = "0.6.1"
-ringline-ping = "0.5"
+ringline-memcache = "0.6.2"
+ringline-ping = "0.5.1"
 
 # Metrics
 histogram = "1.1"
@@ -91,10 +91,10 @@ rand_xoshiro = "0.7"
 
 # Kernel SO_TIMESTAMPING support is Linux-only.
 [target.'cfg(target_os = "linux")'.dependencies]
-ringline = { version = "0.4", features = ["timestamps"] }
-ringline-redis = { version = "0.6.1", features = ["timestamps"] }
-ringline-memcache = { version = "0.6.1", features = ["timestamps"] }
-ringline-ping = { version = "0.5", features = ["timestamps"] }
+ringline = { version = "0.5", features = ["timestamps"] }
+ringline-redis = { version = "0.6.2", features = ["timestamps"] }
+ringline-memcache = { version = "0.6.2", features = ["timestamps"] }
+ringline-ping = { version = "0.5.1", features = ["timestamps"] }
 
 # Jemalloc allocator (glibc only — not needed on musl/macOS/Windows).
 tikv-jemallocator = "0.6"
