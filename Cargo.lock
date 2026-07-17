@@ -483,7 +483,7 @@ checksum = "8ae3f5d315924270530207e2a68396c3cc547f6dca3fbdca317cfb1a51edb593"
 
 [[package]]
 name = "cachecannon"
-version = "0.0.18-alpha.0"
+version = "0.0.18"
 dependencies = [
  "arrow",
  "axum",
@@ -1896,9 +1896,9 @@ dependencies = [
 
 [[package]]
 name = "ringline"
-version = "0.5.0"
+version = "0.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8f3d3ce9057758ee019de72551b9ba3c1e068f0048f6ccbc052c3f34da241562"
+checksum = "4c699f7fcaa5d46fbe1da5ac108630ee83395ba186fd5dcef183559243cb4bdb"
 dependencies = [
  "bytes",
  "crossbeam-channel",
@@ -1914,9 +1914,9 @@ dependencies = [
 
 [[package]]
 name = "ringline-memcache"
-version = "0.6.2"
+version = "0.6.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bc192d7006304aa5b433a05cc14d6d8c373bd87dd4aa1257d4831a19047f1916"
+checksum = "e3fda9dea61dd5c7ad91284e9f5dcd3f1155c034c8458d47481de66901ccb63c"
 dependencies = [
  "bytes",
  "histogram 0.11.5",
@@ -1930,9 +1930,9 @@ dependencies = [
 
 [[package]]
 name = "ringline-ping"
-version = "0.5.1"
+version = "0.5.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "93cc7ebcf203fd15da6923b0455a9157ec25601e10a4a6055ba15474e60e1a6b"
+checksum = "17dd72b494584a46bb9dcfbe619a7ddad39ecc4c92d99333937477ddbea7bb04"
 dependencies = [
  "histogram 0.11.5",
  "libc",
@@ -1943,9 +1943,9 @@ dependencies = [
 
 [[package]]
 name = "ringline-redis"
-version = "0.6.2"
+version = "0.6.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "361fe9c62087f65533dd11545bbb15403ecb854583ffb90585518ce04dca67f6"
+checksum = "c66aca6c5e8305935bfc0e770d05617f671fd18ab170a4f47fc2059c5d17e780"
 dependencies = [
  "bytes",
  "histogram 0.11.5",
