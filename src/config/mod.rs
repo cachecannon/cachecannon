@@ -511,16 +511,17 @@ impl Config {
 
         // #286 zero-copy borrow-GET is a GET-only running-phase path: the recv
         // loop routes every non-prefill response through `recv_get_discard()`,
-        // which only decodes GETs. Any SET/DEL in the running mix would desync.
-        // (Prefill SETs are fine — a separate, drained phase.)
+        // which only decodes GETs. The command roll is `roll < get_ratio`, so
+        // `get = 100` fires a GET every time regardless of the set/delete
+        // ratios — that alone is the GET-only condition. (Prefill SETs are a
+        // separate, drained phase; backfill-on-miss would fire a running-phase
+        // SET, so it must be off.)
         if self.connection.zerocopy_get
-            && (self.workload.commands.get != 100
-                || self.workload.commands.set != 0
-                || self.workload.commands.delete != 0)
+            && (self.workload.commands.get < 100 || self.workload.backfill_on_miss)
         {
             return Err(ConfigError::Validation(
                 "connection.zerocopy_get requires a GET-only running workload \
-                 (commands.get = 100, set = 0, delete = 0)"
+                 (commands.get = 100 and backfill_on_miss = false)"
                     .to_string(),
             ));
         }
