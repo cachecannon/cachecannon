@@ -827,6 +827,17 @@ async fn resp_connection_task(state: Arc<SharedWorkerState>, endpoint_idx: usize
         #[cfg(target_os = "linux")]
         let builder =
             builder.kernel_timestamps(matches!(config.timestamps.mode, TimestampMode::Software));
+        // #286 validation: opt into zero-copy segmented recv for GET values.
+        // The value is drained as borrowed segments (Mode B) and only its
+        // length is surfaced in `CompletedOp::Get` — no accumulator copy.
+        // Gated behind the `segmented-recv` feature since `recv_streaming()`
+        // only exists on the ringline-redis segmented-recv branch.
+        #[cfg(feature = "segmented-recv")]
+        let builder = if config.connection.zerocopy_get {
+            builder.recv_streaming()
+        } else {
+            builder
+        };
         let mut client = builder
             .max_batch_size(config.connection.effective_batch_size())
             .build();
@@ -1168,6 +1179,16 @@ const PREFILL_MARKER: u64 = 1 << 62;
 const BACKFILL_QUEUE_CAP: usize = 1024;
 
 /// Map a ringline-redis `CompletedOp` to a `RequestResult`.
+///
+/// #286 coordination note: the `Get` arm matches only on the
+/// `Result<Option<_>, _>` shape (Some = hit) and never touches the value
+/// payload — rx-byte accounting lives inside ringline-redis. So the
+/// zero-copy borrow-GET (`.recv_streaming()`) needs NO change here **iff**
+/// it reuses `CompletedOp::Get` with the value surfaced as a length rather
+/// than `Bytes` (the `Ok(Some(_))` pattern ignores the inner type). If it
+/// instead introduces a distinct `CompletedOp` variant, add a matching arm
+/// (the trailing `_ => unreachable!` would otherwise panic under the
+/// `segmented-recv` feature).
 fn map_resp_op(op: ringline_redis::CompletedOp) -> RequestResult {
     match op {
         ringline_redis::CompletedOp::Get {

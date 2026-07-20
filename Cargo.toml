@@ -102,6 +102,12 @@ tikv-jemalloc-ctl = { version = "0.6", features = ["stats"] }
 
 [features]
 default = []
+# #286 validation: enables the zero-copy segmented-recv GET path
+# (`connection.zerocopy_get`). Requires a ringline-redis that exposes
+# `.recv_streaming()` (the segmented-recv branch), wired via [patch.crates-io]
+# in the validation build. Off by default so releases build against the
+# published ringline-redis.
+segmented-recv = []
 
 [[bin]]
 name = "cachecannon"

@@ -122,6 +122,16 @@ pub struct Connection {
     /// Clamped to `[1, pipeline_depth]` at use.
     #[serde(default)]
     pub batch_size: Option<usize>,
+    /// Consume GET responses via ringline-redis's zero-copy segmented recv
+    /// (Mode B borrow-and-discard) instead of the accumulator-copy path.
+    /// Values are never retained by cachecannon (the load generator records
+    /// only length/hit), so the received bytes never need to escape the
+    /// runtime — eliminating the mandatory provided-buffer→accumulator copy
+    /// on large responses. Requires the `segmented-recv` build feature and a
+    /// ringline-redis that exposes the borrow-GET (`.recv_streaming()`);
+    /// ignored otherwise. Validation-only for #286.
+    #[serde(default)]
+    pub zerocopy_get: bool,
     #[serde(default = "default_connect_timeout", with = "humantime_serde")]
     pub connect_timeout: Duration,
     #[serde(default = "default_request_timeout", with = "humantime_serde")]
@@ -164,6 +174,7 @@ impl Default for Connection {
             pool_size: None,
             pipeline_depth: default_pipeline_depth(),
             batch_size: None,
+            zerocopy_get: false,
             connect_timeout: default_connect_timeout(),
             request_timeout: default_request_timeout(),
             request_distribution: RequestDistribution::default(),
