@@ -827,17 +827,14 @@ async fn resp_connection_task(state: Arc<SharedWorkerState>, endpoint_idx: usize
         #[cfg(target_os = "linux")]
         let builder =
             builder.kernel_timestamps(matches!(config.timestamps.mode, TimestampMode::Software));
-        // #286 validation: opt into zero-copy segmented recv for GET values.
-        // The value is drained as borrowed segments (Mode B) and only its
-        // length is surfaced in `CompletedOp::Get` — no accumulator copy.
-        // Gated behind the `segmented-recv` feature since `recv_streaming()`
-        // only exists on the ringline-redis segmented-recv branch.
-        #[cfg(feature = "segmented-recv")]
-        let builder = if config.connection.zerocopy_get {
-            builder.recv_streaming()
-        } else {
-            builder
-        };
+        // #286 validation: zero-copy segmented recv for GET values is NOT a
+        // builder toggle — it lives in the recv method. `fire_get` is
+        // unchanged; when `zerocopy_get` is set the recv loop calls
+        // `client.recv_get_discard()` (Mode B borrow-and-discard) instead of
+        // `client.recv()`, so the value is drained as borrowed segments and
+        // only its length is surfaced (no accumulator copy). Metrics stay
+        // identical: latency/rx-bytes are recorded by the `on_result`
+        // callback above, which `recv_get_discard` still fires.
         let mut client = builder
             .max_batch_size(config.connection.effective_batch_size())
             .build();
@@ -1104,20 +1101,57 @@ async fn drive_resp_workload(
             continue;
         }
 
-        let op = match client.recv().await {
-            Ok(op) => op,
-            Err(ringline_redis::Error::ConnectionClosed) => {
-                requeue_drained_prefill(&state.task_state, key_buf, prefill_in_flight.drain(..));
-                return Err(DisconnectReason::Eof);
-            }
-            Err(_) => {
-                requeue_drained_prefill(&state.task_state, key_buf, prefill_in_flight.drain(..));
-                return Err(DisconnectReason::RecvError);
-            }
-        };
+        // #286 zero-copy borrow-GET (Mode B): past prefill (which fires SETs),
+        // a GET-only running workload's responses are all GETs, so drain each
+        // value as borrowed segments via `recv_get_discard()` — no accumulator
+        // copy. Prefill SETs and any non-GET response keep the normal typed
+        // `recv()`. Config validation guarantees GET-only when zerocopy_get is
+        // set, so `phase != Prefill` is a sufficient guard here.
+        #[cfg(feature = "segmented-recv")]
+        let use_borrow_get = config.connection.zerocopy_get && phase != Phase::Prefill;
+        #[cfg(not(feature = "segmented-recv"))]
+        let use_borrow_get = false;
 
-        // Map CompletedOp to RequestResult
-        let result = map_resp_op(op);
+        let result = if use_borrow_get {
+            #[cfg(feature = "segmented-recv")]
+            {
+                match client.recv_get_discard().await {
+                    Ok(meta) => map_getmeta(meta),
+                    Err(ringline_redis::Error::ConnectionClosed) => {
+                        requeue_drained_prefill(
+                            &state.task_state,
+                            key_buf,
+                            prefill_in_flight.drain(..),
+                        );
+                        return Err(DisconnectReason::Eof);
+                    }
+                    Err(_) => {
+                        requeue_drained_prefill(
+                            &state.task_state,
+                            key_buf,
+                            prefill_in_flight.drain(..),
+                        );
+                        return Err(DisconnectReason::RecvError);
+                    }
+                }
+            }
+            #[cfg(not(feature = "segmented-recv"))]
+            unreachable!("use_borrow_get is always false without the segmented-recv feature")
+        } else {
+            let op = match client.recv().await {
+                Ok(op) => op,
+                Err(ringline_redis::Error::ConnectionClosed) => {
+                    requeue_drained_prefill(&state.task_state, key_buf, prefill_in_flight.drain(..));
+                    return Err(DisconnectReason::Eof);
+                }
+                Err(_) => {
+                    requeue_drained_prefill(&state.task_state, key_buf, prefill_in_flight.drain(..));
+                    return Err(DisconnectReason::RecvError);
+                }
+            };
+            // Map CompletedOp to RequestResult
+            map_resp_op(op)
+        };
 
         // Handle prefill tracking. The PREFILL_MARKER bit in user_data
         // identifies prefill SETs unambiguously across phases, so we don't
@@ -1177,6 +1211,31 @@ const PREFILL_MARKER: u64 = 1 << 62;
 /// when miss rate outpaces backfill drain (cold cache, large keyspace).
 /// Overflow drops the new miss; backfill is best-effort.
 const BACKFILL_QUEUE_CAP: usize = 1024;
+
+/// Map a ringline-redis zero-copy borrow-GET `GetMeta` to a `RequestResult`.
+///
+/// #286 Mode-B path: `recv_get_discard()` drains the value as borrowed
+/// segments (no accumulator copy) and returns only `value_len` (Some = hit,
+/// None = miss) + `user_data`. Latency and rx-bytes are recorded by the
+/// `on_result` callback (unchanged), so `latency_ns` here is unused (0). Only
+/// reached in the running/warmup phase (gated on `phase != Prefill`), so
+/// `prefill` is always false.
+#[cfg(feature = "segmented-recv")]
+fn map_getmeta(meta: ringline_redis::GetMeta) -> RequestResult {
+    RequestResult {
+        id: 0,
+        success: true,
+        is_error_response: false,
+        latency_ns: 0,
+        ttfb_ns: None,
+        request_type: RequestType::Get,
+        hit: Some(meta.value_len.is_some()),
+        key_id: Some((meta.user_data & !PREFILL_MARKER & !BACKFILL_MARKER) as usize),
+        backfill: false,
+        prefill: false,
+        redirect: None,
+    }
+}
 
 /// Map a ringline-redis `CompletedOp` to a `RequestResult`.
 ///

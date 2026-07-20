@@ -509,6 +509,22 @@ impl Config {
             return Err(ConfigError::Validation("threads must be >= 1".to_string()));
         }
 
+        // #286 zero-copy borrow-GET is a GET-only running-phase path: the recv
+        // loop routes every non-prefill response through `recv_get_discard()`,
+        // which only decodes GETs. Any SET/DEL in the running mix would desync.
+        // (Prefill SETs are fine — a separate, drained phase.)
+        if self.connection.zerocopy_get
+            && (self.workload.commands.get != 100
+                || self.workload.commands.set != 0
+                || self.workload.commands.delete != 0)
+        {
+            return Err(ConfigError::Validation(
+                "connection.zerocopy_get requires a GET-only running workload \
+                 (commands.get = 100, set = 0, delete = 0)"
+                    .to_string(),
+            ));
+        }
+
         if self.connection.total_connections() == 0 {
             return Err(ConfigError::Validation(
                 "connections must be >= 1".to_string(),
