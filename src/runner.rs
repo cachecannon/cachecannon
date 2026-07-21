@@ -244,23 +244,14 @@ pub fn run_benchmark_full(
         .pin_to_core(false) // We pin in create_for_worker instead
         .core_offset(0)
         .tcp_nodelay(true);
-    // Provided recv-buffer sizing: rig-measured (2026-07, systemslab)
-    // large-value GET throughput tracks per-CQE buffer size, not ring
-    // capacity — 16KiB buffers cap ~2.4 Gbps at 16MB values vs ~4.9 Gbps
-    // at 256KiB, with entry count irrelevant (256 vs 4096 identical).
-    // Derive the buffer size from the configured value length so the
-    // generator is never the bottleneck; small-value workloads keep
-    // ringline's default (256 × 16KiB = 4MiB/worker). Worst-case pinned
-    // memory at 256 × 256KiB is 64MiB/worker, paid only for ≥1MiB values.
-    let value_len = config.workload.values.length;
-    if value_len >= 64 * 1024 {
-        let buffer_size: u32 = if value_len >= 1024 * 1024 {
-            256 * 1024
-        } else {
-            64 * 1024
-        };
-        ringline_builder = ringline_builder.recv_buffer(256, buffer_size);
-    }
+    // No recv-buffer override: ringline's default geometry is used. The old
+    // value-size-derived override (256 × 256KiB for large values) compensated
+    // for a per-CQE-buffer-size starvation cliff that ringline's fallback-recv
+    // (#274) + segmented recv (#286) have since eliminated. A/B verified
+    // (2026-07-21, 2× c8gn.16xlarge, valkey 9.1.0 io-threads=16): with vs
+    // without the override, GET at 1M/16M/64M values both saturate 200 GbE
+    // (201 Gbps, 3/3 reps, byte-identical) — the override buys nothing on
+    // current ringline, so the generator stays out of ringline's recv tuning.
     if let Some(tls_client) = tls_client {
         ringline_builder = ringline_builder.tls_client(tls_client);
     }
