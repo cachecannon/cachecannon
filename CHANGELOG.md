@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.19] - 2026-07-21
+
+### Changed
+- Reply handling now goes through ringline's uniform `recv_meta`
+  zero-copy reply-metadata path (ringline #288): the client reads only
+  the reply header, learns hit/miss/error and byte count from it, and
+  drains the body without ever materializing the value. GET, SET, and
+  DEL all share one recv model across both backends (io_uring borrows
+  the provided-buffer segments; mio streams the drain), replacing the
+  per-command, cfg-split reply mappers. Rig-measured against valkey
+  9.1.0 (io-threads=16) on 2× c8gn.16xlarge @ 200 GbE: throughput is at
+  parity with 0.0.18 (both saturate the NIC at 1M/16M/64M values), at
+  ~5% lower client CPU at 64MB and with bounded, value-size-independent
+  recv memory. (#110)
+- Upgrade to the ringline 0.5.2 coordinated release: ringline 0.5.2,
+  ringline-redis/-memcache 0.6.4, ringline-ping 0.5.2.
+
+### Removed
+- The `workload.values.length`-derived recv-buffer override (added in
+  0.0.17, #104) is gone. With ringline's fallback recv (#274) and
+  segmented delivery (#286), the small-buffer starvation cliff that
+  motivated it is closed: rig A/B against valkey 9.1.0 at line rate
+  showed the 256KiB override making zero difference vs ringline's
+  default 16KiB (201 Gbps, byte-identical across reps at 1M/16M/64M),
+  and on the copying path 16KiB is now ≥ 256KiB. ringline's default
+  buffer geometry is used unmodified.
+
 ## [0.0.18] - 2026-07-17
 
 ### Changed
