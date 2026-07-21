@@ -48,7 +48,7 @@ http = "1"
 ctrlc = { version = "3", features = ["termination"] }
 
 # I/O event loop (io_uring on Linux, mio on other platforms)
-ringline = "0.5.1"
+ringline = "0.5.2"
 
 # Consistent hashing
 ketama = "0.0.1"
@@ -91,7 +91,7 @@ rand_xoshiro = "0.7"
 
 # Kernel SO_TIMESTAMPING support is Linux-only.
 [target.'cfg(target_os = "linux")'.dependencies]
-ringline = { version = "0.5.1", features = ["timestamps"] }
+ringline = { version = "0.5.2", features = ["timestamps"] }
 ringline-redis = { version = "0.6.3", features = ["timestamps"] }
 ringline-memcache = { version = "0.6.3", features = ["timestamps"] }
 ringline-ping = { version = "0.5.2", features = ["timestamps"] }
@@ -102,10 +102,11 @@ tikv-jemalloc-ctl = { version = "0.6", features = ["stats"] }
 
 [features]
 default = []
-# #286 validation: enables the zero-copy segmented-recv GET path
-# (`connection.zerocopy_get`). Requires a ringline-redis that exposes
-# `.recv_streaming()` (the segmented-recv branch), wired via [patch.crates-io]
-# in the validation build. Off by default so releases build against the
+# Enables the zero-copy segmented-recv GET path (`connection.zerocopy_get`),
+# routing GET recvs through `ringline_redis::Client::recv_get_discard` (Mode-B
+# borrow-and-discard; io_uring only, so this feature is Linux-only). Requires
+# the segmented-recv ringline (#286), wired via [patch.crates-io] below until
+# it is published. Off by default so normal releases build against the
 # published ringline-redis.
 segmented-recv = []
 
@@ -159,3 +160,21 @@ lto = true
 codegen-units = 1
 panic = "abort"
 debug = true
+
+# ── Interim: track ringline's segmented zero-copy recv (borrow-GET) ──────────
+# ringline #286 (segmented recv Modes A/B/C + streaming/borrow-GET clients) is
+# merged to ringline main but not yet published to crates.io. Pin every ringline
+# crate to the #286 squash-merge commit so `--features segmented-recv`
+# (connection.zerocopy_get → `recv_get_discard`) resolves against it. The version
+# reqs above are set to main's versions (ringline 0.5.2, redis/memcache 0.6.3);
+# ringline 0.5.2 is unpublished, so the patch is the only source that satisfies
+# it — which unifies the graph on the git rev (avoids a split with crates.io
+# ringline 0.5.1).
+#
+# REMOVE this patch and bump the reqs to the published versions once ringline
+# cuts the coordinated 0.7.0 (redis/memcache) / 0.6.0 (ringline) release.
+[patch.crates-io]
+ringline          = { git = "https://github.com/ringline-rs/ringline", rev = "15725ee4f9a506b87b5d1455fe2df77d3ac40ad2" }
+ringline-redis    = { git = "https://github.com/ringline-rs/ringline", rev = "15725ee4f9a506b87b5d1455fe2df77d3ac40ad2" }
+ringline-memcache = { git = "https://github.com/ringline-rs/ringline", rev = "15725ee4f9a506b87b5d1455fe2df77d3ac40ad2" }
+ringline-ping     = { git = "https://github.com/ringline-rs/ringline", rev = "15725ee4f9a506b87b5d1455fe2df77d3ac40ad2" }
