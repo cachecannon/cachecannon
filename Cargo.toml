@@ -48,7 +48,7 @@ http = "1"
 ctrlc = { version = "3", features = ["termination"] }
 
 # I/O event loop (io_uring on Linux, mio on other platforms)
-ringline = "0.5.1"
+ringline = "0.5.2"
 
 # Consistent hashing
 ketama = "0.0.1"
@@ -91,7 +91,7 @@ rand_xoshiro = "0.7"
 
 # Kernel SO_TIMESTAMPING support is Linux-only.
 [target.'cfg(target_os = "linux")'.dependencies]
-ringline = { version = "0.5.1", features = ["timestamps"] }
+ringline = { version = "0.5.2", features = ["timestamps"] }
 ringline-redis = { version = "0.6.3", features = ["timestamps"] }
 ringline-memcache = { version = "0.6.3", features = ["timestamps"] }
 ringline-ping = { version = "0.5.2", features = ["timestamps"] }
