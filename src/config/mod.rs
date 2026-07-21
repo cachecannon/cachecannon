@@ -122,16 +122,6 @@ pub struct Connection {
     /// Clamped to `[1, pipeline_depth]` at use.
     #[serde(default)]
     pub batch_size: Option<usize>,
-    /// Consume GET responses via ringline-redis's zero-copy segmented recv
-    /// (Mode B borrow-and-discard) instead of the accumulator-copy path.
-    /// Values are never retained by cachecannon (the load generator records
-    /// only length/hit), so the received bytes never need to escape the
-    /// runtime — eliminating the mandatory provided-buffer→accumulator copy
-    /// on large responses. Requires the `segmented-recv` build feature and a
-    /// ringline-redis that exposes the borrow-GET (`.recv_streaming()`);
-    /// ignored otherwise. Validation-only for #286.
-    #[serde(default)]
-    pub zerocopy_get: bool,
     #[serde(default = "default_connect_timeout", with = "humantime_serde")]
     pub connect_timeout: Duration,
     #[serde(default = "default_request_timeout", with = "humantime_serde")]
@@ -174,7 +164,6 @@ impl Default for Connection {
             pool_size: None,
             pipeline_depth: default_pipeline_depth(),
             batch_size: None,
-            zerocopy_get: false,
             connect_timeout: default_connect_timeout(),
             request_timeout: default_request_timeout(),
             request_distribution: RequestDistribution::default(),
@@ -507,23 +496,6 @@ impl Config {
 
         if self.general.threads == 0 {
             return Err(ConfigError::Validation("threads must be >= 1".to_string()));
-        }
-
-        // #286 zero-copy borrow-GET is a GET-only running-phase path: the recv
-        // loop routes every non-prefill response through `recv_get_discard()`,
-        // which only decodes GETs. The command roll is `roll < get_ratio`, so
-        // `get = 100` fires a GET every time regardless of the set/delete
-        // ratios — that alone is the GET-only condition. (Prefill SETs are a
-        // separate, drained phase; backfill-on-miss would fire a running-phase
-        // SET, so it must be off.)
-        if self.connection.zerocopy_get
-            && (self.workload.commands.get < 100 || self.workload.backfill_on_miss)
-        {
-            return Err(ConfigError::Validation(
-                "connection.zerocopy_get requires a GET-only running workload \
-                 (commands.get = 100 and backfill_on_miss = false)"
-                    .to_string(),
-            ));
         }
 
         if self.connection.total_connections() == 0 {

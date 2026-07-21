@@ -827,17 +827,15 @@ async fn resp_connection_task(state: Arc<SharedWorkerState>, endpoint_idx: usize
         #[cfg(target_os = "linux")]
         let builder =
             builder.kernel_timestamps(matches!(config.timestamps.mode, TimestampMode::Software));
-        // #286 validation: zero-copy segmented recv for GET values is NOT a
-        // builder toggle — it lives in the recv method. `fire_get` is
-        // unchanged; when `zerocopy_get` is set the recv loop calls
-        // `client.recv_get_discard()` (Mode B borrow-and-discard) instead of
-        // `client.recv()`, so the value is drained as borrowed segments and
-        // only its length is surfaced (no accumulator copy). Metrics stay
-        // identical: latency/rx-bytes are recorded by the `on_result`
-        // callback above, which `recv_get_discard` still fires.
+        // Zero-copy recv is not a builder toggle — it lives in the recv method:
+        // the recv loop calls `client.recv_meta()` (Mode-B borrow-and-discard) on
+        // io_uring, or the materialized `client.recv()` otherwise. `fire_*` is
+        // unchanged and metrics are identical (recorded by the `on_result`
+        // callback above).
         let mut client = builder
             .max_batch_size(config.connection.effective_batch_size())
             .build();
+        log_resp_recv_path_once();
 
         tracing::debug!(
             worker = state.task_state.worker_id,
@@ -1101,55 +1099,46 @@ async fn drive_resp_workload(
             continue;
         }
 
-        // #286 zero-copy borrow-GET (Mode B): past prefill (which fires SETs),
-        // a GET-only running workload's responses are all GETs, so drain each
-        // value as borrowed segments via `recv_get_discard()` — no accumulator
-        // copy. Prefill SETs and any non-GET response keep the normal typed
-        // `recv()`. Config validation guarantees GET-only when zerocopy_get is
-        // set, so `phase != Prefill` is a sufficient guard here.
-        #[cfg(feature = "segmented-recv")]
-        let use_borrow_get = config.connection.zerocopy_get && phase != Phase::Prefill;
-        #[cfg(not(feature = "segmented-recv"))]
-        let use_borrow_get = false;
-
-        let result = if use_borrow_get {
-            #[cfg(feature = "segmented-recv")]
-            {
-                match client.recv_get_discard().await {
-                    Ok(meta) => map_getmeta(meta),
-                    Err(ringline_redis::Error::ConnectionClosed) => {
-                        requeue_drained_prefill(
-                            &state.task_state,
-                            key_buf,
-                            prefill_in_flight.drain(..),
-                        );
-                        return Err(DisconnectReason::Eof);
-                    }
-                    Err(_) => {
-                        requeue_drained_prefill(
-                            &state.task_state,
-                            key_buf,
-                            prefill_in_flight.drain(..),
-                        );
-                        return Err(DisconnectReason::RecvError);
-                    }
-                }
+        // Zero-copy recv. A load generator never needs value *content* — only
+        // the header (kind / hit-miss / length / error). On io_uring, drain every
+        // reply's value via `recv_meta` (Mode-B borrow-and-discard: no
+        // provided-buffer→accumulator copy), for ALL op kinds and phases
+        // (prefill SETs included). Off io_uring, fall back to the materialized
+        // `recv()`. Selected automatically at compile time — no config flag, no
+        // workload restriction.
+        #[cfg(has_io_uring)]
+        let result = match client.recv_meta().await {
+            Ok(meta) => map_respmeta(meta),
+            Err(ringline_redis::Error::ConnectionClosed) => {
+                requeue_drained_prefill(&state.task_state, key_buf, prefill_in_flight.drain(..));
+                return Err(DisconnectReason::Eof);
             }
-            #[cfg(not(feature = "segmented-recv"))]
-            unreachable!("use_borrow_get is always false without the segmented-recv feature")
-        } else {
+            Err(_) => {
+                requeue_drained_prefill(&state.task_state, key_buf, prefill_in_flight.drain(..));
+                return Err(DisconnectReason::RecvError);
+            }
+        };
+        #[cfg(not(has_io_uring))]
+        let result = {
             let op = match client.recv().await {
                 Ok(op) => op,
                 Err(ringline_redis::Error::ConnectionClosed) => {
-                    requeue_drained_prefill(&state.task_state, key_buf, prefill_in_flight.drain(..));
+                    requeue_drained_prefill(
+                        &state.task_state,
+                        key_buf,
+                        prefill_in_flight.drain(..),
+                    );
                     return Err(DisconnectReason::Eof);
                 }
                 Err(_) => {
-                    requeue_drained_prefill(&state.task_state, key_buf, prefill_in_flight.drain(..));
+                    requeue_drained_prefill(
+                        &state.task_state,
+                        key_buf,
+                        prefill_in_flight.drain(..),
+                    );
                     return Err(DisconnectReason::RecvError);
                 }
             };
-            // Map CompletedOp to RequestResult
             map_resp_op(op)
         };
 
@@ -1212,42 +1201,82 @@ const PREFILL_MARKER: u64 = 1 << 62;
 /// Overflow drops the new miss; backfill is best-effort.
 const BACKFILL_QUEUE_CAP: usize = 1024;
 
-/// Map a ringline-redis zero-copy borrow-GET `GetMeta` to a `RequestResult`.
-///
-/// #286 Mode-B path: `recv_get_discard()` drains the value as borrowed
-/// segments (no accumulator copy) and returns only `value_len` (Some = hit,
-/// None = miss) + `user_data`. Latency and rx-bytes are recorded by the
-/// `on_result` callback (unchanged), so `latency_ns` here is unused (0). Only
-/// reached in the running/warmup phase (gated on `phase != Prefill`), so
-/// `prefill` is always false.
-#[cfg(feature = "segmented-recv")]
-fn map_getmeta(meta: ringline_redis::GetMeta) -> RequestResult {
+/// Report the RESP recv path once, so a run's output makes the chosen strategy
+/// explicit (transparency: the fast path is automatic, but observable).
+fn log_resp_recv_path_once() {
+    use std::sync::Once;
+    static ONCE: Once = Once::new();
+    ONCE.call_once(|| {
+        #[cfg(has_io_uring)]
+        tracing::info!("RESP recv: zero-copy borrow-and-discard (recv_meta, io_uring)");
+        #[cfg(not(has_io_uring))]
+        tracing::info!("RESP recv: materialized (recv, non-io_uring backend)");
+    });
+}
+
+/// Map a ringline-redis zero-copy `RespMeta` (from `recv_meta`) to a
+/// `RequestResult`, for any op kind. The value bytes were drained, never
+/// materialized — only the header metadata is used, which is all a load
+/// generator records. This is the io_uring counterpart of `map_resp_op` and
+/// mirrors its per-kind field derivation (hit/miss, prefill/backfill markers,
+/// key_id, MOVED/ASK redirect from the error string). rx-bytes are recorded by
+/// the `on_result` callback; `latency_ns` comes straight off `RespMeta`.
+#[cfg(has_io_uring)]
+fn map_respmeta(meta: ringline_redis::RespMeta) -> RequestResult {
+    use ringline_redis::OpKind;
+    let request_type = match meta.kind {
+        OpKind::Get => RequestType::Get,
+        OpKind::Set => RequestType::Set,
+        OpKind::Del => RequestType::Delete,
+    };
+    // hit is meaningful only for a successful GET.
+    let hit = match meta.kind {
+        OpKind::Get if meta.success => Some(meta.value_len.is_some()),
+        _ => None,
+    };
+    // Mirror `map_resp_op`: prefill/backfill markers + key_id apply per kind.
+    let (backfill, prefill, key_id) = match meta.kind {
+        OpKind::Get => (
+            false,
+            false,
+            Some((meta.user_data & !PREFILL_MARKER & !BACKFILL_MARKER) as usize),
+        ),
+        OpKind::Set => {
+            let backfill = meta.user_data & BACKFILL_MARKER != 0;
+            let prefill = meta.user_data & PREFILL_MARKER != 0;
+            let key_id = if prefill {
+                Some((meta.user_data & !PREFILL_MARKER & !BACKFILL_MARKER) as usize)
+            } else {
+                None
+            };
+            (backfill, prefill, key_id)
+        }
+        OpKind::Del => (false, false, None),
+    };
+    // A server error carries the message (incl. MOVED/ASK) in `error`.
+    let redirect = meta.error.as_deref().and_then(parse_resp_redirect);
     RequestResult {
         id: 0,
-        success: true,
-        is_error_response: false,
-        latency_ns: 0,
+        success: meta.success,
+        is_error_response: !meta.success,
+        latency_ns: meta.latency_ns,
         ttfb_ns: None,
-        request_type: RequestType::Get,
-        hit: Some(meta.value_len.is_some()),
-        key_id: Some((meta.user_data & !PREFILL_MARKER & !BACKFILL_MARKER) as usize),
-        backfill: false,
-        prefill: false,
-        redirect: None,
+        request_type,
+        hit,
+        key_id,
+        backfill,
+        prefill,
+        redirect,
     }
 }
 
 /// Map a ringline-redis `CompletedOp` to a `RequestResult`.
 ///
-/// #286 coordination note: the `Get` arm matches only on the
+/// This is the materialized recv path, used off io_uring (the io_uring path
+/// uses `map_respmeta`). The `Get` arm matches only the
 /// `Result<Option<_>, _>` shape (Some = hit) and never touches the value
-/// payload — rx-byte accounting lives inside ringline-redis. So the
-/// zero-copy borrow-GET (`.recv_streaming()`) needs NO change here **iff**
-/// it reuses `CompletedOp::Get` with the value surfaced as a length rather
-/// than `Bytes` (the `Ok(Some(_))` pattern ignores the inner type). If it
-/// instead introduces a distinct `CompletedOp` variant, add a matching arm
-/// (the trailing `_ => unreachable!` would otherwise panic under the
-/// `segmented-recv` feature).
+/// payload — rx-byte accounting lives inside ringline-redis.
+#[cfg(not(has_io_uring))]
 fn map_resp_op(op: ringline_redis::CompletedOp) -> RequestResult {
     match op {
         ringline_redis::CompletedOp::Get {
