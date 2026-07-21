@@ -828,10 +828,10 @@ async fn resp_connection_task(state: Arc<SharedWorkerState>, endpoint_idx: usize
         let builder =
             builder.kernel_timestamps(matches!(config.timestamps.mode, TimestampMode::Software));
         // Zero-copy recv is not a builder toggle — it lives in the recv method:
-        // the recv loop calls `client.recv_meta()` (Mode-B borrow-and-discard) on
-        // io_uring, or the materialized `client.recv()` otherwise. `fire_*` is
-        // unchanged and metrics are identical (recorded by the `on_result`
-        // callback above).
+        // the recv loop calls `client.recv_meta()`, which drains each value
+        // without materializing it (zero-copy on io_uring, streaming-drain on
+        // mio). `fire_*` is unchanged and metrics are identical (recorded by the
+        // `on_result` callback above).
         let mut client = builder
             .max_batch_size(config.connection.effective_batch_size())
             .build();
@@ -1099,14 +1099,12 @@ async fn drive_resp_workload(
             continue;
         }
 
-        // Zero-copy recv. A load generator never needs value *content* — only
-        // the header (kind / hit-miss / length / error). On io_uring, drain every
-        // reply's value via `recv_meta` (Mode-B borrow-and-discard: no
-        // provided-buffer→accumulator copy), for ALL op kinds and phases
-        // (prefill SETs included). Off io_uring, fall back to the materialized
-        // `recv()`. Selected automatically at compile time — no config flag, no
-        // workload restriction.
-        #[cfg(has_io_uring)]
+        // Zero-copy recv, every reply, every op kind and phase (prefill SETs
+        // included). A load generator never needs value *content* — only the
+        // header (kind / hit-miss / length / error) — so `recv_meta` drains each
+        // value without materializing it: zero-copy over provided buffers on
+        // io_uring, bounded streaming-drain on mio. One uniform call, no config
+        // flag, no cfg split, no workload restriction.
         let result = match client.recv_meta().await {
             Ok(meta) => map_respmeta(meta),
             Err(ringline_redis::Error::ConnectionClosed) => {
@@ -1117,29 +1115,6 @@ async fn drive_resp_workload(
                 requeue_drained_prefill(&state.task_state, key_buf, prefill_in_flight.drain(..));
                 return Err(DisconnectReason::RecvError);
             }
-        };
-        #[cfg(not(has_io_uring))]
-        let result = {
-            let op = match client.recv().await {
-                Ok(op) => op,
-                Err(ringline_redis::Error::ConnectionClosed) => {
-                    requeue_drained_prefill(
-                        &state.task_state,
-                        key_buf,
-                        prefill_in_flight.drain(..),
-                    );
-                    return Err(DisconnectReason::Eof);
-                }
-                Err(_) => {
-                    requeue_drained_prefill(
-                        &state.task_state,
-                        key_buf,
-                        prefill_in_flight.drain(..),
-                    );
-                    return Err(DisconnectReason::RecvError);
-                }
-            };
-            map_resp_op(op)
         };
 
         // Handle prefill tracking. The PREFILL_MARKER bit in user_data
@@ -1201,27 +1176,25 @@ const PREFILL_MARKER: u64 = 1 << 62;
 /// Overflow drops the new miss; backfill is best-effort.
 const BACKFILL_QUEUE_CAP: usize = 1024;
 
-/// Report the RESP recv path once, so a run's output makes the chosen strategy
-/// explicit (transparency: the fast path is automatic, but observable).
+/// Report the RESP recv path once, so a run's output makes the strategy
+/// explicit (transparency: automatic, but observable).
 fn log_resp_recv_path_once() {
     use std::sync::Once;
     static ONCE: Once = Once::new();
     ONCE.call_once(|| {
-        #[cfg(has_io_uring)]
-        tracing::info!("RESP recv: zero-copy borrow-and-discard (recv_meta, io_uring)");
-        #[cfg(not(has_io_uring))]
-        tracing::info!("RESP recv: materialized (recv, non-io_uring backend)");
+        tracing::info!(
+            "RESP recv: recv_meta — value bytes drained, never materialized \
+             (zero-copy on io_uring, bounded streaming-drain on mio)"
+        );
     });
 }
 
 /// Map a ringline-redis zero-copy `RespMeta` (from `recv_meta`) to a
-/// `RequestResult`, for any op kind. The value bytes were drained, never
-/// materialized — only the header metadata is used, which is all a load
-/// generator records. This is the io_uring counterpart of `map_resp_op` and
-/// mirrors its per-kind field derivation (hit/miss, prefill/backfill markers,
-/// key_id, MOVED/ASK redirect from the error string). rx-bytes are recorded by
-/// the `on_result` callback; `latency_ns` comes straight off `RespMeta`.
-#[cfg(has_io_uring)]
+/// `RequestResult`, for any op kind, on any backend. The value bytes were
+/// drained, never materialized — only the header metadata is used, which is all
+/// a load generator records: hit/miss, prefill/backfill markers, key_id, a
+/// MOVED/ASK redirect from the error string, and per-op `latency_ns`. rx-bytes
+/// are recorded by the `on_result` callback.
 fn map_respmeta(meta: ringline_redis::RespMeta) -> RequestResult {
     use ringline_redis::OpKind;
     let request_type = match meta.kind {
@@ -1234,7 +1207,7 @@ fn map_respmeta(meta: ringline_redis::RespMeta) -> RequestResult {
         OpKind::Get if meta.success => Some(meta.value_len.is_some()),
         _ => None,
     };
-    // Mirror `map_resp_op`: prefill/backfill markers + key_id apply per kind.
+    // prefill/backfill markers + key_id apply per kind.
     let (backfill, prefill, key_id) = match meta.kind {
         OpKind::Get => (
             false,
@@ -1267,110 +1240,6 @@ fn map_respmeta(meta: ringline_redis::RespMeta) -> RequestResult {
         backfill,
         prefill,
         redirect,
-    }
-}
-
-/// Map a ringline-redis `CompletedOp` to a `RequestResult`.
-///
-/// This is the materialized recv path, used off io_uring (the io_uring path
-/// uses `map_respmeta`). The `Get` arm matches only the
-/// `Result<Option<_>, _>` shape (Some = hit) and never touches the value
-/// payload — rx-byte accounting lives inside ringline-redis.
-#[cfg(not(has_io_uring))]
-fn map_resp_op(op: ringline_redis::CompletedOp) -> RequestResult {
-    match op {
-        ringline_redis::CompletedOp::Get {
-            result,
-            user_data,
-            latency_ns,
-        } => {
-            let (success, is_error, hit) = match &result {
-                Ok(Some(_)) => (true, false, Some(true)),
-                Ok(None) => (true, false, Some(false)),
-                Err(_) => (false, true, None),
-            };
-            let redirect = if let Err(ringline_redis::Error::Redis(ref msg)) = result {
-                parse_resp_redirect(msg)
-            } else {
-                None
-            };
-            RequestResult {
-                id: 0,
-                success,
-                is_error_response: is_error,
-                latency_ns,
-                ttfb_ns: None,
-                request_type: RequestType::Get,
-                hit,
-                key_id: Some((user_data & !PREFILL_MARKER & !BACKFILL_MARKER) as usize),
-                backfill: false,
-                prefill: false,
-                redirect,
-            }
-        }
-        ringline_redis::CompletedOp::Set {
-            result,
-            user_data,
-            latency_ns,
-        } => {
-            let (success, is_error) = match &result {
-                Ok(()) => (true, false),
-                Err(_) => (false, true),
-            };
-            let redirect = if let Err(ringline_redis::Error::Redis(ref msg)) = result {
-                parse_resp_redirect(msg)
-            } else {
-                None
-            };
-            let backfill = user_data & BACKFILL_MARKER != 0;
-            let prefill = user_data & PREFILL_MARKER != 0;
-            let key_id = if prefill {
-                Some((user_data & !PREFILL_MARKER & !BACKFILL_MARKER) as usize)
-            } else {
-                None
-            };
-            RequestResult {
-                id: 0,
-                success,
-                is_error_response: is_error,
-                latency_ns,
-                ttfb_ns: None,
-                request_type: RequestType::Set,
-                hit: None,
-                key_id,
-                backfill,
-                prefill,
-                redirect,
-            }
-        }
-        ringline_redis::CompletedOp::Del {
-            result, latency_ns, ..
-        } => {
-            let (success, is_error) = match &result {
-                Ok(_) => (true, false),
-                Err(_) => (false, true),
-            };
-            let redirect = if let Err(ringline_redis::Error::Redis(ref msg)) = result {
-                parse_resp_redirect(msg)
-            } else {
-                None
-            };
-            RequestResult {
-                id: 0,
-                success,
-                is_error_response: is_error,
-                latency_ns,
-                ttfb_ns: None,
-                request_type: RequestType::Delete,
-                hit: None,
-                key_id: None,
-                backfill: false,
-                prefill: false,
-                redirect,
-            }
-        }
-        // cachecannon only fires Get/Set/Del; `CompletedOp` is #[non_exhaustive].
-        _ => unreachable!("unexpected ringline-redis CompletedOp variant"),
     }
 }
 

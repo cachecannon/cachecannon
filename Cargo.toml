@@ -103,15 +103,6 @@ tikv-jemalloc-ctl = { version = "0.6", features = ["stats"] }
 [features]
 default = []
 
-# `has_io_uring` is emitted by build.rs (Linux 6.0+) to gate the io_uring-only
-# zero-copy recv path (`recv_meta`). No cargo feature and no config flag: the
-# fast path is selected automatically wherever io_uring is available, and the
-# materialized `recv()` path is used otherwise. Register the cfg for check-cfg so
-# it is recognized on targets where build.rs does not emit it (mio / macOS).
-[lints.rust.unexpected_cfgs]
-level = "warn"
-check-cfg = ["cfg(has_io_uring)"]
-
 [[bin]]
 name = "cachecannon"
 path = "src/main.rs"
@@ -162,20 +153,3 @@ lto = true
 codegen-units = 1
 panic = "abort"
 debug = true
-
-# ── Interim: track ringline's segmented zero-copy recv (recv_meta) ───────────
-# The io_uring zero-copy `recv_meta` path (ringline #288/#289) is merged to
-# ringline main but not yet published to crates.io. Pin every ringline crate to
-# that main commit so the `has_io_uring` recv path resolves against it. The
-# version reqs above are set to main's versions (ringline 0.5.2, redis/memcache
-# 0.6.3); ringline 0.5.2 is unpublished, so the patch is the only source that
-# satisfies it — which unifies the graph on the git rev (avoids a split with
-# crates.io ringline 0.5.1).
-#
-# REMOVE this patch and bump the reqs to the published versions once ringline
-# cuts the coordinated 0.7.0 (redis/memcache) / 0.6.0 (ringline) release.
-[patch.crates-io]
-ringline          = { git = "https://github.com/ringline-rs/ringline", rev = "55856d2c1e59baa7e8bd6421ea5ed6bf63921878" }
-ringline-redis    = { git = "https://github.com/ringline-rs/ringline", rev = "55856d2c1e59baa7e8bd6421ea5ed6bf63921878" }
-ringline-memcache = { git = "https://github.com/ringline-rs/ringline", rev = "55856d2c1e59baa7e8bd6421ea5ed6bf63921878" }
-ringline-ping     = { git = "https://github.com/ringline-rs/ringline", rev = "55856d2c1e59baa7e8bd6421ea5ed6bf63921878" }
