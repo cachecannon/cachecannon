@@ -151,3 +151,11 @@ lto = true
 codegen-units = 1
 panic = "abort"
 debug = true
+
+# TEMPORARY: pin to the RESP3 GET-miss (`_\r\n`) branch of ringline-redis
+# (ringline-rs/ringline#294). Both crates are patched together so cachecannon and
+# ringline-redis share one `ringline`. Remove this block and bump `ringline-redis`
+# to the released version once #294 lands.
+[patch.crates-io]
+ringline = { git = "https://github.com/brayniac/ringline", branch = "feat/resp3-get-miss-null" }
+ringline-redis = { git = "https://github.com/brayniac/ringline", branch = "feat/resp3-get-miss-null" }
