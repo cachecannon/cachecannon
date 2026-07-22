@@ -41,8 +41,20 @@ pub(super) async fn run_all(job: &Job) -> Result<RunReport, String> {
         .await;
     delete_prefix(&mut client, KEY_PREFIX).await?;
 
+    eprintln!(
+        "cleanup done; loading {} vectors",
+        job.dataset.train.nrows()
+    );
     let load = load_phase(&mut client, job).await?;
+    eprintln!(
+        "load done in {:.2}s; building index",
+        load.elapsed.as_secs_f64()
+    );
     let index = index_phase(&mut client, job).await?;
+    eprintln!(
+        "index ready in {:.2}s; querying",
+        index.elapsed.as_secs_f64()
+    );
     let query = query_phase(&mut client, job).await?;
 
     if !job.args.keep_index {
@@ -306,54 +318,48 @@ fn info_field(fields: &[Value], name: &str) -> Option<String> {
     None
 }
 
-/// Delete every key matching `<prefix>*` via SCAN + pipelined DEL. Stale keys
-/// from a previous (possibly larger) run would otherwise be backfilled into
-/// the new index and corrupt recall scoring.
+/// Delete every key matching `<prefix>*`. Stale keys from a previous
+/// (possibly larger) run would otherwise be backfilled into the new index and
+/// corrupt recall scoring.
+///
+/// The scan and the deletes both happen server-side in a short script, so the
+/// client only ever parses the returned cursor. A client-side SCAN is a trap
+/// here: COUNT is a per-bucket hint the server can overshoot severalfold, and
+/// a reply over 1024 elements trips the reply parser's collection cap (which
+/// closes the connection rather than truncating).
 async fn delete_prefix(client: &mut ringline_redis::Client, prefix: &str) -> Result<(), String> {
+    // COUNT 1000 keeps the DEL argument list far below Lua's unpack limit.
+    const SCRIPT: &[u8] =
+        b"local r = redis.call('SCAN', ARGV[1], 'MATCH', ARGV[2], 'COUNT', 1000) \
+         if #r[2] > 0 then redis.call('DEL', unpack(r[2])) end \
+         return r[1]";
     let pattern = format!("{prefix}*");
     let mut cursor: Vec<u8> = b"0".to_vec();
     loop {
         let reply = client
             .cmd(
-                &Request::cmd(b"SCAN")
+                &Request::cmd(b"EVAL")
+                    .arg(SCRIPT)
+                    .arg(b"0")
                     .arg(&cursor)
-                    .arg(b"MATCH")
-                    .arg(pattern.as_bytes())
-                    .arg(b"COUNT")
-                    .arg(b"1000"),
+                    .arg(pattern.as_bytes()),
             )
             .await
-            .map_err(|e| format!("SCAN {pattern}: {e}"))?;
-        let Value::Array(mut items) = reply else {
-            return Err(format!("SCAN {pattern}: unexpected reply {reply:?}"));
-        };
-        if items.len() != 2 {
-            return Err(format!("SCAN {pattern}: unexpected reply arity"));
-        }
-        let keys = items.pop().expect("len checked");
-        let next = items.pop().expect("len checked");
-        cursor = match next {
+            .map_err(|e| format!("cleanup EVAL {pattern}: {e}"))?;
+        cursor = match reply {
             Value::BulkString(b) | Value::SimpleString(b) => b.to_vec(),
-            other => return Err(format!("SCAN cursor: unexpected {other:?}")),
-        };
-        if let Value::Array(keys) = keys
-            && !keys.is_empty()
-        {
-            // Same per-send ceiling as the load phase: keep each pipelined
-            // DEL batch small enough to fit one send.
-            for chunk in keys.chunks(128) {
-                let mut pipeline = client.pipeline();
-                for key in chunk {
-                    if let Value::BulkString(k) = key {
-                        pipeline = pipeline.cmd(&Request::cmd(b"DEL").arg(k));
-                    }
-                }
-                pipeline
-                    .execute()
-                    .await
-                    .map_err(|e| format!("DEL {pattern}: {e}"))?;
+            Value::Error(e) => {
+                return Err(format!(
+                    "cleanup EVAL {pattern}: {}",
+                    String::from_utf8_lossy(&e)
+                ));
             }
-        }
+            other => {
+                return Err(format!(
+                    "cleanup EVAL {pattern}: unexpected reply {other:?}"
+                ));
+            }
+        };
         if cursor == b"0" {
             return Ok(());
         }
