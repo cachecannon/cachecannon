@@ -63,6 +63,9 @@ resp-proto = { version = "0.0.1", features = ["resp3"] }
 # 0.6.4 minimum: the uniform recv_meta reply-metadata path (RespMeta /
 # recv_meta, ringline #288) lands in 0.6.4; earlier versions lack it.
 ringline-redis = "0.6.4"
+# `search` feature only: ann-benchmarks HDF5 datasets (static build, no system libhdf5)
+hdf5-metno = { version = "0.13", features = ["static"], optional = true }
+ndarray = { version = "0.17", optional = true }
 ringline-memcache = "0.6.4"
 ringline-ping = "0.5.2"
 
@@ -100,6 +103,9 @@ tikv-jemalloc-ctl = { version = "0.6", features = ["stats"] }
 
 [features]
 default = []
+# Vector-search benchmarking (`valkey-lab search`). Gated so the core binaries
+# don't pull in HDF5; the bundled build needs cmake >= 3.26.
+search = ["dep:hdf5-metno", "dep:ndarray"]
 
 [[bin]]
 name = "cachecannon"

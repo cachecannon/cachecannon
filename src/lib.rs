@@ -7,6 +7,8 @@ pub mod metrics;
 pub mod output;
 pub mod runner;
 pub mod saturation;
+#[cfg(feature = "search")]
+pub mod search;
 pub mod sharded_counter;
 pub mod viewer;
 pub mod worker;
