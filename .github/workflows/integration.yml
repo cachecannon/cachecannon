@@ -54,6 +54,28 @@ jobs:
       - name: Run benchmark against Valkey
         run: ./target/release/cachecannon config/valkey-ci.toml
 
+  valkey-resp3:
+    name: Valkey (RESP3)
+    runs-on: ubuntu-latest
+    services:
+      valkey:
+        image: valkey/valkey:latest
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "valkey-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build
+        run: cargo build --release
+      - name: Run RESP3 benchmark against Valkey
+        run: ./target/release/cachecannon config/valkey-resp3-ci.toml
+
   valkey-ratelimit:
     name: Valkey (rate limited)
     runs-on: ubuntu-latest
