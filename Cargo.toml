@@ -78,6 +78,9 @@ resp-proto = { version = "0.0.2", features = ["resp3"] }
 ringline-redis = "0.7.0"
 ringline-memcache = "0.7.1"
 ringline-ping = "0.6.0"
+# `search` feature only: ann-benchmarks HDF5 datasets (static build, no system libhdf5)
+hdf5-metno = { version = "0.13", features = ["static"], optional = true }
+ndarray = { version = "0.17", optional = true }
 
 # Metrics
 histogram = "1.1"
@@ -114,6 +117,9 @@ tikv-jemalloc-ctl = { version = "0.6", features = ["stats"] }
 
 [features]
 default = []
+# Vector-search benchmarking (`valkey-lab search`). Gated so the core binaries
+# don't pull in HDF5; the bundled build needs cmake >= 3.26.
+search = ["dep:hdf5-metno", "dep:ndarray"]
 
 [[bin]]
 name = "cachecannon"

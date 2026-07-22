@@ -34,6 +34,10 @@ enum Command {
     Saturate(Box<SaturateArgs>),
     /// View benchmark results from a parquet file in a web dashboard.
     View(viewer::ViewArgs),
+    /// Benchmark Valkey Search: load an ann-benchmarks dataset, build an HNSW
+    /// index, and measure recall / latency / QPS with single-client queries.
+    #[cfg(feature = "search")]
+    Search(cachecannon::search::SearchArgs),
 }
 
 // ---------------------------------------------------------------------------
@@ -225,6 +229,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     match cli.command {
         Some(Command::View(args)) => {
             viewer::run(args.into());
+            Ok(())
+        }
+        #[cfg(feature = "search")]
+        Some(Command::Search(args)) => {
+            cachecannon::search::run(args)?;
             Ok(())
         }
         Some(Command::Saturate(args)) => {
