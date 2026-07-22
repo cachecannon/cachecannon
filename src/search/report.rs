@@ -75,7 +75,7 @@ pub fn print(report: &RunReport, args: &SearchArgs, dataset: &Dataset) {
         report.load.batch,
     );
     println!(
-        "index build  {:.2}s (FT.CREATE to ready: backfill complete, mutation queue empty)",
+        "index build  {:.2}s (FT.CREATE to fully indexed)",
         report.index.elapsed.as_secs_f64(),
     );
     println!(
