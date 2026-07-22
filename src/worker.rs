@@ -844,6 +844,30 @@ async fn resp_connection_task(state: Arc<SharedWorkerState>, endpoint_idx: usize
             "connected (RESP)"
         );
 
+        // RESP3: negotiate the protocol on every new connection before any
+        // workload traffic. `HELLO 3` switches the server to RESP3, so its reply
+        // and all subsequent replies use RESP3 framing — notably `_\r\n` for a
+        // GET miss (vs RESP2 `$-1\r\n`). Without this the `--resp3` flag is inert:
+        // the server stays in RESP2. Uses the async request/response path, which
+        // is safe here because no `fire_*` traffic is in flight on a fresh
+        // connection.
+        if matches!(config.target.protocol, CacheProtocol::Resp3)
+            && let Err(e) = client
+                .cmd(&resp_proto::Request::cmd(b"HELLO").arg(b"3"))
+                .await
+        {
+            tracing::debug!(
+                worker = state.task_state.worker_id,
+                endpoint = %endpoint,
+                "HELLO 3 failed: {}",
+                e
+            );
+            metrics::CONNECTIONS_ACTIVE.decrement();
+            metrics::CONNECTIONS_FAILED.increment();
+            ringline::sleep(Duration::from_millis(100)).await;
+            continue;
+        }
+
         // Precheck: send PING to verify connectivity
         if state.task_state.shared.phase() == Phase::Precheck && !state.is_precheck_done() {
             match client.ping().await {

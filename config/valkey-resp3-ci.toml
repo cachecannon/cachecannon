@@ -1,0 +1,29 @@
+# CI configuration for Valkey/Redis integration tests over RESP3.
+# Exercises the `HELLO 3` handshake and RESP3 reply framing — notably the
+# RESP3 GET-miss null (`_\r\n`, vs RESP2 `$-1\r\n`). The mixed GET:SET workload
+# on a bounded keyspace produces both hits and misses, so a RESP3 miss that
+# was mis-parsed would surface as errors or connection failures.
+
+[general]
+duration = "5s"
+warmup = "2s"
+threads = 2
+
+[target]
+endpoints = ["127.0.0.1:6379"]
+protocol = "resp3"
+
+[connection]
+connections = 4
+pipeline_depth = 8
+
+[workload.keyspace]
+length = 16
+count = 10000
+
+[workload.commands]
+get = 80
+set = 20
+
+[workload.values]
+length = 64

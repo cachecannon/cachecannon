@@ -60,9 +60,10 @@ crossbeam-channel = "0.5"
 resp-proto = { version = "0.0.1", features = ["resp3"] }
 
 # Client crates
-# 0.6.4 minimum: the uniform recv_meta reply-metadata path (RespMeta /
-# recv_meta, ringline #288) lands in 0.6.4; earlier versions lack it.
-ringline-redis = "0.6.4"
+# 0.6.5 minimum: RESP3 null (`_\r\n`) GET-miss parsing (ringline #294) lands in
+# 0.6.5; the uniform recv_meta reply-metadata path (RespMeta / recv_meta,
+# ringline #288) landed in 0.6.4.
+ringline-redis = "0.6.5"
 ringline-memcache = "0.6.4"
 ringline-ping = "0.5.2"
 
@@ -90,7 +91,7 @@ rand_xoshiro = "0.7"
 # Kernel SO_TIMESTAMPING support is Linux-only.
 [target.'cfg(target_os = "linux")'.dependencies]
 ringline = { version = "0.5.2", features = ["timestamps"] }
-ringline-redis = { version = "0.6.4", features = ["timestamps"] }
+ringline-redis = { version = "0.6.5", features = ["timestamps"] }
 ringline-memcache = { version = "0.6.4", features = ["timestamps"] }
 ringline-ping = { version = "0.5.2", features = ["timestamps"] }
 
