@@ -180,19 +180,7 @@ async fn index_phase(
         // Valkey Search reports `state` / `backfill_in_progress` /
         // `mutation_queue_size` (there is no RediSearch-style
         // `percent_indexed` field).
-        let state = info_field(&fields, "state");
-        let backfill = info_field(&fields, "backfill_in_progress");
-        let queue = info_field(&fields, "mutation_queue_size");
-        let (Some(state), Some(backfill), Some(queue)) = (state, backfill, queue) else {
-            // Treating an unknown reply shape as "ready" would report a
-            // fictitious build time; fail loudly instead.
-            return Err(
-                "FT.INFO reply is missing state/backfill_in_progress/mutation_queue_size; \
-                 unsupported server version?"
-                    .to_string(),
-            );
-        };
-        if state == "ready" && backfill == "0" && queue == "0" {
+        if index_ready(&fields)? {
             break;
         }
         ringline::sleep(INDEX_POLL_INTERVAL).await;
@@ -364,4 +352,33 @@ async fn delete_prefix(client: &mut ringline_redis::Client, prefix: &str) -> Res
             return Ok(());
         }
     }
+}
+
+/// Readiness from an `FT.INFO` reply, supporting both server families.
+///
+/// Valkey Search reports `state` / `backfill_in_progress` /
+/// `mutation_queue_size`; RediSearch (Redis Query Engine) reports
+/// `percent_indexed` / `indexing`. Treating an unknown shape as ready would
+/// report a fictitious build time, so anything else is an error.
+fn index_ready(fields: &[Value]) -> Result<bool, String> {
+    let state = info_field(fields, "state");
+    let backfill = info_field(fields, "backfill_in_progress");
+    let queue = info_field(fields, "mutation_queue_size");
+    if let (Some(state), Some(backfill), Some(queue)) = (state, backfill, queue) {
+        return Ok(state == "ready" && backfill == "0" && queue == "0");
+    }
+    if let Some(pct) = info_field(fields, "percent_indexed") {
+        let done = pct
+            .parse::<f64>()
+            .map_err(|_| format!("percent_indexed not numeric: {pct:?}"))?
+            >= 1.0;
+        let indexing = info_field(fields, "indexing").unwrap_or_else(|| "0".to_string());
+        return Ok(done && indexing == "0");
+    }
+    Err(
+        "FT.INFO reply has neither the Valkey Search fields (state/backfill_in_progress/\
+         mutation_queue_size) nor the RediSearch fields (percent_indexed/indexing); \
+         unsupported server?"
+            .to_string(),
+    )
 }
