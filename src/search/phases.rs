@@ -15,7 +15,7 @@ const INDEX_POLL_INTERVAL: Duration = Duration::from_millis(10);
 /// larger than one send-copy pool slot (16 KiB) is split into chunks, and the
 /// connection's single send waiter is woken on the first chunk with a short
 /// byte count, so a client awaiting the whole batch hangs (root cause and fix:
-/// brayniac/ringline#6). Until a fixed ringline is released, keep every batch
+/// ringline-rs/ringline#299). Until a fixed ringline is released, keep every batch
 /// under one pool slot; the cap is byte-based so vector dimensionality cannot
 /// break it.
 const LOAD_BATCH_BYTE_BUDGET: usize = 8 * 1024;
