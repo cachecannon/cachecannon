@@ -11,11 +11,13 @@ use super::report::{PhaseTimings, QueryStats, RunReport};
 const KEY_PREFIX: &str = "doc:";
 const VECTOR_FIELD: &[u8] = b"vec";
 const INDEX_POLL_INTERVAL: Duration = Duration::from_millis(10);
-/// A pipeline batch is issued as a single `send()`. Empirically, single sends
-/// of ~16 KiB or more never complete on this path (observed: ~11 KiB fine,
-/// ~22 KiB hangs; `Pipeline::execute` drops its `SendFuture` unawaited, which
-/// is the prime suspect for larger sends). Budget batches well under that
-/// ceiling; the cap is byte-based so vector dimensionality cannot break it.
+/// A pipeline batch is issued as a single `send()`. In ringline 0.5.2 a send
+/// larger than one send-copy pool slot (16 KiB) is split into chunks, and the
+/// connection's single send waiter is woken on the first chunk with a short
+/// byte count, so a client awaiting the whole batch hangs (root cause and fix:
+/// brayniac/ringline#6). Until a fixed ringline is released, keep every batch
+/// under one pool slot; the cap is byte-based so vector dimensionality cannot
+/// break it.
 const LOAD_BATCH_BYTE_BUDGET: usize = 8 * 1024;
 /// Approximate per-command RESP overhead (verb, argument headers, CRLFs).
 const HSET_OVERHEAD_BYTES: usize = 64;
