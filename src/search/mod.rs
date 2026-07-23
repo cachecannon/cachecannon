@@ -82,6 +82,25 @@ pub struct SearchArgs {
     /// Keep the index and keys after the run (default drops the index).
     #[arg(long, default_value_t = false)]
     pub keep_index: bool,
+
+    /// Concurrent query connections in the query phase. Each connection runs
+    /// closed-loop with one request in flight; queries are dealt from a shared
+    /// counter. 1 preserves the single-client latency measurement.
+    #[arg(long, default_value_t = 1)]
+    pub query_clients: usize,
+
+    /// Times to run the full test set through the query phase. Raises the
+    /// measurement window for throughput runs; recall is unaffected (the same
+    /// queries repeat).
+    #[arg(long, default_value_t = 1)]
+    pub query_loops: usize,
+
+    /// Reuse an existing ready index and loaded keys: skip cleanup, load, and
+    /// FT.CREATE and go straight to the query phase. Fails if the index is
+    /// missing or the keyspace does not match the dataset. Implies the index
+    /// is kept afterward.
+    #[arg(long, default_value_t = false)]
+    pub reuse_index: bool,
 }
 
 /// Everything the ringline worker task needs, installed before launch.

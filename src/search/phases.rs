@@ -1,5 +1,7 @@
 //! The three measured phases: load, index, query.
 
+use std::rc::Rc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use resp_proto::{Request, Value};
@@ -22,7 +24,7 @@ const LOAD_BATCH_BYTE_BUDGET: usize = 256 * 1024;
 const HSET_OVERHEAD_BYTES: usize = 64;
 
 /// Connect, run load -> index -> query, and assemble the report.
-pub(super) async fn run_all(job: &Job) -> Result<RunReport, String> {
+pub(super) async fn run_all(job: &'static Job) -> Result<RunReport, String> {
     let conn = ringline::connect(job.endpoint)
         .map_err(|e| format!("connect {}: {e}", job.endpoint))?
         .await
@@ -32,6 +34,25 @@ pub(super) async fn run_all(job: &Job) -> Result<RunReport, String> {
         .ping()
         .await
         .map_err(|e| format!("PING {}: {e}", job.endpoint))?;
+
+    // Reuse mode: verify the index is ready and the keyspace matches the
+    // dataset, then go straight to the query phase. Load and build report as
+    // zero items / zero elapsed (skipped).
+    if job.args.reuse_index {
+        verify_reusable_index(&mut client, job).await?;
+        eprintln!("reusing existing index; querying");
+        let query = query_phase(&mut client, job).await?;
+        let skipped = || PhaseTimings {
+            items: 0,
+            elapsed: Duration::ZERO,
+            batch: 0,
+        };
+        return Ok(RunReport {
+            load: skipped(),
+            index: skipped(),
+            query,
+        });
+    }
 
     // A previous run's index would make load throughput and build time lies,
     // and stale `doc:*` hashes beyond this dataset's size would be backfilled
@@ -65,6 +86,49 @@ pub(super) async fn run_all(job: &Job) -> Result<RunReport, String> {
     }
 
     Ok(RunReport { load, index, query })
+}
+
+/// Preconditions for `--reuse-index`: the index exists and is fully ready,
+/// and the keyspace holds exactly the dataset's train vectors.
+async fn verify_reusable_index(
+    client: &mut ringline_redis::Client,
+    job: &Job,
+) -> Result<(), String> {
+    let info = client
+        .cmd(&Request::cmd(b"FT.INFO").arg(job.args.index.as_bytes()))
+        .await
+        .map_err(|e| format!("FT.INFO: {e}"))?;
+    let fields = match info {
+        Value::Array(items) => items,
+        Value::Error(e) => {
+            return Err(format!(
+                "--reuse-index: FT.INFO {}: {}",
+                job.args.index,
+                String::from_utf8_lossy(&e)
+            ));
+        }
+        other => {
+            return Err(format!(
+                "--reuse-index: FT.INFO: unexpected reply {other:?}"
+            ));
+        }
+    };
+    if !index_ready(&fields)? {
+        return Err("--reuse-index: index exists but is not fully ready".into());
+    }
+    let dbsize = client
+        .cmd(&Request::cmd(b"DBSIZE"))
+        .await
+        .map_err(|e| format!("DBSIZE: {e}"))?;
+    match dbsize {
+        Value::Integer(n) if n as usize == job.dataset.train.nrows() => Ok(()),
+        Value::Integer(n) => Err(format!(
+            "--reuse-index: DBSIZE {} does not match dataset train count {}",
+            n,
+            job.dataset.train.nrows()
+        )),
+        other => Err(format!("--reuse-index: DBSIZE: unexpected reply {other:?}")),
+    }
 }
 
 /// Load every `train` vector as `HSET doc:<row> vec <f32-LE>`, pipelined.
@@ -194,71 +258,165 @@ async fn index_phase(
     })
 }
 
-/// Run every `test` vector through `FT.SEARCH` KNN on a single connection,
-/// one request in flight, recording per-query latency and scoring recall@k.
-async fn query_phase(client: &mut ringline_redis::Client, job: &Job) -> Result<QueryStats, String> {
+/// Prebuilt per-run query strings shared by every query connection.
+struct QueryCtx {
+    knn: String,
+    k_arg: String,
+    ef_arg: String,
+}
+
+impl QueryCtx {
+    fn new(job: &Job) -> Self {
+        let k = job.args.k;
+        QueryCtx {
+            knn: format!(
+                "*=>[KNN {k} @{} $BLOB EF_RUNTIME $EF]",
+                String::from_utf8_lossy(VECTOR_FIELD)
+            ),
+            k_arg: k.to_string(),
+            ef_arg: job.args.ef_search.to_string(),
+        }
+    }
+}
+
+/// Issue query `qi`, returning (latency_ns, recall@k for this query).
+async fn run_one_query(
+    client: &mut ringline_redis::Client,
+    job: &Job,
+    ctx: &QueryCtx,
+    qi: usize,
+    returned_ids: &mut Vec<i64>,
+) -> Result<(u64, f64), String> {
     let k = job.args.k;
-    let k_arg = k.to_string();
-    let ef_arg = job.args.ef_search.to_string();
-    let knn = format!(
-        "*=>[KNN {k} @{} $BLOB EF_RUNTIME $EF]",
-        String::from_utf8_lossy(VECTOR_FIELD)
-    );
+    let blob = Dataset::f32_le_blob(job.dataset.test.row(qi));
+    let request = Request::cmd(b"FT.SEARCH")
+        .arg(job.args.index.as_bytes())
+        .arg(ctx.knn.as_bytes())
+        .arg(b"PARAMS")
+        .arg(b"4")
+        .arg(b"BLOB")
+        .arg(&blob)
+        .arg(b"EF")
+        .arg(ctx.ef_arg.as_bytes())
+        .arg(b"NOCONTENT")
+        .arg(b"LIMIT")
+        .arg(b"0")
+        .arg(ctx.k_arg.as_bytes())
+        .arg(b"DIALECT")
+        .arg(b"2");
 
-    let mut latencies_ns: Vec<u64> = Vec::with_capacity(job.dataset.test.nrows());
-    let mut recall_sum = 0.0f64;
-    let mut returned_ids: Vec<i64> = Vec::with_capacity(k);
+    let t0 = Instant::now();
+    let reply = client
+        .cmd(&request)
+        .await
+        .map_err(|e| format!("FT.SEARCH query {qi}: {e}"))?;
+    let latency_ns = t0.elapsed().as_nanos() as u64;
 
+    returned_ids.clear();
+    parse_knn_reply(&reply, returned_ids).map_err(|e| format!("FT.SEARCH query {qi}: {e}"))?;
+
+    // recall@k = |returned ∩ true_k| / k (ann-benchmarks definition).
+    // Ground truth is integer indices; returned keys are `doc:<i>` and
+    // were parsed back to integers above. Never intersect raw keys.
+    // Set semantics: a duplicated id in the reply must not count twice.
+    returned_ids.sort_unstable();
+    returned_ids.dedup();
+    let truth = job.dataset.neighbors.row(qi);
+    let hits = returned_ids
+        .iter()
+        .filter(|id| truth.iter().take(k).any(|t| i64::from(*t) == **id))
+        .count();
+    Ok((latency_ns, hits as f64 / k as f64))
+}
+
+/// Run the test set (`--query-loops` times) through `FT.SEARCH` KNN.
+///
+/// With `--query-clients 1` (default) all queries run on the caller's
+/// connection, one request in flight: the single-client latency measurement.
+/// With more, that many connections are opened and each runs closed-loop with
+/// one request in flight, dealing query indices from a shared counter: a
+/// closed-loop throughput measurement with per-request latencies pooled
+/// across connections.
+async fn query_phase(
+    client: &mut ringline_redis::Client,
+    job: &'static Job,
+) -> Result<QueryStats, String> {
+    let n = job.dataset.test.nrows();
+    let total = n * job.args.query_loops.max(1);
+    let clients = job.args.query_clients.max(1);
+
+    if clients == 1 {
+        let ctx = QueryCtx::new(job);
+        let mut latencies_ns: Vec<u64> = Vec::with_capacity(total);
+        let mut recall_sum = 0.0f64;
+        let mut returned_ids: Vec<i64> = Vec::with_capacity(job.args.k);
+
+        let started = Instant::now();
+        for idx in 0..total {
+            let (lat, recall) =
+                run_one_query(client, job, &ctx, idx % n, &mut returned_ids).await?;
+            latencies_ns.push(lat);
+            recall_sum += recall;
+        }
+        let elapsed = started.elapsed();
+
+        return Ok(QueryStats {
+            queries: total,
+            elapsed,
+            latencies_ns,
+            mean_recall: recall_sum / total as f64,
+        });
+    }
+
+    // Concurrent: one task per connection, shared dealer over query indices.
+    let dealer = Rc::new(AtomicUsize::new(0));
     let started = Instant::now();
-    for (qi, query) in job.dataset.test.rows().into_iter().enumerate() {
-        let blob = Dataset::f32_le_blob(query);
-        let request = Request::cmd(b"FT.SEARCH")
-            .arg(job.args.index.as_bytes())
-            .arg(knn.as_bytes())
-            .arg(b"PARAMS")
-            .arg(b"4")
-            .arg(b"BLOB")
-            .arg(&blob)
-            .arg(b"EF")
-            .arg(ef_arg.as_bytes())
-            .arg(b"NOCONTENT")
-            .arg(b"LIMIT")
-            .arg(b"0")
-            .arg(k_arg.as_bytes())
-            .arg(b"DIALECT")
-            .arg(b"2");
+    let mut handles = Vec::with_capacity(clients);
+    for _ in 0..clients {
+        let dealer = Rc::clone(&dealer);
+        let handle = ringline::spawn_with_handle(async move {
+            let conn = match ringline::connect(job.endpoint) {
+                Ok(f) => match f.await {
+                    Ok(c) => c,
+                    Err(e) => return Err(format!("connect {}: {e:?}", job.endpoint)),
+                },
+                Err(e) => return Err(format!("connect {}: {e}", job.endpoint)),
+            };
+            let mut client = ringline_redis::Client::builder(conn).build();
+            let ctx = QueryCtx::new(job);
+            let mut latencies_ns: Vec<u64> = Vec::new();
+            let mut recall_sum = 0.0f64;
+            let mut returned_ids: Vec<i64> = Vec::with_capacity(job.args.k);
+            loop {
+                let idx = dealer.fetch_add(1, Ordering::Relaxed);
+                if idx >= total {
+                    break;
+                }
+                let (lat, recall) =
+                    run_one_query(&mut client, job, &ctx, idx % n, &mut returned_ids).await?;
+                latencies_ns.push(lat);
+                recall_sum += recall;
+            }
+            Ok::<_, String>((latencies_ns, recall_sum))
+        })
+        .map_err(|e| format!("spawn query worker: {e}"))?;
+        handles.push(handle);
+    }
 
-        let t0 = Instant::now();
-        let reply = client
-            .cmd(&request)
-            .await
-            .map_err(|e| format!("FT.SEARCH query {qi}: {e}"))?;
-        latencies_ns.push(t0.elapsed().as_nanos() as u64);
-
-        returned_ids.clear();
-        parse_knn_reply(&reply, &mut returned_ids)
-            .map_err(|e| format!("FT.SEARCH query {qi}: {e}"))?;
-
-        // recall@k = |returned ∩ true_k| / k (ann-benchmarks definition).
-        // Ground truth is integer indices; returned keys are `doc:<i>` and
-        // were parsed back to integers above. Never intersect raw keys.
-        // Set semantics: a duplicated id in the reply must not count twice.
-        returned_ids.sort_unstable();
-        returned_ids.dedup();
-        let truth = job.dataset.neighbors.row(qi);
-        let hits = returned_ids
-            .iter()
-            .filter(|id| truth.iter().take(k).any(|t| i64::from(*t) == **id))
-            .count();
-        recall_sum += hits as f64 / k as f64;
+    let mut latencies_ns: Vec<u64> = Vec::with_capacity(total);
+    let mut recall_sum = 0.0f64;
+    for handle in handles {
+        let (lat, recall) = handle.await?;
+        latencies_ns.extend(lat);
+        recall_sum += recall;
     }
     let elapsed = started.elapsed();
 
     Ok(QueryStats {
-        queries: job.dataset.test.nrows(),
+        queries: total,
         elapsed,
         latencies_ns,
-        mean_recall: recall_sum / job.dataset.test.nrows() as f64,
+        mean_recall: recall_sum / total as f64,
     })
 }
 

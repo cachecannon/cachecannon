@@ -67,20 +67,26 @@ pub fn print(report: &RunReport, args: &SearchArgs, dataset: &Dataset) {
         args.m,
         args.ef_construction,
     );
+    if report.load.items == 0 {
+        println!("load         skipped (--reuse-index)");
+        println!("index build  skipped (--reuse-index)");
+    } else {
+        println!(
+            "load         {} vectors in {:.2}s ({:.0} vectors/s, pipelined batches of {})",
+            report.load.items,
+            report.load.elapsed.as_secs_f64(),
+            load_rate,
+            report.load.batch,
+        );
+        println!(
+            "index build  {:.2}s (FT.CREATE to fully indexed)",
+            report.index.elapsed.as_secs_f64(),
+        );
+    }
     println!(
-        "load         {} vectors in {:.2}s ({:.0} vectors/s, pipelined batches of {})",
-        report.load.items,
-        report.load.elapsed.as_secs_f64(),
-        load_rate,
-        report.load.batch,
-    );
-    println!(
-        "index build  {:.2}s (FT.CREATE to fully indexed)",
-        report.index.elapsed.as_secs_f64(),
-    );
-    println!(
-        "queries      {} single-client queries in {:.2}s ({qps:.0} QPS)",
+        "queries      {} queries on {} client(s) in {:.2}s ({qps:.0} QPS)",
         report.query.queries,
+        args.query_clients.max(1),
         report.query.elapsed.as_secs_f64(),
     );
     println!(
