@@ -7,6 +7,76 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.20] - 2026-09-08
+
+### Added
+- Memcache binary protocol. `protocol = "memcache-binary"` was accepted
+  by the config enum but rejected at validation as unimplemented; it is
+  now driven via ringline-memcache's `BinaryClient`, sharing one drive
+  loop with the ASCII client. The VERSION precheck is skipped for binary
+  (the binary subset has no VERSION opcode); a live connection is the
+  precheck. (#120)
+- TLS against private CAs and mutual TLS. Three new PEM options on
+  `[target]`: `tls_ca_file` (replaces the public roots with the CAs that
+  verify the server, so `tls_verify = false` is no longer the only way to
+  reach a server behind a private CA), and `tls_cert_file` /
+  `tls_key_file` (client certificate presented for mutual TLS, applied on
+  both the verifying and non-verifying paths). Config validation rejects
+  a half-configured client identity and certificate options without
+  `tls = true`; load errors name the offending file. (#123)
+- RESP3 is now actually negotiated: `protocol = "resp3"` / `--resp3`
+  sends `HELLO 3` on every new connection before workload traffic, so the
+  server switches to RESP3 framing (`_\r\n` for a GET miss). The flag was
+  previously inert. (#115)
+- `[workload.keyspace] format = "hex" | "uuid"`. `uuid` renders each key
+  as a canonical dashed UUID (requires `length = 36`) for servers that
+  key by UUID; the id's low bits land in the trailing hex chars so keys
+  spread evenly under last-N-hex directory sharding. (#121)
+- Admin endpoint routing: `/metrics/binary` serves a msgpack `Snapshot`
+  (the path `rezolus record` probes, so a benchmark run can be recorded
+  alongside server- and client-side agents in one `.rez` archive);
+  `/metrics` and `/` keep serving Prometheus text; other paths 404. The
+  Prometheus output now includes the latency histograms, which were
+  silently dropped before. (#118)
+- CI: Memcache integration jobs (ASCII, binary, and binary over TLS with
+  certificate verification against a generated CA), and a Valkey RESP3
+  job. The Valkey TLS job now verifies the server certificate instead of
+  setting `tls_verify = false`. (#115, #124, #125)
+
+### Changed
+- Upgrade to the ringline 0.6.0 coordinated breaking release plus the
+  0.6.1 core patch: ringline 0.6.1, ringline-redis 0.7.0,
+  ringline-memcache 0.7.1, ringline-ping 0.6.0, resp-proto 0.0.2. Carries
+  an io_uring liveness fix (a worker reaped zero completions for as long
+  as any task stayed runnable, under `DEFER_TASKRUN`), send-CQE
+  generation validation, deferred-close ordering so queued sends reach
+  the wire, and the resp-proto RESP line-framing fix for a stray `\r`
+  inside a CRLF-terminated line. (#119)
+
+### Fixed
+- Runs asking for more than 256 connections per worker silently ran
+  smaller than requested: ringline's standalone-task slab defaulted to
+  256 per worker and the spawn error was discarded, so a 4096-connection
+  run over 8 threads established 2040 and reported success. The slab is
+  now sized from the connection count, and a failed spawn is logged and
+  counted in `connections_failed`. (#122)
+- The sibling `timer_slots` pool (also 256 per worker) was sized
+  independently of the workload and, unlike the task slab, panicked the
+  worker on exhaustion; with the release profile's `panic = "abort"`
+  this surfaced as a bare `Aborted`. It is now sized from the connection
+  count too, with two timers per connection. (#126)
+- Histograms were dropped from metrics snapshots: `create_snapshot`
+  never matched metriken-core 0.2's `Value::Histogram` variant, so
+  neither the parquet recording nor the Prometheus endpoint carried any
+  latency series. Both `cachecannon` and `valkey-lab` were affected.
+  (#117)
+- Docs and example configs said `protocol = "memcache_binary"`, which
+  does not parse; corrected to `memcache-binary`. (#123)
+
+### Removed
+- The orphaned `config/redis-tls-ci.toml`, referenced by no workflow and
+  the last config still setting `tls_verify = false`. (#128)
+
 ## [0.0.19] - 2026-07-21
 
 ### Changed
