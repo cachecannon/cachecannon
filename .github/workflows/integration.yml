@@ -130,6 +130,15 @@ jobs:
 
       - name: Install Valkey and generate TLS certificates
         run: |
+          # The runner image ships a Google Chrome apt source we do not use.
+          # While Google republishes, its Packages index and Release file
+          # disagree, and `apt-get update` exits non-zero on ANY failed index --
+          # failing the job even though it already ignored the bad one and every
+          # package we install comes from the Ubuntu archive. Drop the source we
+          # do not need rather than ignore all failures, which would hide a real
+          # archive outage as a confusing "package not found" later.
+          sudo rm -f /etc/apt/sources.list.d/google-chrome.list \
+                     /etc/apt/sources.list.d/google-chrome.sources
           sudo apt-get update
           sudo apt-get install -y valkey-server || {
             # Fallback: install from Valkey PPA if not in default repos
@@ -274,6 +283,9 @@ jobs:
       # Ubuntu's memcached package is built without TLS, so build from source.
       - name: Build memcached with TLS support
         run: |
+          # Drop the unused Chrome apt source; see the note in `valkey-tls`.
+          sudo rm -f /etc/apt/sources.list.d/google-chrome.list \
+                     /etc/apt/sources.list.d/google-chrome.sources
           sudo apt-get update
           sudo apt-get install -y libevent-dev libssl-dev pkg-config
           curl -fsSL https://memcached.org/latest -o /tmp/memcached.tar.gz
