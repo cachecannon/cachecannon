@@ -243,7 +243,8 @@ pub fn run_benchmark_full(
         .timer_slots(timer_slots)
         .pin_to_core(false) // We pin in create_for_worker instead
         .core_offset(0)
-        .tcp_nodelay(true);
+        .tcp_nodelay(true)
+        .loop_diag(config.general.ringline_diag);
     // No recv-buffer override: ringline's default geometry is used. The old
     // value-size-derived override (256 × 256KiB for large values) compensated
     // for a per-CQE-buffer-size starvation cliff that ringline's fallback-recv

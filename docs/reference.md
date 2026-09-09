@@ -29,6 +29,11 @@ cpu_list = "0-3"
 # "uring" - Force io_uring (Linux 6.0+ only)
 # "mio" - Force mio (portable)
 io_engine = "auto"
+
+# Print ringline's per-worker event-loop diagnostics to stderr at shutdown
+# (`[ringline diag]` iteration mix and `[ringline stall]` stall buckets).
+# io_uring only; off by default.
+ringline_diag = false
 ```
 
 ### Target Settings

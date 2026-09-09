@@ -9,6 +9,7 @@ warmup = "10s"
 threads = 1
 # cpu_list = "0-3"       # Pin worker threads to CPUs (e.g., "0-3", "0,2,4,6", "0-3,8-11")
 # io_engine = "auto"     # "auto" (default), "uring" (Linux 6.0+), or "mio" (portable)
+# ringline_diag = false  # Print ringline's per-worker event-loop diagnostics to stderr at shutdown (io_uring only)
 
 [target]
 endpoints = ["127.0.0.1:6379"]
