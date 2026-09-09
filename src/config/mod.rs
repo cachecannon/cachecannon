@@ -31,6 +31,10 @@ pub struct General {
     /// CPU list for pinning worker threads (Linux style: "0-3,8-11,13")
     #[serde(default)]
     pub cpu_list: Option<String>,
+    /// Print ringline's per-worker event-loop diagnostics (`[ringline diag]`
+    /// and `[ringline stall]`) to stderr at shutdown. io_uring only.
+    #[serde(default)]
+    pub ringline_diag: bool,
 }
 
 impl Default for General {
@@ -40,6 +44,7 @@ impl Default for General {
             warmup: default_warmup(),
             threads: default_threads(),
             cpu_list: None,
+            ringline_diag: false,
         }
     }
 }
@@ -755,6 +760,17 @@ mod validation_tests {
         let config: Config = toml::from_str(toml).map_err(|e| ConfigError::Parse(e.to_string()))?;
         config.validate()?;
         Ok(config)
+    }
+
+    #[test]
+    fn ringline_diag_defaults_off_and_parses() {
+        let config = parse_config("[target]\nendpoints = [\"127.0.0.1:6379\"]\n").unwrap();
+        assert!(!config.general.ringline_diag);
+        let config = parse_config(
+            "[general]\nringline_diag = true\n[target]\nendpoints = [\"127.0.0.1:6379\"]\n",
+        )
+        .unwrap();
+        assert!(config.general.ringline_diag);
     }
 
     #[test]
