@@ -65,7 +65,12 @@ jobs:
       - name: Build release binary with cross
         run: cross build --release --target aarch64-unknown-linux-gnu
       - name: Install cross-arch binutils
-        run: sudo apt-get update && sudo apt-get install -y binutils-aarch64-linux-gnu
+        run: |
+          # Drop the unused Chrome apt source; see the note in integration.yml.
+          sudo rm -f /etc/apt/sources.list.d/google-chrome.list \
+                     /etc/apt/sources.list.d/google-chrome.sources
+          sudo apt-get update
+          sudo apt-get install -y binutils-aarch64-linux-gnu
       - name: Extract debug info and strip binaries
         run: |
           for bin in cachecannon valkey-lab; do
@@ -141,7 +146,12 @@ jobs:
       - name: Build release binary with cross
         run: cross build --release --target aarch64-unknown-linux-gnu
       - name: Install cross-arch binutils
-        run: sudo apt-get update && sudo apt-get install -y binutils-aarch64-linux-gnu
+        run: |
+          # Drop the unused Chrome apt source; see the note in integration.yml.
+          sudo rm -f /etc/apt/sources.list.d/google-chrome.list \
+                     /etc/apt/sources.list.d/google-chrome.sources
+          sudo apt-get update
+          sudo apt-get install -y binutils-aarch64-linux-gnu
       - name: Extract debug info and strip binaries
         run: |
           for bin in cachecannon valkey-lab; do
@@ -197,7 +207,11 @@ jobs:
         env:
           GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
         run: |
-          sudo apt-get update && sudo apt-get install -y rpm
+          # Drop the unused Chrome apt source; see the note in integration.yml.
+          sudo rm -f /etc/apt/sources.list.d/google-chrome.list \
+                     /etc/apt/sources.list.d/google-chrome.sources
+          sudo apt-get update
+          sudo apt-get install -y rpm
           # Diagnostics: rpm version and crypto backend (libgcrypt vs sequoia).
           # Ubuntu 24.04's rpm verifies via Sequoia, which is far stricter than
           # the GnuPG that creates the signature below.
@@ -249,7 +263,12 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ vars.AWS_REGION }}
       - name: Install repository tools
-        run: sudo apt-get update && sudo apt-get install -y apt-utils createrepo-c
+        run: |
+          # Drop the unused Chrome apt source; see the note in integration.yml.
+          sudo rm -f /etc/apt/sources.list.d/google-chrome.list \
+                     /etc/apt/sources.list.d/google-chrome.sources
+          sudo apt-get update
+          sudo apt-get install -y apt-utils createrepo-c
       - name: Publish to S3 APT repository
         env:
           S3_BUCKET: ${{ secrets.S3_BUCKET_APT }}
