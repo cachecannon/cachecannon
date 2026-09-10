@@ -7,6 +7,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.22] - 2026-09-10
+
+Two measurement-correctness fixes. Both concern the saturation search
+reporting a confident, plausible, wrong number rather than an error, which is
+why neither surfaced from CI or a code review.
+
+### Fixed
+- Post-prefill writeback no longer lands in the first measured window.
+  Prefill leaves the SERVER's page cache full of dirty pages, and Linux does
+  not write them back promptly: `dirty_expire_centisecs` defaults to 3000 --
+  thirty seconds -- after which the flusher evicts everything past expiry in
+  one burst. Measured against a disk-backed cache server: prefill wrote 57 GB
+  at 218-428 MB/s, and forty seconds after it ended the kernel dumped ~4.8 GB
+  at 483 MB/s in a single ten-second burst, taking the first window's p99 to
+  151ms. The search read that as the knee and reported 4.8K req/s where the
+  same hardware sustained 55-60K; three configurations returned byte-identical
+  numbers because all three bisected from the same burst. `warmup` already
+  discards its samples but defaults to 10s, so the discard window was
+  guaranteed to close before the burst it exists to absorb. New
+  `workload.prefill_settle`, default 60s, added to warmup only when prefill
+  runs, so a memory-only target pays nothing. Set to "0s" for the previous
+  behavior. (#137)
+
+### Added
+- `saturation_search.floor_improvement_ratio`, default 0.10: the search now
+  stops when latency stops responding to the offered rate. While no rate has
+  passed, bisecting downward is productive only if latency depends on rate at
+  all; when the target has a floor above the SLO -- a device read, a fixed
+  round trip -- no rate will pass and every further halving is wasted. The
+  existing tolerance check cannot catch this, because `lo` stays 0 and the
+  interval width is therefore exactly 1.0 forever, leaving only the step limit
+  to terminate. Measured: a search ran 5000 req/s down to 19, a 263x
+  reduction, while p50 went from 668us to 889us -- it got worse -- burning 16
+  measurement windows to establish what the third already showed. Detection is
+  inert once any rate has passed, since the bisection is then narrowing a real
+  interval. The verdict now distinguishes a target that cannot meet the SLO at
+  any rate from one the search failed to bracket, and `SaturationResults`
+  carries `latency_floor`. Set to 0 to always bisect to the step limit. (#138)
+
 ## [0.0.21] - 2026-09-10
 
 ### Added
