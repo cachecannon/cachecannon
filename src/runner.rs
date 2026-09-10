@@ -97,7 +97,7 @@ pub fn run_benchmark_full(
     };
 
     let num_threads = config.general.threads;
-    let warmup = config.general.warmup;
+    let warmup = effective_warmup(&config);
     let duration = config.general.duration;
     let total_connections = config.connection.total_connections();
 
@@ -1288,6 +1288,89 @@ mod tls_tests {
         assert!(
             err.to_string().contains("absent.key"),
             "error should name the file: {err}"
+        );
+    }
+}
+
+/// Warmup actually applied, which is longer than `general.warmup` when prefill
+/// ran.
+///
+/// Prefill leaves dirty pages in the SERVER's page cache, and Linux does not
+/// write them back promptly: `dirty_expire_centisecs` defaults to 30s, after
+/// which the flusher evicts everything past expiry in one burst. Measured
+/// against a disk-backed cache, that burst was ~4.8 GB at 483 MB/s arriving 40s
+/// after prefill ended -- inside the first measured window, taking its p99 to
+/// 151ms, which a saturation search then treated as the knee.
+///
+/// Warmup samples are discarded, so extending it past the expiry deadline moves
+/// the burst out of the measurement. This is a named function rather than an
+/// inline expression so the mapping from config to behavior can be asserted;
+/// the equivalent inline version had no test and would not have failed if the
+/// `prefill` condition were dropped.
+fn effective_warmup(config: &Config) -> Duration {
+    if config.workload.prefill {
+        config.general.warmup + config.workload.prefill_settle
+    } else {
+        config.general.warmup
+    }
+}
+
+#[cfg(test)]
+mod warmup_tests {
+    use super::effective_warmup;
+    use crate::config::Config;
+    use std::time::Duration;
+
+    fn cfg(prefill: bool, warmup: &str, settle: Option<&str>) -> Config {
+        let settle_line = settle
+            .map(|s| format!("prefill_settle = \"{s}\""))
+            .unwrap_or_default();
+        toml::from_str(&format!(
+            r#"
+            [general]
+            warmup = "{warmup}"
+            [target]
+            endpoints = ["127.0.0.1:11211"]
+            protocol = "memcache-binary"
+            [workload]
+            prefill = {prefill}
+            {settle_line}
+            "#
+        ))
+        .expect("config should parse")
+    }
+
+    #[test]
+    fn prefill_settle_defaults_to_past_dirty_expire() {
+        // Linux dirty_expire_centisecs is 3000 (30s); a shorter default would
+        // leave the writeback burst inside the first measured window.
+        let c = cfg(true, "10s", None);
+        assert!(
+            c.workload.prefill_settle >= Duration::from_secs(31),
+            "default settle {:?} does not outlast a 30s dirty expiry",
+            c.workload.prefill_settle
+        );
+    }
+
+    #[test]
+    fn warmup_is_extended_only_when_prefill_runs() {
+        // Without prefill there are no dirty pages to wait on, so a run against
+        // a memory-only server must pay nothing.
+        assert_eq!(
+            effective_warmup(&cfg(false, "10s", Some("60s"))),
+            Duration::from_secs(10)
+        );
+        assert_eq!(
+            effective_warmup(&cfg(true, "10s", Some("60s"))),
+            Duration::from_secs(70)
+        );
+    }
+
+    #[test]
+    fn zero_settle_restores_the_previous_behavior() {
+        assert_eq!(
+            effective_warmup(&cfg(true, "10s", Some("0s"))),
+            Duration::from_secs(10)
         );
     }
 }

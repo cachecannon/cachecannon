@@ -220,6 +220,31 @@ pub struct Workload {
     /// Set to "0s" to disable the timeout. Default: 300s.
     #[serde(default = "default_prefill_timeout", with = "humantime_serde")]
     pub prefill_timeout: Duration,
+    /// Extra discarded warmup added after prefill, before measurement begins.
+    ///
+    /// Prefill leaves the SERVER's page cache full of dirty pages, and Linux
+    /// does not write those back promptly: `dirty_expire_centisecs` defaults to
+    /// 3000 -- thirty seconds -- after which the flusher evicts everything past
+    /// expiry in one burst. Measured against a disk-backed cache: prefill wrote
+    /// 57 GB at 218-428 MB/s, and forty seconds after it ended the kernel
+    /// dumped ~4.8 GB at 483 MB/s in a single ten-second burst. That burst
+    /// landed inside the first measurement window and took its p99 to 151ms.
+    /// A saturation search reads that as the knee -- it fixed the bisection
+    /// ceiling there and reported 4.8K req/s on hardware that sustains 55-60K.
+    ///
+    /// `warmup` alone cannot cover this: it defaults to 10s, so the discard
+    /// window is guaranteed to close before the burst it exists to absorb.
+    ///
+    /// cachecannon cannot fix this at the source -- the dirty pages are on the
+    /// server and this is the client, so there is no `sync()` to call. Waiting
+    /// past the expiry deadline is the portable remedy. Traffic keeps flowing
+    /// throughout, since this extends warmup rather than sleeping, so
+    /// connections stay open and the server's caches stay warm.
+    ///
+    /// Applied ONLY when `prefill` is true, so a run against a memory-only
+    /// server pays nothing. Set to "0s" to disable.
+    #[serde(default = "default_prefill_settle", with = "humantime_serde")]
+    pub prefill_settle: Duration,
     /// On GET miss, automatically SET the key to backfill the cache (cache-aside pattern).
     #[serde(default, alias = "set_on_miss")]
     pub backfill_on_miss: bool,
@@ -357,6 +382,12 @@ pub(crate) fn default_max_bisect_steps() -> u32 {
 
 fn default_prefill_timeout() -> Duration {
     Duration::from_secs(300)
+}
+
+/// 60s: past Linux's 30s `dirty_expire_centisecs`, with headroom for the flush
+/// itself. See `Workload::prefill_settle`.
+fn default_prefill_settle() -> Duration {
+    Duration::from_secs(60)
 }
 
 #[derive(Debug, Clone, Deserialize)]
