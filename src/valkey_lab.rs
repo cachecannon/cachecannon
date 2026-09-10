@@ -333,6 +333,7 @@ fn build_config_from_saturate(args: &SaturateArgs) -> Result<Config, Box<dyn std
         sample_window: Duration::from_secs(args.sample_window),
         drain_window: Duration::from_millis(500),
         stop_after_failures: 3,
+        confirm_failures: cachecannon::config::default_confirm_failures(),
         max_rate: args.max_rate,
         min_throughput_ratio: 0.9,
         bisect_tolerance: 0.05,

@@ -275,6 +275,22 @@ pub struct SaturationSearch {
     #[serde(default = "default_min_throughput_ratio")]
     pub min_throughput_ratio: f64,
     /// Relative interval width at which bisection stops (0.0-1.0).
+    /// Extra consecutive measurements required to confirm an SLO failure
+    /// before the search acts on it.
+    ///
+    /// The search is otherwise anchored by its first failing sample: a failure
+    /// during the climb sets the bisection ceiling permanently, and nothing
+    /// above that rate is ever retried. A single transient -- a post-prefill
+    /// writeback burst, a step-onset thundering herd, a noisy neighbour -- can
+    /// therefore cap a whole run far below the real knee, and the result looks
+    /// like a clean convergence rather than an error.
+    ///
+    /// With the default of 1 a rate must fail twice in a row to count as
+    /// failed; if the retry passes, the rate is treated as passing and the
+    /// search continues. Costs one extra sample window per failure. Set to 0
+    /// for the previous accept-first-failure behavior.
+    #[serde(default = "default_confirm_failures")]
+    pub confirm_failures: u32,
     #[serde(default = "default_bisect_tolerance")]
     pub bisect_tolerance: f64,
     /// Hard cap on the number of bisection probes.
@@ -325,6 +341,10 @@ fn default_max_rate() -> u64 {
 
 fn default_min_throughput_ratio() -> f64 {
     0.9
+}
+
+pub fn default_confirm_failures() -> u32 {
+    1
 }
 
 pub(crate) fn default_bisect_tolerance() -> f64 {
