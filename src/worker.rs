@@ -1471,7 +1471,7 @@ async fn memcache_connection_task(state: Arc<SharedWorkerState>, endpoint_idx: u
         if state.task_state.shared.phase() == Phase::Precheck && !state.is_precheck_done() {
             let precheck = match &mut client {
                 McClient::Ascii(c) => c.version().await.map(|_| ()),
-                // The binary subset has no VERSION opcode (valcache drops the
+                // The binary subset has no VERSION opcode (some servers drop the
                 // connection on it) and BinaryClient exposes no version(); a live
                 // connection is a sufficient precheck.
                 McClient::Binary(_) => Ok(()),
