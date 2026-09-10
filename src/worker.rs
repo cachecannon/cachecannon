@@ -9,6 +9,7 @@ use crate::client::{RequestResult, RequestType};
 #[cfg(target_os = "linux")]
 use crate::config::TimestampMode;
 use crate::config::{Config, Protocol as CacheProtocol};
+use crate::keydist::KeyDist;
 use crate::metrics;
 use ratelimit::{Ratelimiter, TryWaitError};
 
@@ -217,6 +218,9 @@ pub struct BenchWorkerConfig {
     pub value_pool: Arc<Vec<u8>>,
     /// Cluster mode: slot → endpoint index (16384 entries). None = ketama routing.
     pub slot_table: Option<Vec<u16>>,
+    /// Steady-state key-id distribution, built ONCE by the runner and shared by
+    /// every worker. Zipf setup is O(keyspace) so it must not be per-worker.
+    pub(crate) key_dist: Arc<KeyDist>,
 }
 
 // ── Config channel ────────────────────────────────────────────────────────
@@ -376,6 +380,8 @@ struct TaskSharedState {
     tls_enabled: bool,
     /// SNI server name for TLS connections.
     tls_server_name: Option<String>,
+    /// Steady-state key-id distribution (see `BenchWorkerConfig::key_dist`).
+    key_dist: Arc<KeyDist>,
 }
 
 /// State shared between the BenchHandler (on_tick) and connection tasks.
@@ -567,6 +573,7 @@ impl AsyncEventHandler for BenchHandler {
         let prefill_done = false;
 
         let task_state = Arc::new(TaskSharedState {
+            key_dist: Arc::clone(&cfg.key_dist),
             config: cfg.config.clone(),
             shared: Arc::clone(&cfg.shared),
             ratelimiter: cfg.ratelimiter.clone(),
@@ -943,7 +950,6 @@ async fn drive_resp_workload(
     backfill_queue: &mut Vec<usize>,
 ) -> Result<(), DisconnectReason> {
     let config = &state.task_state.config;
-    let key_count = config.workload.keyspace.count;
     let get_ratio = config.workload.commands.get as usize;
     let delete_ratio = config.workload.commands.delete as usize;
     let value_len = config.workload.values.length;
@@ -1071,13 +1077,28 @@ async fn drive_resp_workload(
                     continue;
                 }
 
-                // Pick a key owned by this connection's endpoint. In cluster /
-                // multi-endpoint mode, index a precomputed per-endpoint key-id
-                // list (O(1)) rather than rejection-sampling random keys and
-                // re-routing each one until one lands on this endpoint — that
-                // rejection sampling made CRC16 slot routing ~40% of CPU at
-                // high pipeline depth. Single-endpoint: any key works.
-                let key_id = if multi_endpoint {
+                // Pick a key owned by this connection's endpoint.
+                //
+                // UNIFORM + multi-endpoint: index a precomputed per-endpoint
+                // key-id list (O(1)). Rejection-sampling random keys and
+                // re-routing each one made CRC16 slot routing ~40% of CPU at
+                // high pipeline depth, and with a uniform draw the per-endpoint
+                // list reproduces the global distribution exactly, so the fast
+                // path is free.
+                //
+                // SKEWED + multi-endpoint: the fast path would be WRONG. Drawing
+                // uniformly from each endpoint's own bucket makes every shard see
+                // a uniform workload and equal load, which is precisely the hot-
+                // shard effect a skewed keyspace exists to measure. So draw from
+                // the global distribution and reject-route, exactly as the RESP
+                // path does. A rejected draw must NOT consume a rate-limit token:
+                // because tokens are only spent on a match, each endpoint ends up
+                // receiving traffic in proportion to the share of the key
+                // distribution it owns -- which is the imbalance we want, not an
+                // artifact to correct for.
+                let key_id = if !multi_endpoint {
+                    state.task_state.key_dist.sample(rng)
+                } else if matches!(&*state.task_state.key_dist, KeyDist::Uniform { .. }) {
                     let bucket = &state.task_state.endpoint_keys[endpoint_idx];
                     if bucket.is_empty() {
                         // Endpoint owns no keys (degenerate keyspace); yield to
@@ -1086,7 +1107,25 @@ async fn drive_resp_workload(
                     }
                     bucket[rng.random_range(0..bucket.len())] as usize
                 } else {
-                    rng.random_range(0..key_count)
+                    let mut attempts = 0usize;
+                    let max_attempts = max_routing_attempts(num_endpoints);
+                    let picked = loop {
+                        let candidate = state.task_state.key_dist.sample(rng);
+                        write_key(key_buf, candidate);
+                        if route_key(&state.task_state, key_buf) == endpoint_idx {
+                            break Some(candidate);
+                        }
+                        attempts += 1;
+                        if attempts >= max_attempts {
+                            break None;
+                        }
+                    };
+                    match picked {
+                        Some(k) => k,
+                        // Could not find a key for this endpoint in the attempt
+                        // budget; yield to recv rather than spending a token.
+                        None => break,
+                    }
                 };
                 write_key(key_buf, key_id);
 
@@ -1502,7 +1541,6 @@ async fn drive_memcache_workload(
     backfill_queue: &mut Vec<usize>,
 ) -> Result<(), DisconnectReason> {
     let config = &state.task_state.config;
-    let key_count = config.workload.keyspace.count;
     let get_ratio = config.workload.commands.get as usize;
     let delete_ratio = config.workload.commands.delete as usize;
     let value_len = config.workload.values.length;
@@ -1617,7 +1655,7 @@ async fn drive_memcache_workload(
                     let mut attempts = 0usize;
                     let max_attempts = max_routing_attempts(num_endpoints);
                     loop {
-                        let candidate = rng.random_range(0..key_count);
+                        let candidate = state.task_state.key_dist.sample(rng);
                         write_key(key_buf, candidate);
                         if !multi_endpoint || route_key(&state.task_state, key_buf) == endpoint_idx
                         {
@@ -2226,6 +2264,7 @@ mod tests {
         .unwrap();
 
         let task_state = Arc::new(TaskSharedState {
+            key_dist: Arc::new(KeyDist::uniform(1)),
             config,
             shared,
             ratelimiter: None,

@@ -347,6 +347,11 @@ pub struct Keyspace {
     pub count: usize,
     #[serde(default)]
     pub distribution: Distribution,
+    /// YCSB skew parameter for `distribution = "zipf"`; ignored for uniform.
+    /// Larger is more skewed. Must be > 0 and != 1 (the generator divides by
+    /// `1 - theta`). 0.99 is the YCSB default.
+    #[serde(default = "default_zipf_theta")]
+    pub zipf_theta: f64,
     /// How key ids are rendered into key bytes (`hex` default, or `uuid`).
     #[serde(default)]
     pub format: KeyFormat,
@@ -358,6 +363,7 @@ impl Default for Keyspace {
             length: default_key_length(),
             count: default_key_count(),
             distribution: Distribution::default(),
+            zipf_theta: default_zipf_theta(),
             format: KeyFormat::default(),
         }
     }
@@ -369,6 +375,10 @@ fn default_key_length() -> usize {
 
 fn default_key_count() -> usize {
     1_000_000
+}
+
+fn default_zipf_theta() -> f64 {
+    0.99
 }
 
 #[derive(Debug, Clone, Copy, Default, Deserialize)]
@@ -592,6 +602,18 @@ impl Config {
             ));
         }
 
+        if matches!(self.workload.keyspace.distribution, Distribution::Zipf) {
+            let theta = self.workload.keyspace.zipf_theta;
+            // is_finite() first so NaN is caught before the ordered comparison.
+            // rand_distr's rejection-inversion handles theta == 1, so unlike a
+            // zeta-based generator there is no singularity to exclude here.
+            if !theta.is_finite() || theta <= 0.0 {
+                return Err(ConfigError::Validation(format!(
+                    "keyspace.zipf_theta must be finite and > 0 (got {theta})"
+                )));
+            }
+        }
+
         if self.workload.values.length > crate::runner::VALUE_POOL_SIZE {
             return Err(ConfigError::Validation(format!(
                 "workload.values.length ({}) exceeds the value pool size ({})",
@@ -797,6 +819,85 @@ mod validation_tests {
         )
         .expect("memcache-binary config should be valid");
         assert_eq!(cfg.target.protocol, Protocol::MemcacheBinary);
+    }
+
+    #[test]
+    fn accepts_zipf_theta_of_one() {
+        // rejection-inversion has no singularity at theta == 1, so it is a legal
+        // (and commonly quoted) skew rather than something to exclude.
+        toml::from_str::<Config>(
+            r#"
+            [target]
+            endpoints = ["127.0.0.1:11211"]
+            protocol = "memcache-binary"
+            [workload.keyspace]
+            distribution = "zipf"
+            zipf_theta = 1.0
+            "#,
+        )
+        .expect("parses")
+        .validate()
+        .expect("theta = 1 must be accepted");
+    }
+
+    #[test]
+    fn rejects_nonpositive_or_nan_zipf_theta() {
+        for bad in ["0.0", "-0.5", "nan"] {
+            let err = toml::from_str::<Config>(&format!(
+                r#"
+                [target]
+                endpoints = ["127.0.0.1:11211"]
+                protocol = "memcache-binary"
+                [workload.keyspace]
+                distribution = "zipf"
+                zipf_theta = {bad}
+                "#
+            ))
+            .expect("parses")
+            .validate()
+            .unwrap_err();
+            assert!(
+                format!("{err:?}").contains("zipf_theta"),
+                "theta={bad} gave unexpected error: {err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn accepts_zipf_with_multiple_endpoints() {
+        // Skew across a sharded fleet is realistic and supported: hot keys hash
+        // to particular shards and those shards see disproportionate load, which
+        // is the imbalance the setup exists to measure. The worker draws from the
+        // global distribution and reject-routes rather than using the uniform
+        // per-endpoint fast path.
+        toml::from_str::<Config>(
+            r#"
+            [target]
+            endpoints = ["127.0.0.1:11211", "127.0.0.1:11212"]
+            protocol = "memcache-binary"
+            [workload.keyspace]
+            distribution = "zipf"
+            "#,
+        )
+        .expect("parses")
+        .validate()
+        .expect("zipf across shards must be allowed");
+    }
+
+    #[test]
+    fn zipf_theta_defaults_to_ycsb_value() {
+        let cfg: Config = toml::from_str(
+            r#"
+            [target]
+            endpoints = ["127.0.0.1:11211"]
+            protocol = "memcache-binary"
+            [workload.keyspace]
+            distribution = "zipf"
+            "#,
+        )
+        .expect("parses");
+        cfg.validate().expect("default theta must be valid");
+        assert_eq!(cfg.workload.keyspace.zipf_theta, 0.99);
     }
 
     #[test]
