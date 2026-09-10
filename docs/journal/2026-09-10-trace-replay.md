@@ -72,16 +72,15 @@ this one.
 
 ### In scope
 
-- A normalized trace format, columnar (parquet), streamed rather than loaded:
-  a week of production traffic does not fit in memory, and the ecosystem here
-  already reads and writes parquet.
+- A normalized trace row -- `ts`, `key_id` (a dense u64 identity, NOT key
+  bytes), `op`, `value_len` -- carried in the container described below,
+  streamed rather than loaded: a week of production traffic does not fit in
+  memory. Storing an integer identity rather than key bytes makes key SHAPE a
+  replay-time config rather than a transformation, since `write_key(buf, id)`
+  already renders an id as hex or UUID. Yang's binary traces already carry a
+  `u64` object id, so conversion preserves identity directly.
 - Converters as separate tooling, not in the hot path: `memcached watch`
   output and the Twitter trace CSV are the two worth supporting first.
-- Key mapping. Trace keys are hashed or anonymized and are the wrong shape for
-  servers that constrain key format. Needs a deterministic trace-key to
-  on-wire-key function, injective enough to preserve identity — the same trace
-  key must always produce the same on-wire key, or reuse distance is destroyed
-  and the trace measures nothing.
 - **Variable value sizes.** Traces carry them and they drive both bytes on the
   wire and memory pressure, which is the mechanism under study.
   `[workload.values]` currently has a single fixed `length`; the value pool is
@@ -103,6 +102,63 @@ this one.
   is not modelled.
 - Value *contents*. Sizes matter; bytes do not.
 - Writing traces. cachecannon replays; capture belongs to whatever produced it.
+
+## Container: reuse rather than invent
+
+The trace container should be the one rezolus already writes: a SQLite envelope
+holding sealed parquet segments, plus a WAL table for rows not yet flushed to a
+segment. That is `crates/rez` in iopsystems/rezolus, and its own doc comment is
+explicit that it is not metric-specific:
+
+> Nothing here knows about samplers, endpoints, or the CLI — it speaks in
+> recordings, tables, segments, and bytes.
+
+It already ships the streaming writer, the WAL, a seal policy, the reader, a
+typed schema and time windowing. So trace support is a table schema plus
+converters, not a new format. It also gives us something the published binary
+formats cannot: a format to stream TO. Capturing from production -- a
+`memcached watch` stream, say -- needs an append path, and "append to a raw
+fixed-width blob" is not a container.
+
+This argues against reading the published formats natively. That was the earlier
+inclination here, on the grounds that Yang's binary traces already carry a `u64`
+object id and object size, so no transformation is needed for replay. What that
+misses is the write path, and the provenance: a container with a labels blob
+recording source, origin format, conversion date and transformations applied is
+better provenance than the raw file, not worse. Converting is a one-time cost
+per trace against many replays.
+
+### Two prerequisites, both outside cachecannon
+
+**1. Extract the container into its own crate.** `rez` is `publish = false`
+inside the rezolus workspace, so cachecannon cannot depend on it as things
+stand -- the options are a cross-repo git pin, vendoring, or publishing. Working
+name for the extracted crate: `dendro` (dendrochronology -- time-ordered layers
+laid down by appending, dated and read across; which is what sealed segments
+with `first_ts`/`last_ts` are). Default file extension `.dendro`.
+
+The extension should name the CONTENT, not the container: `.rez` stays `.rez`,
+a rezolus recording that happens to live in a dendro container, the way `.docx`
+and `.xlsx` are both ZIP without sharing an extension. Traces get their own.
+`.dendro` is the default only for generic or mixed payloads.
+
+**2. Brand the container in the SQLite header.** The crate sets pragmas for
+`journal_mode`, `wal_checkpoint` and `incremental_vacuum`, but nothing
+identifies the file, so detection is structural (`detect_rez_format`,
+`is_rez_path`) with a known consequence recorded in `rez_stream.rs`:
+
+> an in-progress or early-killed recording would sniff as not-`.rez`
+
+`PRAGMA application_id` is a 32-bit magic at a fixed header offset, set at
+creation. It makes identification a four-byte read that works from the first
+write -- before any table has rows or any segment is sealed -- which fixes that
+edge case rather than documenting it. `PRAGMA user_version` alongside it carries
+the format revision. Both are also what `file(1)` magic entries key on.
+
+Worth doing as part of the extraction rather than after: once the crate is
+public and other things depend on it, a file that cannot identify itself is a
+compatibility problem rather than an inconvenience. Extensions get renamed;
+headers do not.
 
 ## Decision criteria
 
@@ -129,6 +185,14 @@ which is why this entry is open and no code exists.
   Both need to be stated in a result or it is not reproducible.
 - What is the minimum useful trace length, and how is it decided rather than
   guessed?
+- Re-stamping value sizes changes what a trace means. A source trace of small
+  values re-stamped at 56 KiB scales the working set by the value-size ratio --
+  a 10 GB working set at ~100-byte values becomes ~5.6 TB -- so reuse distance
+  in ITEMS is preserved while reuse distance in BYTES is not. Replaying that
+  against a fixed cache size measures a regime the source workload never
+  occupied. Any value-size transformation therefore needs a companion step that
+  rescales the key population to land the working set where the experiment
+  intends. This is a trap precisely because the transformation looks innocuous.
 - Does the saturation search still mean the same thing under replay? Its knee is
   currently a property of the server at a fixed access pattern; under replay the
   pattern varies within a run, so a single knee may not be well defined.
