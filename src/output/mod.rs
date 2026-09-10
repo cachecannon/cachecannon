@@ -304,6 +304,11 @@ pub struct SaturationResults {
     pub max_compliant_rate: Option<u64>,
     /// All steps taken during the search.
     pub steps: Vec<SaturationStep>,
+    /// Set when the search stopped because latency stopped responding to the
+    /// offered rate, rather than because it exhausted its bisection steps.
+    /// Distinguishes "this target has a floor above your SLO" from "we did not
+    /// search far enough".
+    pub latency_floor: bool,
 }
 
 /// Reason why prefill stalled or timed out.

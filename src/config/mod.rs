@@ -316,6 +316,25 @@ pub struct SaturationSearch {
     /// for the previous accept-first-failure behavior.
     #[serde(default = "default_confirm_failures")]
     pub confirm_failures: u32,
+    /// Minimum fractional latency improvement expected when the search halves
+    /// the rate, before it concludes the target has a floor above the SLO.
+    ///
+    /// When no rate has passed yet, the search bisects downward looking for one.
+    /// That is only productive if latency actually responds to offered rate. If
+    /// it does not, the target has a structural floor above the SLO -- a device
+    /// read, a fixed round trip -- and no rate will ever pass, so every further
+    /// halving is wasted.
+    ///
+    /// Measured against a cache whose working set was 227% of RAM: the search
+    /// ran from 5000 req/s down to 19, a 263x reduction, and p50 went from
+    /// 668us to 889us. It got WORSE. Sixteen measurement windows, about
+    /// nineteen minutes, to establish what the third window already showed.
+    ///
+    /// With the default of 0.10, a halving that improves the SLO percentile by
+    /// less than 10% ends the search with a diagnosis rather than a bare
+    /// "SLO never met". Set to 0 to disable and always bisect to the step limit.
+    #[serde(default = "default_floor_improvement_ratio")]
+    pub floor_improvement_ratio: f64,
     #[serde(default = "default_bisect_tolerance")]
     pub bisect_tolerance: f64,
     /// Hard cap on the number of bisection probes.
@@ -370,6 +389,10 @@ fn default_min_throughput_ratio() -> f64 {
 
 pub fn default_confirm_failures() -> u32 {
     1
+}
+
+pub fn default_floor_improvement_ratio() -> f64 {
+    0.10
 }
 
 pub(crate) fn default_bisect_tolerance() -> f64 {

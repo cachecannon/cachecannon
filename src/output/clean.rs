@@ -716,6 +716,18 @@ impl OutputFormatter for CleanFormatter {
                     ))
                 );
             }
+            None if results.latency_floor => {
+                // Distinguish a target that cannot meet the SLO at any rate from
+                // one the search merely failed to bracket. Halving the rate
+                // stopped improving latency, so the floor is structural.
+                println!(
+                    "{}",
+                    self.red(
+                        "MAX COMPLIANT THROUGHPUT: none (latency floor above SLO -- \
+                         reducing the rate stopped improving latency, so no rate will pass)"
+                    )
+                );
+            }
             None => {
                 println!(
                     "{}",
