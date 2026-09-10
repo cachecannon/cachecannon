@@ -86,6 +86,10 @@ pub struct RateSearch {
     max_rate: u64,
     bisect_tolerance: f64,
     max_bisect_steps: u32,
+    /// Extra consecutive failures needed before a failure is acted on.
+    confirm_failures: u32,
+    /// Consecutive failures observed at `current_rate` so far.
+    failures_at_rate: u32,
 }
 
 impl RateSearch {
@@ -95,6 +99,7 @@ impl RateSearch {
         max_rate: u64,
         bisect_tolerance: f64,
         max_bisect_steps: u32,
+        confirm_failures: u32,
     ) -> Self {
         Self {
             phase: SearchPhase::Climb,
@@ -107,13 +112,30 @@ impl RateSearch {
             max_rate,
             bisect_tolerance,
             max_bisect_steps,
+            confirm_failures,
+            failures_at_rate: 0,
         }
     }
 
     /// Record the SLO result for `current_rate` and decide the next move.
+    ///
+    /// A failure is not acted on until it has repeated `confirm_failures` more
+    /// times at the same rate. Without that, one transient sample permanently
+    /// caps the search: a climb failure fixes the bisection ceiling and no
+    /// higher rate is ever retried, so the run converges tidily on a knee that
+    /// is far too low and reports it as success. A retry that passes clears the
+    /// count and the rate is treated as passing.
     pub fn advance(&mut self, passed: bool) -> SearchOutcome {
         if passed {
+            self.failures_at_rate = 0;
             self.last_good = Some(self.current_rate);
+        } else {
+            self.failures_at_rate += 1;
+            if self.failures_at_rate <= self.confirm_failures {
+                // Re-measure the same rate; leave phase, lo and hi untouched.
+                return SearchOutcome::Probe(self.current_rate);
+            }
+            self.failures_at_rate = 0;
         }
         match self.phase {
             SearchPhase::Climb => {
@@ -208,6 +230,7 @@ impl SaturationSearchState {
                 config.max_rate,
                 config.bisect_tolerance,
                 config.max_bisect_steps,
+                config.confirm_failures,
             ),
             step_start: Instant::now(),
             baseline_at: None,
@@ -564,6 +587,7 @@ mod tests {
             sample_window: Duration::from_secs(5),
             drain_window: Duration::from_millis(500),
             stop_after_failures: 3,
+            confirm_failures: 0,
             max_rate: 100_000_000,
             min_throughput_ratio: 0.9,
             bisect_tolerance: 0.05,
@@ -610,10 +634,17 @@ mod rate_search_tests {
 
     // Oracle: every rate <= `knee` passes, every rate above fails.
     fn run_to_completion(knee: u64) -> Option<u64> {
+        run_to_completion_with(knee, 0)
+    }
+
+    fn run_to_completion_with(knee: u64, confirm_failures: u32) -> Option<u64> {
         let mut s = RateSearch::new(
-            /* start_rate */ 1000, /* step_multiplier */ 2.0,
-            /* max_rate */ 1_000_000, /* bisect_tolerance */ 0.05,
+            /* start_rate */ 1000,
+            /* step_multiplier */ 2.0,
+            /* max_rate */ 1_000_000,
+            /* bisect_tolerance */ 0.05,
             /* max_bisect_steps */ 8,
+            confirm_failures,
         );
         let mut rate = 1000u64;
         loop {
@@ -635,7 +666,7 @@ mod rate_search_tests {
 
     #[test]
     fn stops_within_max_bisect_steps() {
-        let mut s = RateSearch::new(1000, 2.0, 1_000_000, 0.0, 4);
+        let mut s = RateSearch::new(1000, 2.0, 1_000_000, 0.0, 4, 0);
         let mut rate = 1000u64;
         let mut probes = 0;
         loop {
@@ -660,7 +691,7 @@ mod rate_search_tests {
         // reported knee (if any) must be a rate that actually passed (<= knee),
         // and the search must terminate quickly.
         for &knee in &[0u64, 500, 1000, 1500, 7777, 30_000, 999_999, 5_000_000] {
-            let mut s = RateSearch::new(1000, 2.0, 1_000_000, 0.05, 8);
+            let mut s = RateSearch::new(1000, 2.0, 1_000_000, 0.05, 8, 0);
             let mut rate = 1000u64;
             let mut probes = 0;
             let found = loop {
@@ -690,7 +721,7 @@ mod rate_search_tests {
     #[test]
     fn zero_tolerance_and_zero_max_steps_still_terminate() {
         // tolerance 0 forces termination via max_bisect_steps / hi-lo<=1.
-        let mut s = RateSearch::new(1000, 2.0, 1_000_000, 0.0, 0);
+        let mut s = RateSearch::new(1000, 2.0, 1_000_000, 0.0, 0, 0);
         let mut rate = 1000u64;
         let mut probes = 0;
         loop {
@@ -700,6 +731,85 @@ mod rate_search_tests {
                 SearchOutcome::Probe(next) => rate = next,
                 SearchOutcome::Done { .. } => break,
             }
+        }
+    }
+
+    /// The regression guard for the reads-run failure this change fixes.
+    ///
+    /// Oracle: the true knee is 50k, but the FIRST sample at the start rate
+    /// reports a spurious failure (a post-prefill writeback burst, a step-onset
+    /// herd -- the cause does not matter). Without confirmation the search
+    /// treats 1000 as the ceiling and bisects below it, converging tidily on a
+    /// knee ~50x too low and reporting it as a clean result. That is exactly
+    /// what happened on a real run: three different modes returned byte
+    /// identical numbers because all three bisected from the same bad first
+    /// sample.
+    #[test]
+    fn a_transient_first_failure_does_not_cap_the_search() {
+        fn run(confirm_failures: u32) -> Option<u64> {
+            let mut s = RateSearch::new(1000, 2.0, 1_000_000, 0.05, 8, confirm_failures);
+            let mut rate = 1000u64;
+            let mut first_sample = true;
+            loop {
+                // One transient failure, then the honest oracle forever after.
+                let passed = if first_sample {
+                    first_sample = false;
+                    false
+                } else {
+                    rate <= 50_000
+                };
+                match s.advance(passed) {
+                    SearchOutcome::Probe(next) => rate = next,
+                    SearchOutcome::Done { knee } => return knee,
+                }
+            }
+        }
+
+        let without = run(0).expect("baseline still reports some knee");
+        assert!(
+            without < 1000,
+            "expected the old behavior to be capped below the start rate, got {without}"
+        );
+
+        let with = run(1).expect("confirmed search must find a knee");
+        let rel = (with as f64 - 50_000.0).abs() / 50_000.0;
+        assert!(
+            rel <= 0.05,
+            "confirmed search should recover the true knee ~50k, got {with}"
+        );
+    }
+
+    /// A real failure must still be acted on -- confirmation must not turn a
+    /// genuine ceiling into an endless retry loop.
+    #[test]
+    fn persistent_failures_still_converge_with_confirmation() {
+        for knee in [5_000u64, 50_000, 250_000] {
+            let found = run_to_completion_with(knee, 1).expect("must find a knee");
+            let rel = (found as f64 - knee as f64).abs() / knee as f64;
+            assert!(rel <= 0.05, "knee {knee}: found {found}, rel error {rel}");
+            assert!(found <= knee, "reported knee must actually pass SLO");
+        }
+    }
+
+    /// confirm_failures = 0 preserves the previous semantics exactly.
+    #[test]
+    fn zero_confirmations_matches_legacy_behavior() {
+        for knee in [5_000u64, 50_000, 250_000] {
+            assert_eq!(run_to_completion(knee), run_to_completion_with(knee, 0));
+        }
+    }
+
+    /// Each rate gets its own confirmation budget: a failure at one rate must
+    /// not leave a partial count that makes the next rate fail early.
+    #[test]
+    fn confirmation_budget_resets_per_rate() {
+        let mut s = RateSearch::new(1000, 2.0, 1_000_000, 0.05, 8, 1);
+        // Fail once at the start rate -- should re-probe the SAME rate.
+        assert_eq!(s.advance(false), SearchOutcome::Probe(1000));
+        // Then pass; the search should climb rather than stay put.
+        match s.advance(true) {
+            SearchOutcome::Probe(next) => assert!(next > 1000, "should climb, got {next}"),
+            other => panic!("expected a climb, got {other:?}"),
         }
     }
 }
