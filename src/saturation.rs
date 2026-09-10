@@ -90,6 +90,13 @@ pub struct RateSearch {
     confirm_failures: u32,
     /// Consecutive failures observed at `current_rate` so far.
     failures_at_rate: u32,
+    /// Minimum fractional latency improvement expected from halving the rate.
+    floor_improvement_ratio: f64,
+    /// Rate and SLO-percentile latency of the last confirmed failure, used to
+    /// tell a load-bound target from one with a floor above the SLO.
+    last_confirmed_fail: Option<(u64, f64)>,
+    /// Set when the search stopped because latency stopped responding to rate.
+    floor_detected: bool,
 }
 
 impl RateSearch {
@@ -100,6 +107,7 @@ impl RateSearch {
         bisect_tolerance: f64,
         max_bisect_steps: u32,
         confirm_failures: u32,
+        floor_improvement_ratio: f64,
     ) -> Self {
         Self {
             phase: SearchPhase::Climb,
@@ -114,7 +122,16 @@ impl RateSearch {
             max_bisect_steps,
             confirm_failures,
             failures_at_rate: 0,
+            floor_improvement_ratio,
+            last_confirmed_fail: None,
+            floor_detected: false,
         }
+    }
+
+    /// Whether the search ended because latency stopped responding to rate,
+    /// rather than because it ran out of bisection steps.
+    pub fn floor_detected(&self) -> bool {
+        self.floor_detected
     }
 
     /// Record the SLO result for `current_rate` and decide the next move.
@@ -125,10 +142,11 @@ impl RateSearch {
     /// higher rate is ever retried, so the run converges tidily on a knee that
     /// is far too low and reports it as success. A retry that passes clears the
     /// count and the rate is treated as passing.
-    pub fn advance(&mut self, passed: bool) -> SearchOutcome {
+    pub fn advance(&mut self, passed: bool, slo_latency_us: f64) -> SearchOutcome {
         if passed {
             self.failures_at_rate = 0;
             self.last_good = Some(self.current_rate);
+            self.last_confirmed_fail = None;
         } else {
             self.failures_at_rate += 1;
             if self.failures_at_rate <= self.confirm_failures {
@@ -136,6 +154,31 @@ impl RateSearch {
                 return SearchOutcome::Probe(self.current_rate);
             }
             self.failures_at_rate = 0;
+
+            // Latency-floor detection. Only meaningful while NO rate has passed:
+            // once `last_good` exists the bisection is narrowing a real interval
+            // and must run to its tolerance. Before that, the search is hunting
+            // downward for any compliant rate, which is productive only if
+            // latency responds to rate at all. If halving the rate does not
+            // improve the SLO percentile materially, the target has a floor
+            // above the SLO and no rate will pass.
+            if self.last_good.is_none()
+                && self.floor_improvement_ratio > 0.0
+                && slo_latency_us.is_finite()
+                && slo_latency_us > 0.0
+            {
+                if let Some((prev_rate, prev_us)) = self.last_confirmed_fail
+                    && prev_rate >= self.current_rate.saturating_mul(2)
+                    && prev_us > 0.0
+                {
+                    let improvement = (prev_us - slo_latency_us) / prev_us;
+                    if improvement < self.floor_improvement_ratio {
+                        self.floor_detected = true;
+                        return SearchOutcome::Done { knee: None };
+                    }
+                }
+                self.last_confirmed_fail = Some((self.current_rate, slo_latency_us));
+            }
         }
         match self.phase {
             SearchPhase::Climb => {
@@ -231,6 +274,7 @@ impl SaturationSearchState {
                 config.bisect_tolerance,
                 config.max_bisect_steps,
                 config.confirm_failures,
+                config.floor_improvement_ratio,
             ),
             step_start: Instant::now(),
             baseline_at: None,
@@ -410,7 +454,7 @@ impl SaturationSearchState {
         }
 
         // Drive the rate-search state machine.
-        match self.search.advance(slo_passed) {
+        match self.search.advance(slo_passed, slo_percentile_us) {
             SearchOutcome::Done { knee } => {
                 self.last_good_rate = knee;
                 self.completed = true;
@@ -528,6 +572,7 @@ impl SaturationSearchState {
         SaturationResults {
             max_compliant_rate: self.last_good_rate,
             steps: self.results.clone(),
+            latency_floor: self.search.floor_detected(),
         }
     }
 }
@@ -588,6 +633,7 @@ mod tests {
             drain_window: Duration::from_millis(500),
             stop_after_failures: 3,
             confirm_failures: 0,
+            floor_improvement_ratio: 0.0,
             max_rate: 100_000_000,
             min_throughput_ratio: 0.9,
             bisect_tolerance: 0.05,
@@ -645,11 +691,12 @@ mod rate_search_tests {
             /* bisect_tolerance */ 0.05,
             /* max_bisect_steps */ 8,
             confirm_failures,
+            /* floor */ 0.0,
         );
         let mut rate = 1000u64;
         loop {
             let passed = rate <= knee;
-            match s.advance(passed) {
+            match s.advance(passed, 1000.0) {
                 SearchOutcome::Probe(next) => rate = next,
                 SearchOutcome::Done { knee } => return knee,
             }
@@ -666,13 +713,13 @@ mod rate_search_tests {
 
     #[test]
     fn stops_within_max_bisect_steps() {
-        let mut s = RateSearch::new(1000, 2.0, 1_000_000, 0.0, 4, 0);
+        let mut s = RateSearch::new(1000, 2.0, 1_000_000, 0.0, 4, 0, 0.0);
         let mut rate = 1000u64;
         let mut probes = 0;
         loop {
             probes += 1;
             assert!(probes < 100, "must terminate");
-            match s.advance(rate <= 12_345) {
+            match s.advance(rate <= 12_345, 1000.0) {
                 SearchOutcome::Probe(next) => rate = next,
                 SearchOutcome::Done { .. } => break,
             }
@@ -691,13 +738,13 @@ mod rate_search_tests {
         // reported knee (if any) must be a rate that actually passed (<= knee),
         // and the search must terminate quickly.
         for &knee in &[0u64, 500, 1000, 1500, 7777, 30_000, 999_999, 5_000_000] {
-            let mut s = RateSearch::new(1000, 2.0, 1_000_000, 0.05, 8, 0);
+            let mut s = RateSearch::new(1000, 2.0, 1_000_000, 0.05, 8, 0, 0.0);
             let mut rate = 1000u64;
             let mut probes = 0;
             let found = loop {
                 probes += 1;
                 assert!(probes < 200, "must terminate for knee={knee}");
-                match s.advance(rate <= knee) {
+                match s.advance(rate <= knee, 1000.0) {
                     SearchOutcome::Probe(next) => rate = next,
                     SearchOutcome::Done { knee: k } => break k,
                 }
@@ -721,13 +768,13 @@ mod rate_search_tests {
     #[test]
     fn zero_tolerance_and_zero_max_steps_still_terminate() {
         // tolerance 0 forces termination via max_bisect_steps / hi-lo<=1.
-        let mut s = RateSearch::new(1000, 2.0, 1_000_000, 0.0, 0, 0);
+        let mut s = RateSearch::new(1000, 2.0, 1_000_000, 0.0, 0, 0, 0.0);
         let mut rate = 1000u64;
         let mut probes = 0;
         loop {
             probes += 1;
             assert!(probes < 200, "must terminate with zero knobs");
-            match s.advance(rate <= 12_345) {
+            match s.advance(rate <= 12_345, 1000.0) {
                 SearchOutcome::Probe(next) => rate = next,
                 SearchOutcome::Done { .. } => break,
             }
@@ -747,7 +794,7 @@ mod rate_search_tests {
     #[test]
     fn a_transient_first_failure_does_not_cap_the_search() {
         fn run(confirm_failures: u32) -> Option<u64> {
-            let mut s = RateSearch::new(1000, 2.0, 1_000_000, 0.05, 8, confirm_failures);
+            let mut s = RateSearch::new(1000, 2.0, 1_000_000, 0.05, 8, confirm_failures, 0.0);
             let mut rate = 1000u64;
             let mut first_sample = true;
             loop {
@@ -758,7 +805,7 @@ mod rate_search_tests {
                 } else {
                     rate <= 50_000
                 };
-                match s.advance(passed) {
+                match s.advance(passed, 1000.0) {
                     SearchOutcome::Probe(next) => rate = next,
                     SearchOutcome::Done { knee } => return knee,
                 }
@@ -803,13 +850,104 @@ mod rate_search_tests {
     /// not leave a partial count that makes the next rate fail early.
     #[test]
     fn confirmation_budget_resets_per_rate() {
-        let mut s = RateSearch::new(1000, 2.0, 1_000_000, 0.05, 8, 1);
+        let mut s = RateSearch::new(1000, 2.0, 1_000_000, 0.05, 8, 1, 0.0);
         // Fail once at the start rate -- should re-probe the SAME rate.
-        assert_eq!(s.advance(false), SearchOutcome::Probe(1000));
+        assert_eq!(s.advance(false, 1000.0), SearchOutcome::Probe(1000));
         // Then pass; the search should climb rather than stay put.
-        match s.advance(true) {
+        match s.advance(true, 1000.0) {
             SearchOutcome::Probe(next) => assert!(next > 1000, "should climb, got {next}"),
             other => panic!("expected a climb, got {other:?}"),
         }
+    }
+
+    /// The regression guard for the wasted-bisection case.
+    ///
+    /// Oracle modelled on a real run: the target has a latency FLOOR above the
+    /// SLO, so no rate passes and reducing the rate does not help. Measured on
+    /// a cache whose working set was 227% of RAM, p50 went 668us at 5000 req/s
+    /// to 889us at 19 req/s -- a 263x rate reduction made latency WORSE. The
+    /// old search burned all 8 bisect steps (16 windows with confirmation, ~19
+    /// minutes) proving what the third window already showed.
+    #[test]
+    fn a_latency_floor_stops_the_search_early() {
+        // Latency is rate-independent: slightly worse as rate drops, as observed.
+        fn latency_for(rate: u64) -> f64 {
+            900.0 - (rate as f64).min(5000.0) * 0.04
+        }
+        fn run(floor_ratio: f64) -> (usize, Option<u64>, bool) {
+            let mut s = RateSearch::new(5000, 2.0, 1_000_000, 0.05, 8, 0, floor_ratio);
+            let mut rate = 5000u64;
+            let mut probes = 0usize;
+            loop {
+                probes += 1;
+                // Nothing ever passes.
+                match s.advance(false, latency_for(rate)) {
+                    SearchOutcome::Probe(next) => rate = next,
+                    SearchOutcome::Done { knee } => return (probes, knee, s.floor_detected()),
+                }
+            }
+        }
+
+        let (probes_off, knee_off, floor_off) = run(0.0);
+        assert_eq!(knee_off, None);
+        assert!(!floor_off);
+        assert!(
+            probes_off >= 9,
+            "with detection off the search should bisect to its step limit, took {probes_off}"
+        );
+
+        let (probes_on, knee_on, floor_on) = run(0.10);
+        assert_eq!(knee_on, None, "a floor means no compliant rate");
+        assert!(
+            floor_on,
+            "the floor should be reported, not just 'never met'"
+        );
+        assert!(
+            probes_on <= 4,
+            "detection should stop within a few probes, took {probes_on}"
+        );
+    }
+
+    /// A genuinely load-bound target must still be bisected properly: latency
+    /// that responds to rate is exactly the case the search exists for, and
+    /// stopping early there would report no knee where one exists.
+    #[test]
+    fn floor_detection_does_not_fire_on_a_load_bound_target() {
+        // Latency falls steeply with rate; the true knee is 12_345.
+        let mut s = RateSearch::new(1000, 2.0, 1_000_000, 0.05, 8, 0, 0.10);
+        let mut rate = 1000u64;
+        let found = loop {
+            let passed = rate <= 12_345;
+            // Well under SLO when passing, and improving fast as rate drops.
+            let latency = 100.0 + rate as f64 / 50.0;
+            match s.advance(passed, latency) {
+                SearchOutcome::Probe(next) => rate = next,
+                SearchOutcome::Done { knee } => break knee,
+            }
+        };
+        assert!(
+            !s.floor_detected(),
+            "load-bound target misreported as a floor"
+        );
+        let found = found.expect("a load-bound target has a knee");
+        let rel = (found as f64 - 12_345.0).abs() / 12_345.0;
+        assert!(rel <= 0.05, "found {found}, rel error {rel}");
+    }
+
+    /// Once a rate has passed, the bisection is narrowing a real interval and
+    /// must run to tolerance -- floor detection must not cut that short.
+    #[test]
+    fn floor_detection_is_inert_once_a_rate_has_passed() {
+        let mut s = RateSearch::new(1000, 2.0, 1_000_000, 0.05, 8, 0, 0.10);
+        // Pass once so last_good is set, then fail with flat latency forever.
+        assert!(matches!(s.advance(true, 100.0), SearchOutcome::Probe(_)));
+        for _ in 0..8 {
+            if let SearchOutcome::Done { knee } = s.advance(false, 900.0) {
+                assert!(!s.floor_detected(), "floor fired despite a known-good rate");
+                assert!(knee.is_some(), "a rate passed, so a knee must be reported");
+                return;
+            }
+        }
+        panic!("search did not terminate");
     }
 }
