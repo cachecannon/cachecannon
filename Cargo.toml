@@ -99,6 +99,7 @@ socket2 = { version = "0.5", features = ["all"] }
 # RNG for workload generation
 rand = "0.9"
 rand_xoshiro = "0.7"
+rand_distr = "0.5"
 
 # Kernel SO_TIMESTAMPING support is Linux-only.
 [target.'cfg(target_os = "linux")'.dependencies]

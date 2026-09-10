@@ -1,6 +1,7 @@
 #[cfg(target_os = "linux")]
 use crate::config::TimestampMode;
 use crate::config::{Config, Protocol as CacheProtocol};
+use crate::keydist::KeyDist;
 use crate::metrics;
 use crate::output::{PrefillDiagnostics, PrefillSample, PrefillStallCause};
 use crate::saturation::SaturationSearchState;
@@ -185,6 +186,12 @@ pub fn run_benchmark_full(
         &slot_table,
     ));
 
+    // Steady-state key distribution. Built ONCE here rather than per worker:
+    // zipf setup computes zeta(n, theta), which is O(keyspace) and would
+    // otherwise be repeated by every worker thread at startup.
+    let key_dist = Arc::new(KeyDist::from_keyspace(&config.workload.keyspace));
+    debug_assert_eq!(key_dist.len(), key_count);
+
     // Allocate shared value pool: 1GB of random bytes shared across all workers.
     // Workers pick random offsets into this pool for SET values, avoiding per-worker
     // copies. The pool is seeded deterministically for reproducibility.
@@ -205,6 +212,7 @@ pub fn run_benchmark_full(
     for id in 0..num_threads {
         config_tx
             .send(BenchWorkerConfig {
+                key_dist: Arc::clone(&key_dist),
                 id,
                 config: config.clone(),
                 shared: Arc::clone(&shared),
