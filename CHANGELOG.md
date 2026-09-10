@@ -7,6 +7,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.21] - 2026-09-10
+
+### Added
+- `general.ringline_diag` gates ringline's event-loop diagnostics, which
+  were previously always on. (#131)
+
+### Fixed
+- `[workload.keyspace] distribution` is now implemented. The field was
+  accepted by the config parser and never read: key selection was
+  `rng.random_range(0..key_count)` unconditionally, so a run configured
+  with `distribution = "zipf"` produced a uniform workload and reported
+  it as a successful run. Nothing errored and the numbers looked
+  plausible. Skew moves cache hit rate further than almost any other
+  parameter, so measurements of a working set larger than memory were a
+  uniform worst case being read as a typical one. Zipf sampling now uses
+  `rand_distr::Zipf` (rejection-inversion, so O(1) setup rather than an
+  O(keyspace) zeta prefix sum, and `theta == 1` is a legal skew); the
+  sampler is built once by the runner and shared. New
+  `keyspace.zipf_theta`, default 0.99 — the exponent published cache
+  benchmarks quote as "zipfian 0.99". Skew across multiple endpoints is
+  supported: hot keys hash onto particular shards and those shards take
+  disproportionate load, which is the imbalance a skewed keyspace exists
+  to measure, so skewed runs draw globally and reject-route rather than
+  using the uniform per-endpoint fast path. (#133)
+- The saturation search no longer treats a single failed sample as
+  authoritative. A failure during the climb set the bisection ceiling
+  permanently and no higher rate was ever retried, so one transient could
+  cap a run far below the real knee — and the run still converged tidily
+  and reported that knee as a clean result. Observed in practice: a step
+  failing at p99 151ms anchored a run at 4.8K req/s on hardware that
+  sustained 55-60K, and the tell was that three different configurations
+  returned byte-identical numbers because all three had bisected from the
+  same bad first sample. New `saturation_search.confirm_failures`,
+  default 1: a rate must fail that many additional consecutive times
+  before the search acts on it, and a retry that passes clears the count.
+  Set to 0 for the previous behavior. (#134)
+
+### Changed
+- CI drops the unused Chrome apt source before updating. (#132)
+
 ## [0.0.20] - 2026-09-08
 
 ### Added
