@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.23] - 2026-09-17
+
 ### Fixed
 - Counter-group metrics no longer vanish between the registry and the wire.
   `ShardedCounterGroup::value()` returns `Value::CounterGroup`, and both
@@ -44,6 +46,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   metriken-exposition does. Every cachecannon metric name was already legal and
   is unaffected -- asserted by a test, alongside one that scans the whole
   rendered body for illegal names.
+
+### Performance
+- Idle connections no longer poll the rate limiter at a fixed 100 us. A
+  connection with nothing in flight is almost never waiting on the network; it
+  is waiting for the shared limiter to mint a token, and the fixed poll made
+  that cost O(connections) per 100 us, independent of the request rate.
+
+  Measured at a fixed 20,000 req/s of 56 KiB values on a 16-worker
+  c6gn.4xlarge, varying only connection count: at 64 connections the loop
+  delivered 9,801 wakeups/s per connection -- one per 102 us, 98% of what a
+  100 us timer demands, because there was CPU to spare. At 10,000 connections
+  the design asked for 100M wakeups/s to hand out 20,000 tokens, delivered 12M,
+  and pinned the generator at 15.8 of 16 cores. Completions per *request* rose
+  31 -> 637 at constant request rate, and `dead` iterations fell 6.8% -> 0.1%.
+  Responses then sat unread: `tcp_packet_latency` p50 reached 1536 us, 72% of
+  the latency that run reported for the target under test.
+
+  The sleep now scales as `connections / (K * rate)` with `K = 64`, holding the
+  fleet-wide wakeup rate at `K * rate` whatever the connection count. It is
+  clamped to [100 us, 50 ms], so small runs are bit-identical to the previous
+  behaviour, and jittered +/-25% so a mid-run rate change does not
+  re-synchronise every waiter into a herd. Aggregate throughput is unchanged --
+  a token is claimed by whichever connection wakes next -- and the one cost a
+  longer sleep can carry, a delayed next fire, is already reported as
+  `schedule_slip`.
 
 ## [0.0.22] - 2026-09-10
 
