@@ -100,6 +100,11 @@ pub struct SharedState {
     prefill_keys_confirmed: AtomicUsize,
     /// Total number of prefill keys assigned across all workers
     prefill_keys_total: AtomicUsize,
+    /// Append stream: keys confirmed written by writer connections (cumulative).
+    append_keys_confirmed: AtomicUsize,
+    /// Append stream: keys enqueued so far (cumulative). A batch is complete
+    /// when confirmed catches up with this.
+    append_keys_total: AtomicUsize,
 }
 
 impl SharedState {
@@ -111,7 +116,24 @@ impl SharedState {
             prefill_complete: AtomicUsize::new(0),
             prefill_keys_confirmed: AtomicUsize::new(0),
             prefill_keys_total: AtomicUsize::new(0),
+            append_keys_confirmed: AtomicUsize::new(0),
+            append_keys_total: AtomicUsize::new(0),
         }
+    }
+
+    /// Append stream: keys confirmed written so far.
+    pub fn append_keys_confirmed(&self) -> usize {
+        self.append_keys_confirmed.load(Ordering::Acquire)
+    }
+
+    /// Append stream: keys enqueued so far.
+    pub fn append_keys_total(&self) -> usize {
+        self.append_keys_total.load(Ordering::Acquire)
+    }
+
+    /// Append stream: account for a batch of `n` keys just enqueued.
+    pub fn add_append_total(&self, n: usize) {
+        self.append_keys_total.fetch_add(n, Ordering::Release);
     }
 
     /// Get the current phase.
@@ -204,6 +226,10 @@ pub struct BenchWorkerConfig {
     /// Shared per-endpoint prefill queues (full keyspace, built once by the
     /// runner). All workers share the same `Arc`.
     pub(crate) prefill_queues: Arc<PrefillQueues>,
+    /// Shared per-endpoint append queues (see `TaskSharedState::append_queues`).
+    pub(crate) append_queues: Arc<PrefillQueues>,
+    /// Writer-side rate limiter for `append.pace = "spread"`.
+    pub append_ratelimiter: Option<Arc<Ratelimiter>>,
     /// Per-endpoint key-id lists for steady-state key selection, SHARED across
     /// all workers (built once by the runner). `endpoint_keys[ep]` is the set of
     /// key-ids whose slot is owned by endpoint `ep`, so a connection task can
@@ -352,6 +378,10 @@ impl PrefillQueues {
     fn pop_front(&self, endpoint_idx: usize) -> Option<usize> {
         self.queues[endpoint_idx].lock().unwrap().pop_front()
     }
+
+    fn is_empty(&self, endpoint_idx: usize) -> bool {
+        self.queues[endpoint_idx].lock().unwrap().is_empty()
+    }
 }
 
 /// State shared across all connection tasks spawned by a single worker.
@@ -369,6 +399,13 @@ struct TaskSharedState {
     /// for the endpoint it serves — required when connections-per-worker is
     /// fewer than the number of cluster nodes.
     prefill_queues: Arc<PrefillQueues>,
+    /// Per-endpoint append queues, SHARED across all workers. The runner
+    /// enqueues each batch; writer connection tasks drain the queue for the
+    /// endpoint they serve. Empty queues when no append stream is configured.
+    append_queues: Arc<PrefillQueues>,
+    /// Writer-side rate limiter for `append.pace = "spread"`; `None` for
+    /// burst pacing or no append stream.
+    append_ratelimiter: Option<Arc<Ratelimiter>>,
     /// Per-endpoint key-id lists for steady-state key selection (see
     /// `BenchWorkerConfig::endpoint_keys`). Empty for single-endpoint setups.
     endpoint_keys: Arc<Vec<Vec<u32>>>,
@@ -469,6 +506,7 @@ impl AsyncEventHandler for BenchHandler {
                     spawn_protocol_tasks(&worker_state, my_connections, worker_id);
                 }
             }
+            spawn_append_tasks(&worker_state, worker_id);
             worker_state.task_state.shared.mark_worker_started();
         }))
     }
@@ -568,6 +606,8 @@ impl AsyncEventHandler for BenchHandler {
         // `confirm_prefill_key` is inert and `is_prefill_done()` stays false
         // for the whole prefill phase (the phase gate ends prefill).
         let prefill_queues = cfg.prefill_queues;
+        let append_queues = cfg.append_queues;
+        let append_ratelimiter = cfg.append_ratelimiter.clone();
         let endpoint_keys = cfg.endpoint_keys;
         let prefill_total = 0usize;
         let prefill_done = false;
@@ -582,6 +622,8 @@ impl AsyncEventHandler for BenchHandler {
             ring,
             slot_table: RwLock::new(slot_table),
             prefill_queues,
+            append_queues,
+            append_ratelimiter,
             endpoint_keys,
             worker_id: cfg.id,
             backfill_on_miss,
@@ -1242,6 +1284,12 @@ const BACKFILL_MARKER: u64 = 1 << 63;
 /// response without relying on FIFO assumptions across phases.
 const PREFILL_MARKER: u64 = 1 << 62;
 
+/// Marker bit for append-stream SET user_data (third-highest bit of u64).
+const APPEND_MARKER: u64 = 1 << 61;
+
+/// Mask recovering the key id from a marked `user_data`.
+const USER_DATA_ID_MASK: u64 = !(BACKFILL_MARKER | PREFILL_MARKER | APPEND_MARKER);
+
 /// Per-connection cap on pending backfill-on-miss key IDs. Bounds memory
 /// when miss rate outpaces backfill drain (cold cache, large keyspace).
 /// Overflow drops the new miss; backfill is best-effort.
@@ -1278,24 +1326,26 @@ fn map_respmeta(meta: ringline_redis::RespMeta) -> RequestResult {
         OpKind::Get if meta.success => Some(meta.value_len.is_some()),
         _ => None,
     };
-    // prefill/backfill markers + key_id apply per kind.
-    let (backfill, prefill, key_id) = match meta.kind {
+    // prefill/backfill/append markers + key_id apply per kind.
+    let (backfill, prefill, append, key_id) = match meta.kind {
         OpKind::Get => (
             false,
             false,
-            Some((meta.user_data & !PREFILL_MARKER & !BACKFILL_MARKER) as usize),
+            false,
+            Some((meta.user_data & USER_DATA_ID_MASK) as usize),
         ),
         OpKind::Set => {
             let backfill = meta.user_data & BACKFILL_MARKER != 0;
             let prefill = meta.user_data & PREFILL_MARKER != 0;
-            let key_id = if prefill {
-                Some((meta.user_data & !PREFILL_MARKER & !BACKFILL_MARKER) as usize)
+            let append = meta.user_data & APPEND_MARKER != 0;
+            let key_id = if prefill || append {
+                Some((meta.user_data & USER_DATA_ID_MASK) as usize)
             } else {
                 None
             };
-            (backfill, prefill, key_id)
+            (backfill, prefill, append, key_id)
         }
-        OpKind::Del => (false, false, None),
+        OpKind::Del => (false, false, false, None),
     };
     // A server error carries the message (incl. MOVED/ASK) in `error`.
     let redirect = meta.error.as_deref().and_then(parse_resp_redirect);
@@ -1310,6 +1360,7 @@ fn map_respmeta(meta: ringline_redis::RespMeta) -> RequestResult {
         key_id,
         backfill,
         prefill,
+        append,
         redirect,
     }
 }
@@ -1781,9 +1832,10 @@ fn map_memcache_op(op: ringline_memcache::CompletedOp) -> RequestResult {
                 ttfb_ns: None,
                 request_type: RequestType::Get,
                 hit,
-                key_id: Some((user_data & !PREFILL_MARKER & !BACKFILL_MARKER) as usize),
+                key_id: Some((user_data & USER_DATA_ID_MASK) as usize),
                 backfill: false,
                 prefill: false,
+                append: false,
                 redirect: None,
             }
         }
@@ -1798,8 +1850,9 @@ fn map_memcache_op(op: ringline_memcache::CompletedOp) -> RequestResult {
             };
             let backfill = user_data & BACKFILL_MARKER != 0;
             let prefill = user_data & PREFILL_MARKER != 0;
-            let key_id = if prefill {
-                Some((user_data & !PREFILL_MARKER & !BACKFILL_MARKER) as usize)
+            let append = user_data & APPEND_MARKER != 0;
+            let key_id = if prefill || append {
+                Some((user_data & USER_DATA_ID_MASK) as usize)
             } else {
                 None
             };
@@ -1814,6 +1867,7 @@ fn map_memcache_op(op: ringline_memcache::CompletedOp) -> RequestResult {
                 key_id,
                 backfill,
                 prefill,
+                append,
                 redirect: None,
             }
         }
@@ -1835,6 +1889,7 @@ fn map_memcache_op(op: ringline_memcache::CompletedOp) -> RequestResult {
                 key_id: None,
                 backfill: false,
                 prefill: false,
+                append: false,
                 redirect: None,
             }
         }
@@ -2027,6 +2082,492 @@ fn confirm_prefill_key(state: &Arc<SharedWorkerState>) {
             "prefill complete"
         );
         state.task_state.shared.mark_prefill_complete();
+    }
+}
+
+// ── Append role (writer connections) ─────────────────────────────────────
+//
+// The append stream is a separate role with its own connections. Sharing the
+// reader pipelines would queue reads behind a batch of SETs inside this
+// client, so read latency would carry an artifact of cachecannon's own
+// pipeline rather than the server's behaviour under write load. A writer
+// connection runs the prefill drain loop permanently against the append
+// queues: pop ids, route, fire SETs, confirm on response, requeue on failure.
+// The runner fills the queues one batch at a time and publishes the new
+// keyspace head once every SET in the batch is confirmed.
+
+/// Split `total` connections across `num_threads` workers the same way
+/// `spawn_protocol_tasks` does, returning this worker's share and the global
+/// index of its first connection.
+fn connection_share(total: usize, num_threads: usize, worker_id: usize) -> (usize, usize) {
+    let num_threads = num_threads.max(1);
+    let base = total / num_threads;
+    let rem = total % num_threads;
+    let mine = if worker_id < rem { base + 1 } else { base };
+    let start = if worker_id < rem {
+        worker_id * (base + 1)
+    } else {
+        rem * (base + 1) + (worker_id - rem) * base
+    };
+    (mine, start)
+}
+
+/// Spawn this worker's share of the append-stream writer connections. A
+/// no-op without `[workload.append]`.
+fn spawn_append_tasks(worker_state: &Arc<SharedWorkerState>, worker_id: usize) {
+    let Some(append) = worker_state.task_state.config.workload.append.as_ref() else {
+        return;
+    };
+    let num_endpoints = worker_state.task_state.endpoints.len().max(1);
+    let num_threads = worker_state.task_state.config.general.threads;
+    let (mine, start) = connection_share(append.connections, num_threads, worker_id);
+    let protocol = worker_state.task_state.config.target.protocol;
+
+    for i in 0..mine {
+        let global_idx = start + i;
+        let endpoint_idx = global_idx % num_endpoints;
+        let state = Arc::clone(worker_state);
+        // Distinct seed space from the reader connections.
+        let seed = 0xA99E_0000_0000 + worker_id as u64 * 10000 + i as u64;
+
+        if let Err(e) = ringline::spawn(async move {
+            match protocol {
+                CacheProtocol::Resp | CacheProtocol::Resp3 => {
+                    resp_append_task(state, endpoint_idx, seed).await;
+                }
+                CacheProtocol::Memcache | CacheProtocol::MemcacheBinary => {
+                    memcache_append_task(state, endpoint_idx, seed).await;
+                }
+                // Rejected by config validation: ping has no SET.
+                CacheProtocol::Ping => {}
+            }
+        }) {
+            tracing::error!(
+                worker = worker_id,
+                conn = global_idx,
+                "failed to spawn append writer task: {e}"
+            );
+            metrics::CONNECTIONS_FAILED.increment();
+        }
+    }
+}
+
+/// Writer-side on_result callback: append SET latency and bytes only. The
+/// read workload's latency and count metrics are untouched.
+fn make_resp_append_callback() -> impl Fn(&ringline_redis::CommandResult) {
+    move |r| {
+        let _ = metrics::APPEND_SET_LATENCY.increment(r.latency_ns);
+        metrics::BYTES_TX.add(r.tx_bytes as u64);
+        metrics::BYTES_RX.add(r.rx_bytes as u64);
+    }
+}
+
+fn make_memcache_append_callback() -> impl Fn(&ringline_memcache::CommandResult) {
+    move |r| {
+        let _ = metrics::APPEND_SET_LATENCY.increment(r.latency_ns);
+        metrics::BYTES_TX.add(r.tx_bytes as u64);
+        metrics::BYTES_RX.add(r.rx_bytes as u64);
+    }
+}
+
+/// How many SETs a writer may fire right now given `free` pipeline slots.
+/// Unlimited for burst pacing. For spread pacing, take a full batch of tokens
+/// when available, otherwise a single one, so a low rate still trickles out
+/// one SET at a time instead of waiting for a whole batch of tokens.
+fn append_token_budget(rl: &Option<Arc<Ratelimiter>>, free: usize) -> usize {
+    let Some(rl) = rl else {
+        return free;
+    };
+    let n = (free as u64).min(rl.max_tokens()).max(1);
+    if rl.try_wait_n(n).is_ok() {
+        n as usize
+    } else if n > 1 && rl.try_wait_n(1).is_ok() {
+        1
+    } else {
+        0
+    }
+}
+
+/// Confirm a single append-stream key was stored. The runner watches the
+/// shared counter to decide when a batch has fully landed.
+fn confirm_append_key(state: &Arc<SharedWorkerState>) {
+    state
+        .task_state
+        .shared
+        .append_keys_confirmed
+        .fetch_add(1, Ordering::Release);
+    metrics::APPEND_SET_COUNT.increment();
+}
+
+/// Requeue in-flight append keys on disconnect, re-routing each against the
+/// current slot table (see `requeue_drained_prefill`).
+fn requeue_drained_append(
+    state: &TaskSharedState,
+    key_buf: &mut [u8],
+    drained: impl IntoIterator<Item = usize>,
+) {
+    for key_id in drained {
+        write_key(key_buf, key_id);
+        let routed = route_key(state, key_buf);
+        state.append_queues.push_back(routed, key_id);
+    }
+}
+
+/// Build the ketama ring used for non-cluster routing.
+fn build_ring(endpoints: &[SocketAddr]) -> ketama::Ring {
+    if endpoints.is_empty() {
+        ketama::Ring::build(&["_"])
+    } else {
+        let ids: Vec<String> = endpoints.iter().map(|a| a.to_string()).collect();
+        ketama::Ring::build(&ids.iter().map(|s| s.as_str()).collect::<Vec<_>>())
+    }
+}
+
+/// Enqueue one append batch, ids `start..start + count`, partitioned to the
+/// owning endpoint the same way prefill is. Called by the runner when a batch
+/// opens; the writer connections drain it.
+pub(crate) fn enqueue_append_batch(
+    queues: &PrefillQueues,
+    start: usize,
+    count: usize,
+    key_len: usize,
+    endpoints: &[SocketAddr],
+    slot_table: &Option<Vec<u16>>,
+) {
+    let n = endpoints.len().max(1);
+    let ring = build_ring(endpoints);
+    let mut key_buf = vec![0u8; key_len];
+    for key_id in start..start + count {
+        write_key(&mut key_buf, key_id);
+        let ep = route_partition(slot_table, &ring, n, &key_buf);
+        queues.push_back(ep, key_id);
+    }
+}
+
+/// A RESP append-stream writer connection: connect, drain the append queue
+/// for its endpoint, reconnect on failure.
+async fn resp_append_task(state: Arc<SharedWorkerState>, endpoint_idx: usize, seed: u64) {
+    let endpoint = state.task_state.endpoints[endpoint_idx];
+    let config = &state.task_state.config;
+    let append = config
+        .workload
+        .append
+        .as_ref()
+        .expect("append task requires [workload.append]");
+    let tls_name = resolve_tls_server_name(&state.task_state, endpoint);
+    let mut rng = Xoshiro256PlusPlus::seed_from_u64(seed);
+    let mut key_buf = vec![0u8; config.workload.keyspace.length];
+
+    loop {
+        if state.task_state.shared.phase().should_stop() {
+            return;
+        }
+
+        let conn =
+            match establish_connection(endpoint, state.task_state.worker_id, tls_name.as_deref())
+                .await
+            {
+                Ok(conn) => conn,
+                Err(_) => {
+                    ringline::sleep(Duration::from_millis(100)).await;
+                    continue;
+                }
+            };
+
+        metrics::APPEND_CONNECTIONS_ACTIVE.increment();
+        let builder = ringline_redis::Client::builder(conn).on_result(make_resp_append_callback());
+        #[cfg(target_os = "linux")]
+        let builder =
+            builder.kernel_timestamps(matches!(config.timestamps.mode, TimestampMode::Software));
+        let mut client = builder.max_batch_size(append.pipeline_depth).build();
+
+        // Same RESP3 negotiation as the reader connections.
+        if matches!(config.target.protocol, CacheProtocol::Resp3)
+            && let Err(e) = client
+                .cmd(&resp_proto::Request::cmd(b"HELLO").arg(b"3"))
+                .await
+        {
+            tracing::debug!(
+                worker = state.task_state.worker_id,
+                endpoint = %endpoint,
+                "append writer HELLO 3 failed: {}",
+                e
+            );
+            metrics::APPEND_CONNECTIONS_ACTIVE.decrement();
+            metrics::CONNECTIONS_FAILED.increment();
+            ringline::sleep(Duration::from_millis(100)).await;
+            continue;
+        }
+
+        tracing::debug!(
+            worker = state.task_state.worker_id,
+            endpoint = %endpoint,
+            conn_index = conn.index(),
+            "connected (RESP, append writer)"
+        );
+
+        let result =
+            drive_resp_append(&mut client, &state, endpoint_idx, &mut rng, &mut key_buf).await;
+
+        metrics::APPEND_CONNECTIONS_ACTIVE.decrement();
+
+        match result {
+            Ok(()) => return,
+            Err(reason) => record_disconnect_reason(reason),
+        }
+
+        ringline::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+/// Drain the append queue for this endpoint on a connected RESP client.
+async fn drive_resp_append(
+    client: &mut ringline_redis::Client,
+    state: &Arc<SharedWorkerState>,
+    endpoint_idx: usize,
+    rng: &mut Xoshiro256PlusPlus,
+    key_buf: &mut [u8],
+) -> Result<(), DisconnectReason> {
+    let config = &state.task_state.config;
+    let append = config
+        .workload
+        .append
+        .as_ref()
+        .expect("append task requires [workload.append]");
+    let value_len = config.workload.values.length;
+    let pool_len = state.task_state.value_pool.len();
+    let multi_endpoint = state.task_state.endpoints.len() > 1;
+    let pipeline_depth = append.pipeline_depth;
+    let queues = &state.task_state.append_queues;
+    let mut in_flight: VecDeque<usize> = VecDeque::new();
+
+    loop {
+        if state.task_state.shared.phase().should_stop() {
+            return Ok(());
+        }
+
+        let free = pipeline_depth.saturating_sub(client.pending_count());
+        if free > 0 && !queues.is_empty(endpoint_idx) {
+            let mut budget = append_token_budget(&state.task_state.append_ratelimiter, free);
+            while budget > 0 && client.pending_count() < pipeline_depth {
+                let Some(key_id) = queues.pop_front(endpoint_idx) else {
+                    break;
+                };
+                write_key(key_buf, key_id);
+                // Hand a key to its new owner after a mid-run topology change.
+                if multi_endpoint {
+                    let routed = route_key(&state.task_state, key_buf);
+                    if routed != endpoint_idx {
+                        queues.push_back(routed, key_id);
+                        continue;
+                    }
+                }
+                budget -= 1;
+                let user_data = key_id as u64 | APPEND_MARKER;
+                let res = if value_len >= ZC_VALUE_THRESHOLD {
+                    let guard =
+                        make_value_guard(rng, &state.task_state.value_pool, value_len, pool_len);
+                    client.fire_set_with_guard(key_buf, guard, user_data)
+                } else {
+                    let value = value_slice(rng, &state.task_state.value_pool, value_len, pool_len);
+                    client.fire_set(key_buf, value, user_data)
+                };
+                match res {
+                    Ok(_) => in_flight.push_back(key_id),
+                    Err(_) => {
+                        queues.push_front(endpoint_idx, key_id);
+                        break;
+                    }
+                }
+            }
+        }
+
+        if client.pending_count() == 0 {
+            // Idle between batches (or paced out): poll the queue gently.
+            ringline::sleep(Duration::from_millis(1)).await;
+            continue;
+        }
+
+        let result = match client.recv_meta().await {
+            Ok(meta) => map_respmeta(meta),
+            Err(ringline_redis::Error::ConnectionClosed) => {
+                requeue_drained_append(&state.task_state, key_buf, in_flight.drain(..));
+                return Err(DisconnectReason::Eof);
+            }
+            Err(_) => {
+                requeue_drained_append(&state.task_state, key_buf, in_flight.drain(..));
+                return Err(DisconnectReason::RecvError);
+            }
+        };
+
+        if result.append {
+            let key_id = in_flight
+                .pop_front()
+                .or(result.key_id)
+                .expect("append response without key_id");
+            if result.success {
+                confirm_append_key(state);
+            } else {
+                metrics::APPEND_SET_ERRORS.increment();
+                queues.push_back(endpoint_idx, key_id);
+            }
+        }
+
+        if let Some(ref redirect) = result.redirect {
+            check_resp_redirect_parsed(redirect, state);
+        }
+    }
+}
+
+/// A Memcache append-stream writer connection (ASCII or binary).
+async fn memcache_append_task(state: Arc<SharedWorkerState>, endpoint_idx: usize, seed: u64) {
+    let endpoint = state.task_state.endpoints[endpoint_idx];
+    let config = &state.task_state.config;
+    let append = config
+        .workload
+        .append
+        .as_ref()
+        .expect("append task requires [workload.append]");
+    let tls_name = resolve_tls_server_name(&state.task_state, endpoint);
+    let mut rng = Xoshiro256PlusPlus::seed_from_u64(seed);
+    let mut key_buf = vec![0u8; config.workload.keyspace.length];
+
+    loop {
+        if state.task_state.shared.phase().should_stop() {
+            return;
+        }
+
+        let conn =
+            match establish_connection(endpoint, state.task_state.worker_id, tls_name.as_deref())
+                .await
+            {
+                Ok(conn) => conn,
+                Err(_) => {
+                    ringline::sleep(Duration::from_millis(100)).await;
+                    continue;
+                }
+            };
+
+        metrics::APPEND_CONNECTIONS_ACTIVE.increment();
+        let builder = ringline_memcache::Client::builder(conn)
+            .on_result(make_memcache_append_callback())
+            .max_batch_size(append.pipeline_depth);
+        #[cfg(target_os = "linux")]
+        let builder =
+            builder.kernel_timestamps(matches!(config.timestamps.mode, TimestampMode::Software));
+        let binary = matches!(config.target.protocol, CacheProtocol::MemcacheBinary);
+        let mut client = if binary {
+            McClient::Binary(builder.build_binary())
+        } else {
+            McClient::Ascii(builder.build())
+        };
+
+        tracing::debug!(
+            worker = state.task_state.worker_id,
+            endpoint = %endpoint,
+            conn_index = conn.index(),
+            "connected (Memcache, append writer)"
+        );
+
+        let result =
+            drive_memcache_append(&mut client, &state, endpoint_idx, &mut rng, &mut key_buf).await;
+
+        metrics::APPEND_CONNECTIONS_ACTIVE.decrement();
+
+        match result {
+            Ok(()) => return,
+            Err(reason) => record_disconnect_reason(reason),
+        }
+
+        ringline::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+/// Drain the append queue for this endpoint on a connected Memcache client.
+async fn drive_memcache_append(
+    client: &mut McClient,
+    state: &Arc<SharedWorkerState>,
+    endpoint_idx: usize,
+    rng: &mut Xoshiro256PlusPlus,
+    key_buf: &mut [u8],
+) -> Result<(), DisconnectReason> {
+    let config = &state.task_state.config;
+    let append = config
+        .workload
+        .append
+        .as_ref()
+        .expect("append task requires [workload.append]");
+    let value_len = config.workload.values.length;
+    let pool_len = state.task_state.value_pool.len();
+    let multi_endpoint = state.task_state.endpoints.len() > 1;
+    let pipeline_depth = append.pipeline_depth;
+    let queues = &state.task_state.append_queues;
+    let mut in_flight: VecDeque<usize> = VecDeque::new();
+
+    loop {
+        if state.task_state.shared.phase().should_stop() {
+            return Ok(());
+        }
+
+        let free = pipeline_depth.saturating_sub(client.pending_count());
+        if free > 0 && !queues.is_empty(endpoint_idx) {
+            let mut budget = append_token_budget(&state.task_state.append_ratelimiter, free);
+            while budget > 0 && client.pending_count() < pipeline_depth {
+                let Some(key_id) = queues.pop_front(endpoint_idx) else {
+                    break;
+                };
+                write_key(key_buf, key_id);
+                if multi_endpoint {
+                    let routed = route_key(&state.task_state, key_buf);
+                    if routed != endpoint_idx {
+                        queues.push_back(routed, key_id);
+                        continue;
+                    }
+                }
+                budget -= 1;
+                let guard =
+                    make_value_guard(rng, &state.task_state.value_pool, value_len, pool_len);
+                let user_data = key_id as u64 | APPEND_MARKER;
+                match client.fire_set_with_guard(key_buf, guard, 0, 0, user_data) {
+                    Ok(_) => in_flight.push_back(key_id),
+                    Err(_) => {
+                        queues.push_front(endpoint_idx, key_id);
+                        break;
+                    }
+                }
+            }
+        }
+
+        if client.pending_count() == 0 {
+            ringline::sleep(Duration::from_millis(1)).await;
+            continue;
+        }
+
+        let op = match client.recv().await {
+            Ok(op) => op,
+            Err(ringline_memcache::Error::ConnectionClosed) => {
+                requeue_drained_append(&state.task_state, key_buf, in_flight.drain(..));
+                return Err(DisconnectReason::Eof);
+            }
+            Err(_) => {
+                requeue_drained_append(&state.task_state, key_buf, in_flight.drain(..));
+                return Err(DisconnectReason::RecvError);
+            }
+        };
+        let result = map_memcache_op(op);
+
+        if result.append {
+            let key_id = in_flight
+                .pop_front()
+                .or(result.key_id)
+                .expect("append response without key_id");
+            if result.success {
+                confirm_append_key(state);
+            } else {
+                metrics::APPEND_SET_ERRORS.increment();
+                queues.push_back(endpoint_idx, key_id);
+            }
+        }
     }
 }
 
@@ -2273,6 +2814,8 @@ mod tests {
             ring: ketama::Ring::build(&["127.0.0.1:6379"]),
             slot_table: RwLock::new(None),
             prefill_queues: Arc::new(PrefillQueues::new(1)),
+            append_queues: Arc::new(PrefillQueues::new(1)),
+            append_ratelimiter: None,
             endpoint_keys: Arc::new(Vec::new()),
             worker_id,
             backfill_on_miss: false,

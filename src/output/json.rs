@@ -92,6 +92,10 @@ struct ResultsOutput {
     set: LatencyOutput,
     #[serde(skip_serializing_if = "Option::is_none")]
     backfill_set: Option<LatencyOutput>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    append_set: Option<LatencyOutput>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    append_batches: Option<u64>,
     conns_active: i64,
     conns_failed: u64,
     requests_dropped: u64,
@@ -308,6 +312,24 @@ impl OutputFormatter for JsonFormatter {
                     p9999_us: results.backfill_set_latencies.p9999_us as u64,
                     max_us: results.backfill_set_latencies.max_us as u64,
                 })
+            } else {
+                None
+            },
+            append_set: if results.append_set_count > 0 {
+                Some(LatencyOutput {
+                    count: results.append_set_count,
+                    p50_us: results.append_set_latencies.p50_us as u64,
+                    p90_us: results.append_set_latencies.p90_us as u64,
+                    p99_us: results.append_set_latencies.p99_us as u64,
+                    p999_us: results.append_set_latencies.p999_us as u64,
+                    p9999_us: results.append_set_latencies.p9999_us as u64,
+                    max_us: results.append_set_latencies.max_us as u64,
+                })
+            } else {
+                None
+            },
+            append_batches: if results.append_set_count > 0 {
+                Some(results.append_batches)
             } else {
                 None
             },

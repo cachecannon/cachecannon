@@ -131,7 +131,27 @@ count = 1000000
 # Key selection distribution
 # "uniform" - All keys equally likely
 # "zipf" - Zipfian distribution (hot keys accessed more often)
+# "recency" - Newest keys are hot, in units of append batches
+#             (requires [workload.append]; see guide.md "Append Stream")
 distribution = "uniform"
+
+# recency only: how many of the newest batches form the hot window (default 8)
+hot_generations = 8
+# recency only: weight of each older hot batch relative to the next newer one,
+# in (0, 1]; 1.0 is flat across the window (default 0.5)
+hot_decay = 0.5
+# recency only: fraction of reads that land in the hot window; the rest go
+# uniformly to the body below it (default 0.8)
+hot_fraction = 0.8
+
+# Append stream: batches of new keys written on a cadence by dedicated writer
+# connections. Grows the keyspace over the run. Requires distribution = "recency".
+# [workload.append]
+# batch = 100000          # keys per batch
+# every = "60s"           # interval between batch starts, from the start of warmup
+# pace = "burst"          # "burst" (as fast as the writers allow) or "spread"
+# connections = 1         # writer connections; cluster mode needs >= nodes
+# pipeline_depth = 32     # in-flight SETs per writer connection
 
 [workload.commands]
 # Command ratio as weights (will be normalized)

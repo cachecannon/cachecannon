@@ -403,6 +403,15 @@ impl OutputFormatter for CleanFormatter {
                 );
             }
         }
+        if results.append_set_count > 0 {
+            println!(
+                "{}",
+                format_latency_row(
+                    &self.cyan(&pad_name("APPEND SET")),
+                    &results.append_set_latencies
+                )
+            );
+        }
 
         // CO-honest sections — suppressed when there is no rate limit (slip ≡ 0)
         if results.schedule_slip.p99_us > 0.0 || results.requests_dropped > 0 {

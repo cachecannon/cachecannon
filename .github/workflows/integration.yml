@@ -54,6 +54,41 @@ jobs:
       - name: Run benchmark against Valkey
         run: ./target/release/cachecannon config/valkey-ci.toml
 
+  valkey-append:
+    name: Valkey (append stream)
+    runs-on: ubuntu-latest
+    services:
+      valkey:
+        image: valkey/valkey:latest
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "valkey-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build
+        run: cargo build --release
+      - name: Run append-stream benchmark against Valkey
+        run: ./target/release/cachecannon config/valkey-append-ci.toml | tee out.json
+      - name: Check that append batches committed and were reported
+        run: |
+          python3 - <<'EOF'
+          import json
+          # JSON output is one object per line; the final one is the result.
+          results = [json.loads(l) for l in open("out.json") if l.startswith('{"type":"result"')]
+          assert results, "no result line in output"
+          r = results[-1]
+          a = r.get("append_set")
+          assert a and a["count"] > 0, f"no append SETs reported: {r}"
+          assert r.get("append_batches", 0) >= 2, f"expected >= 2 committed batches: {r}"
+          assert r["misses"] == 0, f"reads targeted unwritten keys: {r['misses']} misses"
+          EOF
+
   valkey-resp3:
     name: Valkey (RESP3)
     runs-on: ubuntu-latest

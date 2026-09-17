@@ -1,0 +1,41 @@
+# CI configuration: append stream + recency distribution against Valkey.
+# Short cadence so several batches commit inside the run.
+
+[general]
+duration = "6s"
+warmup = "2s"
+threads = 2
+
+[target]
+endpoints = ["127.0.0.1:6379"]
+protocol = "resp"
+
+[connection]
+connections = 4
+pipeline_depth = 8
+
+[workload]
+prefill = true
+prefill_settle = "0s"   # memory-only server: skip the disk writeback settle
+
+[workload.keyspace]
+length = 16
+count = 10000
+distribution = "recency"
+hot_generations = 4
+
+[workload.append]
+batch = 1000
+every = "1s"
+pace = "burst"
+connections = 2
+pipeline_depth = 16
+
+[workload.commands]
+get = 100
+
+[workload.values]
+length = 64
+
+[admin]
+format = "json"   # the CI step asserts on the reported append batches

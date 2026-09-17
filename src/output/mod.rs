@@ -143,6 +143,13 @@ pub struct Results {
     pub set_latencies: LatencyStats,
     pub backfill_set_count: u64,
     pub backfill_set_latencies: LatencyStats,
+    /// Append-stream SETs confirmed during the recording phase. Reported
+    /// separately from `set_count`: the writer role runs on its own
+    /// connections and is not part of the read workload's totals.
+    pub append_set_count: u64,
+    pub append_set_latencies: LatencyStats,
+    /// Append batches committed during the recording phase.
+    pub append_batches: u64,
     pub conns_active: i64,
     pub conns_failed: u64,
     pub conns_total: u64,
@@ -238,6 +245,9 @@ mod overload_tests {
             set_latencies: Default::default(),
             backfill_set_count: 0,
             backfill_set_latencies: Default::default(),
+            append_set_count: 0,
+            append_set_latencies: Default::default(),
+            append_batches: 0,
             conns_active: 0,
             conns_failed: 0,
             conns_total: 0,

@@ -146,6 +146,69 @@ count = 10000000
 
 Realistic access pattern where some keys are "hot" (accessed frequently). Better simulates production traffic.
 
+### Append Stream
+
+```toml
+[workload]
+prefill = true
+backfill_on_miss = true
+
+[workload.keyspace]
+count = 10000000
+distribution = "recency"
+hot_generations = 8
+hot_decay = 0.5
+hot_fraction = 0.8
+
+[workload.append]
+batch = 100000
+every = "60s"
+pace = "burst"
+connections = 2
+
+[workload.commands]
+get = 100
+```
+
+Models a keyspace that grows over the run and whose hot set moves with it: an
+append-only store where new records arrive in batches and the most recent
+records are the ones being read. The stationary distributions cannot express
+this, because with them the same keys are hot for the whole run.
+
+How it fits together:
+
+- **Key ids are a monotonic sequence.** Prefill writes the initial body,
+  `0..count`. Each append batch writes the next `batch` ids. Old ids are never
+  reused, so a cache can never serve a stale hit for a "regenerated" key; the
+  tail simply ages out of the hot window and the server's own eviction reclaims
+  it.
+- **The head advances by writes, not by the clock.** A batch opens every
+  `every` (measured from the start of warmup) and the keyspace head moves only
+  once every SET in the batch is confirmed. Reads never target an unwritten key,
+  and the drift rate equals the write rate by construction. If a batch takes
+  longer than the interval to drain, the next one waits rather than stacking.
+- **Hotness attaches to the batch, not the key.** A read picks one of the
+  `hot_generations` newest batches with weight `hot_decay^age`, then a key
+  uniformly within it. `hot_fraction` of reads go to that window; the rest go
+  uniformly to the body below it. Before the first batch lands, the hot window
+  is the newest `hot_generations × batch` ids of the prefilled body.
+- **Writers have their own connections.** `append.connections` are a separate
+  pool with their own pipeline depth. Sharing the reader pipelines would queue
+  reads behind a burst of SETs inside the client, so read latency would carry an
+  artifact of the load generator rather than the server's behaviour under write
+  load. Append SETs are reported on their own line (`APPEND SET`) and do not
+  count toward the read workload's request, response, or latency totals.
+- **`pace`** chooses between firing the batch as fast as the writers allow
+  (`burst`) or pacing it evenly across the interval (`spread`).
+
+Combined with `backfill_on_miss`, a read that misses on an evicted key refills
+it from the reader side, which is where a read-through cache does that work.
+
+Runs against this model are usually long, because the interesting timescale is
+the cache's fill time against the append cadence. Shrinking `every` to compress
+a run changes what is being measured: fill time does not scale with it. Prefer
+real cadence with Parquet output and the viewer.
+
 ## Prefill
 
 Prefill populates the cache with every key in the keyspace before the benchmark begins. This is useful for read-only workloads, hit-rate measurements, or any test where you need the cache to be warm from the start.

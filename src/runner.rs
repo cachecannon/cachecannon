@@ -189,8 +189,42 @@ pub fn run_benchmark_full(
     // Steady-state key distribution. Built ONCE here rather than per worker:
     // zipf setup computes zeta(n, theta), which is O(keyspace) and would
     // otherwise be repeated by every worker thread at startup.
-    let key_dist = Arc::new(KeyDist::from_keyspace(&config.workload.keyspace));
+    let key_dist = Arc::new(KeyDist::from_workload(&config.workload));
     debug_assert_eq!(key_dist.len(), key_count);
+
+    // Append stream: shared per-endpoint queues drained by the writer
+    // connections, filled one batch at a time by the scheduler below. Built
+    // empty (key_count 0) with the same partitioning as prefill.
+    let append_queues = Arc::new(crate::worker::build_prefill_queues(
+        0,
+        config.workload.keyspace.length,
+        &config.target.endpoints,
+        &slot_table,
+    ));
+    let append_ratelimiter = match config.workload.append {
+        Some(ref a) if a.pace == crate::config::AppendPace::Spread => {
+            let rate = a.spread_rate();
+            let max_tokens = rate.max(a.pipeline_depth as u64);
+            Some(Arc::new(
+                Ratelimiter::builder(rate)
+                    .initial_available(0)
+                    .max_tokens(max_tokens)
+                    .build()
+                    .map_err(|e| format!("append rate limiter: {e}"))?,
+            ))
+        }
+        _ => None,
+    };
+    if let Some(ref a) = config.workload.append {
+        metrics::APPEND_HEAD.set(key_count as i64);
+        tracing::info!(
+            batch = a.batch,
+            every = ?a.every,
+            pace = ?a.pace,
+            connections = a.connections,
+            "append stream configured"
+        );
+    }
 
     // Allocate shared value pool: 1GB of random bytes shared across all workers.
     // Workers pick random offsets into this pool for SET values, avoiding per-worker
@@ -219,6 +253,8 @@ pub fn run_benchmark_full(
                 ratelimiter: ratelimiter.clone(),
                 recording: false,
                 prefill_queues: Arc::clone(&prefill_queues),
+                append_queues: Arc::clone(&append_queues),
+                append_ratelimiter: append_ratelimiter.clone(),
                 endpoint_keys: Arc::clone(&endpoint_keys),
                 cpu_ids: cpu_ids.clone(),
                 value_pool: Arc::clone(&value_pool),
@@ -335,6 +371,9 @@ pub fn run_benchmark_full(
     let mut baseline_get_count = 0u64;
     let mut baseline_set_count = 0u64;
     let mut baseline_backfill_set_count = 0u64;
+    let mut baseline_append_set_count = 0u64;
+    let mut baseline_append_batches = 0u64;
+    let mut baseline_append_set_latency: Option<Histogram> = None;
     let mut baseline_get_latency: Option<Histogram> = None;
     let mut baseline_get_ttfb: Option<Histogram> = None;
     let mut baseline_set_latency: Option<Histogram> = None;
@@ -348,6 +387,18 @@ pub fn run_benchmark_full(
 
     // Saturation search state (initialized after warmup if configured)
     let mut saturation_state: Option<SaturationSearchState> = None;
+
+    // Append stream scheduling. Batches start on a fixed cadence measured
+    // from the start of warmup; the next batch is not opened while one is
+    // still draining, so a slow server delays the stream rather than stacking
+    // batches. The keyspace head advances only once a batch is fully
+    // confirmed, so readers never target an unwritten key.
+    let append_cfg = config.workload.append.clone();
+    let append_head = key_dist.head_handle();
+    let mut append_next_id: usize = key_count;
+    let mut append_next_at: Option<Instant> = None;
+    let mut append_batch_open = false;
+    let mut append_batches_committed: u64 = 0;
 
     // Track when warmup actually starts (after prefill completes)
     let mut warmup_start: Option<Instant> = None;
@@ -605,6 +656,9 @@ pub fn run_benchmark_full(
             baseline_get_count = metrics::GET_COUNT.value();
             baseline_set_count = metrics::SET_COUNT.value();
             baseline_backfill_set_count = metrics::BACKFILL_SET_COUNT.value();
+            baseline_append_set_count = metrics::APPEND_SET_COUNT.value();
+            baseline_append_batches = append_batches_committed;
+            baseline_append_set_latency = metrics::APPEND_SET_LATENCY.load();
             baseline_bytes_tx = metrics::BYTES_TX.value();
             baseline_bytes_rx = metrics::BYTES_RX.value();
             baseline_get_latency = metrics::GET_LATENCY.load();
@@ -629,6 +683,59 @@ pub fn run_benchmark_full(
                     sat_config.clone(),
                     Arc::clone(rl),
                 ));
+            }
+        }
+
+        // Append stream: commit a drained batch, or open the next one when
+        // its start time has arrived. Runs through warmup and the measured
+        // phase alike, so the first batches land before recording starts.
+        if let (Some(append), Some(head)) = (append_cfg.as_ref(), append_head.as_ref())
+            && matches!(current_phase, Phase::Warmup | Phase::Running)
+            && let Some(ws) = warmup_start
+        {
+            let next_at = *append_next_at.get_or_insert(ws + append.every);
+            if append_batch_open {
+                if shared.append_keys_confirmed() >= shared.append_keys_total() {
+                    append_batch_open = false;
+                    append_batches_committed += 1;
+                    head.store(append_next_id, std::sync::atomic::Ordering::Release);
+                    metrics::APPEND_HEAD.set(append_next_id as i64);
+                    metrics::APPEND_BATCHES.set(append_batches_committed as i64);
+                    tracing::info!(
+                        batch = append_batches_committed,
+                        head = append_next_id,
+                        "append batch committed"
+                    );
+                }
+            } else if Instant::now() >= next_at {
+                let start = append_next_id;
+                crate::worker::enqueue_append_batch(
+                    &append_queues,
+                    start,
+                    append.batch,
+                    config.workload.keyspace.length,
+                    &config.target.endpoints,
+                    &slot_table,
+                );
+                shared.add_append_total(append.batch);
+                append_next_id = start + append.batch;
+                append_batch_open = true;
+                let late = Instant::now().saturating_duration_since(next_at);
+                if late >= append.every {
+                    tracing::warn!(
+                        late = ?late,
+                        "append stream is falling behind: the previous batch took longer \
+                         than the interval to drain"
+                    );
+                }
+                // Schedule from the nominal time so cadence does not drift.
+                append_next_at = Some(next_at + append.every);
+                tracing::info!(
+                    batch = append_batches_committed + 1,
+                    first_id = start,
+                    count = append.batch,
+                    "append batch opened"
+                );
             }
         }
 
@@ -795,6 +902,8 @@ pub fn run_benchmark_full(
     let get_count = metrics::GET_COUNT.value() - baseline_get_count;
     let set_count = metrics::SET_COUNT.value() - baseline_set_count;
     let backfill_set_count = metrics::BACKFILL_SET_COUNT.value() - baseline_backfill_set_count;
+    let append_set_count = metrics::APPEND_SET_COUNT.value() - baseline_append_set_count;
+    let append_batches = append_batches_committed - baseline_append_batches;
     let failed = conn_failures;
     let elapsed_secs = actual_duration.as_secs_f64();
 
@@ -810,6 +919,8 @@ pub fn run_benchmark_full(
         &metrics::BACKFILL_SET_LATENCY,
         &baseline_backfill_set_latency,
     );
+    let append_set_latencies =
+        delta_latency_stats(&metrics::APPEND_SET_LATENCY, &baseline_append_set_latency);
     let schedule_slip = delta_latency_stats(&metrics::SCHEDULE_SLIP, &baseline_schedule_slip);
     let perceived_latency = delta_latency_stats(&metrics::PERCEIVED_LATENCY, &baseline_perceived);
 
@@ -829,6 +940,9 @@ pub fn run_benchmark_full(
         set_latencies,
         backfill_set_count,
         backfill_set_latencies,
+        append_set_count,
+        append_set_latencies,
+        append_batches,
         conns_active: active,
         conns_failed: failed,
         conns_total: total_connections as u64,

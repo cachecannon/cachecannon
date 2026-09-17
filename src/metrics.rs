@@ -143,6 +143,55 @@ pub static DISCONNECTS_CONNECT_FAILED: Counter =
 )]
 pub static TARGET_RATE: Gauge = Gauge::new();
 
+// ── Append stream metrics ────────────────────────────────────────────────
+//
+// The append role writes on its own connections and is reported separately:
+// a batch burst must not inflate the read workload's request, response, or
+// latency numbers, which are what a run against a growing keyspace measures.
+static APPEND: CounterGroup = CounterGroup::new();
+
+/// Counter slot indices for append metrics.
+pub mod append {
+    pub const SET: usize = 0;
+    pub const ERRORS: usize = 1;
+}
+
+#[metric(
+    name = "append_set_count",
+    description = "Append-stream SET operations confirmed"
+)]
+pub static APPEND_SET_COUNT: Counter = Counter::new(&APPEND, append::SET);
+
+#[metric(
+    name = "append_set_errors",
+    description = "Append-stream SET operations that failed and were retried"
+)]
+pub static APPEND_SET_ERRORS: Counter = Counter::new(&APPEND, append::ERRORS);
+
+#[metric(
+    name = "append_set_latency",
+    description = "Append-stream SET latency histogram (nanoseconds)"
+)]
+pub static APPEND_SET_LATENCY: AtomicHistogram = AtomicHistogram::new(7, 64);
+
+#[metric(
+    name = "append_head",
+    description = "Keyspace head: number of key ids readers may target (grows as append batches commit)"
+)]
+pub static APPEND_HEAD: Gauge = Gauge::new();
+
+#[metric(
+    name = "append_batches",
+    description = "Append batches committed so far"
+)]
+pub static APPEND_BATCHES: Gauge = Gauge::new();
+
+#[metric(
+    name = "append_connections_active",
+    description = "Active append-stream writer connections"
+)]
+pub static APPEND_CONNECTIONS_ACTIVE: ShardedGauge = ShardedGauge::new();
+
 // Cluster metrics
 static CLUSTER: CounterGroup = CounterGroup::new();
 

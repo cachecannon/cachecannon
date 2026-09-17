@@ -21,6 +21,8 @@ pub struct RequestResult {
     pub backfill: bool,
     /// True if this SET was issued as part of the prefill phase
     pub prefill: bool,
+    /// True if this SET was issued by the append stream (writer role)
+    pub append: bool,
     /// Cluster redirect (MOVED/ASK), if the response was a redirect error.
     pub redirect: Option<resp_proto::Redirect>,
 }

@@ -256,6 +256,10 @@ pub struct Workload {
     pub values: Values,
     #[serde(default)]
     pub saturation_search: Option<SaturationSearch>,
+    /// Append stream: new keys written in batches on a cadence by dedicated
+    /// writer connections. Requires `keyspace.distribution = "recency"`.
+    #[serde(default)]
+    pub append: Option<Append>,
 }
 
 /// Configuration for saturation search mode.
@@ -429,6 +433,19 @@ pub struct Keyspace {
     /// How key ids are rendered into key bytes (`hex` default, or `uuid`).
     #[serde(default)]
     pub format: KeyFormat,
+    /// `distribution = "recency"` only: how many of the newest append batches
+    /// form the hot window. Default 8.
+    #[serde(default = "default_hot_generations")]
+    pub hot_generations: usize,
+    /// `distribution = "recency"` only: weight of each older hot generation
+    /// relative to the one before it, in (0, 1]. 1.0 is flat across the hot
+    /// window. Default 0.5.
+    #[serde(default = "default_hot_decay")]
+    pub hot_decay: f64,
+    /// `distribution = "recency"` only: fraction of reads that land in the hot
+    /// window; the rest go uniformly to the body below it. Default 0.8.
+    #[serde(default = "default_hot_fraction")]
+    pub hot_fraction: f64,
 }
 
 impl Default for Keyspace {
@@ -439,7 +456,76 @@ impl Default for Keyspace {
             distribution: Distribution::default(),
             zipf_theta: default_zipf_theta(),
             format: KeyFormat::default(),
+            hot_generations: default_hot_generations(),
+            hot_decay: default_hot_decay(),
+            hot_fraction: default_hot_fraction(),
         }
+    }
+}
+
+fn default_hot_generations() -> usize {
+    8
+}
+
+fn default_hot_decay() -> f64 {
+    0.5
+}
+
+fn default_hot_fraction() -> f64 {
+    0.8
+}
+
+/// A single append stream: a batch of new keys written on a fixed cadence by
+/// dedicated writer connections, growing the keyspace over the run.
+///
+/// The writer is its own role with its own connections so that a batch never
+/// queues reads behind SETs inside this client: read latency then reflects
+/// the server under write load, not cachecannon's own pipeline. Batches are
+/// drained through the same per-endpoint queue path as prefill (routing,
+/// confirm-on-response, retry), and the keyspace head advances only once a
+/// whole batch is confirmed, so reads never target an unwritten key.
+#[derive(Debug, Clone, Deserialize)]
+pub struct Append {
+    /// Keys per batch.
+    pub batch: usize,
+    /// Interval between batch starts, measured from the start of warmup.
+    #[serde(with = "humantime_serde")]
+    pub every: Duration,
+    /// `burst` fires the batch as fast as the writer pipelines allow (default);
+    /// `spread` paces it evenly across the interval.
+    #[serde(default)]
+    pub pace: AppendPace,
+    /// Writer connections, distributed across threads like `[connection]`.
+    /// Cluster mode needs at least one per node. Default 1.
+    #[serde(default = "default_append_connections")]
+    pub connections: usize,
+    /// In-flight SETs per writer connection. Default 32.
+    #[serde(default = "default_append_pipeline_depth")]
+    pub pipeline_depth: usize,
+}
+
+#[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum AppendPace {
+    #[default]
+    Burst,
+    Spread,
+}
+
+fn default_append_connections() -> usize {
+    1
+}
+
+fn default_append_pipeline_depth() -> usize {
+    32
+}
+
+impl Append {
+    /// Writer-side SET rate for `pace = "spread"`: the batch spread evenly
+    /// over the interval, at least 1/s.
+    pub fn spread_rate(&self) -> u64 {
+        let secs = self.every.as_secs_f64().max(1e-9);
+        ((self.batch as f64 / secs).ceil() as u64).max(1)
     }
 }
 
@@ -455,12 +541,16 @@ fn default_zipf_theta() -> f64 {
     0.99
 }
 
-#[derive(Debug, Clone, Copy, Default, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum Distribution {
     #[default]
     Uniform,
     Zipf,
+    /// Newest keys are hot, in units of append batches. Requires
+    /// `[workload.append]`, which supplies the batch size and grows the
+    /// keyspace over the run. See `keydist::Recency`.
+    Recency,
 }
 
 /// How a key id is rendered into the on-wire key bytes.
@@ -684,6 +774,87 @@ impl Config {
             if !theta.is_finite() || theta <= 0.0 {
                 return Err(ConfigError::Validation(format!(
                     "keyspace.zipf_theta must be finite and > 0 (got {theta})"
+                )));
+            }
+        }
+
+        let is_recency = self.workload.keyspace.distribution == Distribution::Recency;
+        match (&self.workload.append, is_recency) {
+            (None, true) => {
+                return Err(ConfigError::Validation(
+                    "keyspace.distribution = \"recency\" requires a [workload.append] section \
+                     (it supplies the batch size the hot window is measured in)"
+                        .to_string(),
+                ));
+            }
+            (Some(_), false) => {
+                return Err(ConfigError::Validation(
+                    "[workload.append] requires keyspace.distribution = \"recency\" \
+                     (the stationary distributions cannot follow a growing keyspace)"
+                        .to_string(),
+                ));
+            }
+            _ => {}
+        }
+        if is_recency {
+            let ks = &self.workload.keyspace;
+            if ks.hot_generations == 0 {
+                return Err(ConfigError::Validation(
+                    "keyspace.hot_generations must be >= 1".to_string(),
+                ));
+            }
+            if !ks.hot_decay.is_finite() || ks.hot_decay <= 0.0 || ks.hot_decay > 1.0 {
+                return Err(ConfigError::Validation(format!(
+                    "keyspace.hot_decay must be in (0, 1] (got {})",
+                    ks.hot_decay
+                )));
+            }
+            if !ks.hot_fraction.is_finite() || !(0.0..=1.0).contains(&ks.hot_fraction) {
+                return Err(ConfigError::Validation(format!(
+                    "keyspace.hot_fraction must be in [0, 1] (got {})",
+                    ks.hot_fraction
+                )));
+            }
+            if ks.count == 0 {
+                return Err(ConfigError::Validation(
+                    "keyspace.count must be >= 1 with distribution = \"recency\"".to_string(),
+                ));
+            }
+        }
+        if let Some(ref append) = self.workload.append {
+            if append.batch == 0 {
+                return Err(ConfigError::Validation(
+                    "append.batch must be >= 1".to_string(),
+                ));
+            }
+            if append.every.is_zero() {
+                return Err(ConfigError::Validation(
+                    "append.every must be > 0".to_string(),
+                ));
+            }
+            if append.connections == 0 {
+                return Err(ConfigError::Validation(
+                    "append.connections must be >= 1".to_string(),
+                ));
+            }
+            if append.pipeline_depth == 0 {
+                return Err(ConfigError::Validation(
+                    "append.pipeline_depth must be >= 1".to_string(),
+                ));
+            }
+            if matches!(self.target.protocol, Protocol::Ping) {
+                return Err(ConfigError::Validation(
+                    "[workload.append] needs a protocol with SET (resp, resp3, memcache, \
+                     memcache-binary); ping has none"
+                        .to_string(),
+                ));
+            }
+            if self.target.endpoints.len() > 1 && append.connections < self.target.endpoints.len() {
+                return Err(ConfigError::Validation(format!(
+                    "append.connections ({}) must be >= the number of endpoints ({}) so every \
+                     node's append queue has a writer draining it",
+                    append.connections,
+                    self.target.endpoints.len()
                 )));
             }
         }
@@ -1342,5 +1513,164 @@ connections = 1
         assert!(config.target.tls_ca_file.is_none());
         assert!(config.target.tls_cert_file.is_none());
         assert!(config.target.tls_key_file.is_none());
+    }
+}
+
+#[cfg(test)]
+mod append_config_tests {
+    use super::*;
+    use std::time::Duration;
+
+    fn parse_config(toml: &str) -> Result<Config, ConfigError> {
+        let config: Config = toml::from_str(toml).map_err(|e| ConfigError::Parse(e.to_string()))?;
+        config.validate()?;
+        Ok(config)
+    }
+
+    fn append_config(keyspace: &str, append: &str) -> Result<Config, ConfigError> {
+        parse_config(&format!(
+            r#"
+            [target]
+            endpoints = ["127.0.0.1:6379"]
+            protocol = "resp"
+            [workload.keyspace]
+            count = 10000
+            {keyspace}
+            {append}
+            "#
+        ))
+    }
+
+    #[test]
+    fn append_with_recency_validates_and_applies_defaults() {
+        let cfg = append_config(
+            "distribution = \"recency\"",
+            "[workload.append]\nbatch = 100\nevery = \"1s\"",
+        )
+        .expect("recency + append should validate");
+        let a = cfg.workload.append.expect("append section parsed");
+        assert_eq!(a.batch, 100);
+        assert_eq!(a.every, Duration::from_secs(1));
+        assert_eq!(a.pace, AppendPace::Burst);
+        assert_eq!(a.connections, 1);
+        assert_eq!(a.pipeline_depth, 32);
+        assert_eq!(cfg.workload.keyspace.hot_generations, 8);
+        assert!((cfg.workload.keyspace.hot_decay - 0.5).abs() < 1e-12);
+        assert!((cfg.workload.keyspace.hot_fraction - 0.8).abs() < 1e-12);
+    }
+
+    #[test]
+    fn recency_without_append_is_rejected() {
+        let err = append_config("distribution = \"recency\"", "")
+            .expect_err("recency needs the batch size from [workload.append]");
+        assert!(format!("{err:?}").contains("workload.append"), "{err:?}");
+    }
+
+    #[test]
+    fn append_without_recency_is_rejected() {
+        let err = append_config("", "[workload.append]\nbatch = 100\nevery = \"1s\"")
+            .expect_err("a stationary distribution cannot follow a growing keyspace");
+        assert!(format!("{err:?}").contains("recency"), "{err:?}");
+    }
+
+    #[test]
+    fn append_rejects_degenerate_values() {
+        for (append, needle) in [
+            (
+                "[workload.append]\nbatch = 0\nevery = \"1s\"",
+                "append.batch",
+            ),
+            (
+                "[workload.append]\nbatch = 1\nevery = \"0s\"",
+                "append.every",
+            ),
+            (
+                "[workload.append]\nbatch = 1\nevery = \"1s\"\nconnections = 0",
+                "append.connections",
+            ),
+            (
+                "[workload.append]\nbatch = 1\nevery = \"1s\"\npipeline_depth = 0",
+                "append.pipeline_depth",
+            ),
+        ] {
+            let err = append_config("distribution = \"recency\"", append)
+                .expect_err("degenerate append value must not validate");
+            assert!(format!("{err:?}").contains(needle), "{needle}: {err:?}");
+        }
+    }
+
+    #[test]
+    fn recency_rejects_degenerate_hot_window() {
+        let append = "[workload.append]\nbatch = 1\nevery = \"1s\"";
+        for (ks, needle) in [
+            (
+                "distribution = \"recency\"\nhot_generations = 0",
+                "hot_generations",
+            ),
+            ("distribution = \"recency\"\nhot_decay = 0.0", "hot_decay"),
+            ("distribution = \"recency\"\nhot_decay = 1.5", "hot_decay"),
+            (
+                "distribution = \"recency\"\nhot_fraction = 1.5",
+                "hot_fraction",
+            ),
+        ] {
+            let err = append_config(ks, append).expect_err("bad hot window must not validate");
+            assert!(format!("{err:?}").contains(needle), "{needle}: {err:?}");
+        }
+    }
+
+    #[test]
+    fn append_needs_a_protocol_with_set() {
+        let err = parse_config(
+            r#"
+            [target]
+            endpoints = ["127.0.0.1:6379"]
+            protocol = "ping"
+            [workload.keyspace]
+            distribution = "recency"
+            [workload.append]
+            batch = 10
+            every = "1s"
+            "#,
+        )
+        .expect_err("ping has no SET");
+        assert!(format!("{err:?}").contains("ping"), "{err:?}");
+    }
+
+    #[test]
+    fn append_cluster_needs_a_writer_per_node() {
+        let err = parse_config(
+            r#"
+            [target]
+            endpoints = ["127.0.0.1:6379", "127.0.0.1:6380"]
+            protocol = "resp"
+            [workload.keyspace]
+            distribution = "recency"
+            [workload.append]
+            batch = 10
+            every = "1s"
+            connections = 1
+            "#,
+        )
+        .expect_err("one writer cannot drain two nodes' queues");
+        assert!(format!("{err:?}").contains("append.connections"), "{err:?}");
+    }
+
+    #[test]
+    fn spread_rate_is_batch_over_interval_rounded_up() {
+        let a = Append {
+            batch: 1000,
+            every: Duration::from_secs(30),
+            pace: AppendPace::Spread,
+            connections: 1,
+            pipeline_depth: 32,
+        };
+        assert_eq!(a.spread_rate(), 34);
+        let slow = Append {
+            batch: 1,
+            every: Duration::from_secs(3600),
+            ..a
+        };
+        assert_eq!(slow.spread_rate(), 1);
     }
 }

@@ -1,0 +1,47 @@
+# Append stream with newest-is-hottest reads
+#
+# Models a keyspace that grows in batches: dedicated writer connections append
+# a batch of new keys on a fixed cadence, and reads concentrate on the most
+# recently appended batches. Read latency stays clean because the writers own
+# their connections; a batch burst never queues reads behind SETs inside the
+# client.
+#
+# See docs/guide.md "Append Stream" for how the pieces fit together.
+
+[general]
+duration = "10m"
+warmup = "30s"
+threads = 4
+
+[target]
+endpoints = ["127.0.0.1:6379"]
+protocol = "resp"
+
+[connection]
+connections = 16
+pipeline_depth = 32
+
+[workload]
+prefill = true             # the initial body must exist before reads start
+backfill_on_miss = true    # cache-aside: a miss on an evicted key refills it
+
+[workload.keyspace]
+length = 16
+count = 10000000           # initial body; grows by `append.batch` per batch
+distribution = "recency"
+hot_generations = 8        # the 8 newest batches form the hot window
+hot_decay = 0.5            # each older batch gets half the share of the next
+hot_fraction = 0.8         # 80% of reads land in the hot window
+
+[workload.append]
+batch = 100000             # keys per batch
+every = "60s"              # interval between batch starts
+pace = "burst"             # or "spread" to pace the batch across the interval
+connections = 2            # writer connections (own pool, not the readers')
+pipeline_depth = 32
+
+[workload.commands]
+get = 100                  # reads only; the append stream does the writing
+
+[workload.values]
+length = 512
