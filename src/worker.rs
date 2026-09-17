@@ -298,6 +298,81 @@ fn make_value_guard(
 /// once the value is large enough to amortize the per-send cost.
 const ZC_VALUE_THRESHOLD: usize = 4096;
 
+// ── Idle backoff ────────────────────────────────────────────────────────
+
+/// Shortest idle sleep, and the value every connection used unconditionally
+/// before this was scaled. Runs small enough that the formula below lands under
+/// it are bit-identical to that behaviour.
+const IDLE_SLEEP_MIN: Duration = Duration::from_micros(100);
+
+/// Longest idle sleep. A connection that sleeps this long still reports the
+/// consequence: unclaimed tokens accumulate in the limiter, which is exactly
+/// what `schedule_slip` measures, so over-sleeping shows up as slip rather than
+/// as a silently reshaped offered load.
+const IDLE_SLEEP_MAX: Duration = Duration::from_millis(50);
+
+/// How far the fleet oversamples the token stream. At `K` wakeups per token
+/// granted there is two orders of magnitude of slack before a sleeping
+/// connection could leave the limiter unclaimed.
+const IDLE_WAKEUPS_PER_TOKEN: u64 = 64;
+
+/// How long a connection with nothing in flight should wait before looking for
+/// rate-limit tokens again.
+///
+/// A connection reaching the idle path is almost never waiting on the network;
+/// it is waiting for the shared rate limiter to mint a token. The old fixed
+/// 100 us poll made that cost O(connections) per 100 us and independent of the
+/// request rate, so a 10,000-connection run at 20,000 req/s spent ~100M
+/// wakeups/s to hand out 20,000 tokens. Measured on that run: ~12M CQEs/s and
+/// ~365 task polls per response, against a generator pinned at 15.8 of 16
+/// cores.
+///
+/// Only `rate` fires per second can ever succeed, so any wakeup beyond that is
+/// wasted work. Sleeping `connections / (K * rate)` holds the fleet-wide wakeup
+/// rate at `K * rate` regardless of how many connections are open -- the point
+/// of the change is that connection count drops out:
+///
+/// ```text
+///   conns_per_worker / sleep == K * rate_per_worker
+///   => sleep == conns_total / (K * rate_total)      (threads cancel)
+/// ```
+///
+/// Aggregate throughput is unaffected because a token is claimed by whichever
+/// connection wakes next, not by a particular one. What a longer sleep can cost
+/// is the latency of one connection's *next* fire -- which is why the cap is
+/// 50 ms and why the honest accounting already exists: unclaimed tokens are
+/// limiter backlog, and backlog is `schedule_slip`.
+///
+/// Returns `IDLE_SLEEP_MIN` when there is no rate limit. An unlimited run keeps
+/// every connection's pipeline full, so it does not reach the idle path at all.
+fn idle_sleep(total_connections: usize, rate: u64) -> Duration {
+    if rate == 0 {
+        return IDLE_SLEEP_MIN;
+    }
+    let denom = IDLE_WAKEUPS_PER_TOKEN.saturating_mul(rate);
+    // Nanoseconds, not micros: at high rates the quotient is sub-microsecond
+    // and would truncate to zero, turning the sleep into a spin.
+    let nanos = (total_connections as u64)
+        .saturating_mul(1_000_000_000)
+        .checked_div(denom)
+        .unwrap_or(0);
+    Duration::from_nanos(nanos).clamp(IDLE_SLEEP_MIN, IDLE_SLEEP_MAX)
+}
+
+/// Spread the idle sleep over `[0.75, 1.25]` of its nominal value.
+///
+/// Connection phases drift apart on their own, but a mid-run rate change (the
+/// saturation search steps the rate) releases every waiter at once and would
+/// re-synchronise them into a herd that wakes together and finds one token.
+fn jittered_idle_sleep(base: Duration, rng: &mut Xoshiro256PlusPlus) -> Duration {
+    let nanos = base.as_nanos() as u64;
+    let spread = nanos / 4;
+    if spread == 0 {
+        return base;
+    }
+    Duration::from_nanos(nanos - spread + rng.random_range(0..=2 * spread))
+}
+
 /// Borrow a random `value_len`-byte slice of the value pool, for the
 /// copy-based `fire_set` path (the bytes are copied into the send pool
 /// synchronously, so the borrow only needs to outlive the fire call).
@@ -959,6 +1034,7 @@ async fn drive_resp_workload(
     let multi_endpoint = num_endpoints > 1;
     let pipeline_depth = config.connection.pipeline_depth;
     let batch_size = config.connection.effective_batch_size();
+    let total_connections = config.connection.total_connections();
     let mut prefill_in_flight: VecDeque<usize> = VecDeque::new();
 
     loop {
@@ -1164,9 +1240,18 @@ async fn drive_resp_workload(
                 .set(crate::metrics::slip_ns(rl.available(), rl.rate()) as i64);
         }
 
-        // Wait for one response (yield if idle to avoid starving other connections)
+        // Nothing in flight: wait before looking for rate-limit tokens again.
+        // The interval scales with connection count so the fleet-wide wakeup
+        // rate stays proportional to the token rate rather than to the number
+        // of connections -- see `idle_sleep`.
         if client.pending_count() == 0 {
-            ringline::sleep(Duration::from_micros(100)).await;
+            let rate = state
+                .task_state
+                .ratelimiter
+                .as_ref()
+                .map_or(0, |rl| rl.rate());
+            let base = idle_sleep(total_connections, rate);
+            ringline::sleep(jittered_idle_sleep(base, rng)).await;
             continue;
         }
 
@@ -1550,6 +1635,7 @@ async fn drive_memcache_workload(
     let multi_endpoint = num_endpoints > 1;
     let pipeline_depth = config.connection.pipeline_depth;
     let batch_size = config.connection.effective_batch_size();
+    let total_connections = config.connection.total_connections();
     let mut prefill_in_flight: VecDeque<usize> = VecDeque::new();
 
     loop {
@@ -1700,9 +1786,18 @@ async fn drive_memcache_workload(
                 .set(crate::metrics::slip_ns(rl.available(), rl.rate()) as i64);
         }
 
-        // Wait for one response (yield if idle to avoid starving other connections)
+        // Nothing in flight: wait before looking for rate-limit tokens again.
+        // The interval scales with connection count so the fleet-wide wakeup
+        // rate stays proportional to the token rate rather than to the number
+        // of connections -- see `idle_sleep`.
         if client.pending_count() == 0 {
-            ringline::sleep(Duration::from_micros(100)).await;
+            let rate = state
+                .task_state
+                .ratelimiter
+                .as_ref()
+                .map_or(0, |rl| rl.rate());
+            let base = idle_sleep(total_connections, rate);
+            ringline::sleep(jittered_idle_sleep(base, rng)).await;
             continue;
         }
 
@@ -2248,6 +2343,95 @@ fn pin_to_cpu(_cpu_id: usize) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The property the change exists for: fleet-wide wakeups track the token
+    /// rate, not the connection count. Asserted as a ratio so it holds however
+    /// the constants are retuned.
+    #[test]
+    fn idle_wakeup_rate_is_independent_of_connection_count() {
+        let rate = 20_000;
+        for conns in [1024, 4096, 10_000, 40_000] {
+            let sleep = idle_sleep(conns, rate);
+            // Skip any point that the clamp, not the formula, decided.
+            if sleep == IDLE_SLEEP_MIN || sleep == IDLE_SLEEP_MAX {
+                continue;
+            }
+            let wakeups = conns as f64 / sleep.as_secs_f64();
+            let expected = (IDLE_WAKEUPS_PER_TOKEN * rate) as f64;
+            assert!(
+                (wakeups - expected).abs() / expected < 0.01,
+                "{conns} connections wake {wakeups:.0}/s, expected ~{expected:.0}/s"
+            );
+        }
+    }
+
+    #[test]
+    fn small_runs_keep_the_previous_fixed_poll() {
+        // 64 connections at 20k req/s was never the expensive case, and must
+        // not start sleeping longer than it used to.
+        assert_eq!(idle_sleep(64, 20_000), IDLE_SLEEP_MIN);
+        assert_eq!(idle_sleep(1, 20_000), IDLE_SLEEP_MIN);
+    }
+
+    #[test]
+    fn an_unlimited_run_keeps_the_floor() {
+        // rate 0 means no limiter. Such a run keeps its pipeline full and never
+        // reaches the idle path, but the arithmetic must not divide by zero.
+        assert_eq!(idle_sleep(10_000, 0), IDLE_SLEEP_MIN);
+    }
+
+    #[test]
+    fn idle_sleep_is_bounded_on_absurd_input() {
+        assert_eq!(idle_sleep(usize::MAX, 1), IDLE_SLEEP_MAX);
+        assert_eq!(idle_sleep(0, 20_000), IDLE_SLEEP_MIN);
+        // A very high rate makes the quotient sub-microsecond; it must clamp to
+        // the floor rather than truncate to a zero-length sleep, which would
+        // spin the worker.
+        assert_eq!(idle_sleep(10, u64::MAX / 64), IDLE_SLEEP_MIN);
+    }
+
+    #[test]
+    fn the_10k_connection_case_sleeps_far_longer_than_it_did() {
+        // The run that prompted this: 10,000 connections, 20,000 req/s, which
+        // was spending ~100M wakeups/s to grant 20,000 tokens.
+        let sleep = idle_sleep(10_000, 20_000);
+        assert!(
+            sleep > IDLE_SLEEP_MIN * 50,
+            "10k connections still sleeps only {sleep:?}"
+        );
+        assert!(sleep < IDLE_SLEEP_MAX);
+    }
+
+    #[test]
+    fn jitter_stays_within_a_quarter_and_varies() {
+        let mut rng = Xoshiro256PlusPlus::seed_from_u64(7);
+        let base = Duration::from_millis(8);
+        let mut seen = std::collections::HashSet::new();
+        for _ in 0..1000 {
+            let d = jittered_idle_sleep(base, &mut rng);
+            assert!(
+                d >= base * 3 / 4 && d <= base * 5 / 4,
+                "{d:?} outside [0.75, 1.25] of {base:?}"
+            );
+            seen.insert(d);
+        }
+        assert!(
+            seen.len() > 100,
+            "jitter barely varies: {} values",
+            seen.len()
+        );
+    }
+
+    #[test]
+    fn jitter_leaves_the_floor_alone() {
+        // At 100us the spread is 25us, which is meaningful; at a hypothetical
+        // sub-4ns base it would round to zero and must return the base intact.
+        let mut rng = Xoshiro256PlusPlus::seed_from_u64(1);
+        assert_eq!(
+            jittered_idle_sleep(Duration::from_nanos(3), &mut rng),
+            Duration::from_nanos(3)
+        );
+    }
 
     /// Build a minimal TaskSharedState + SharedWorkerState for testing prefill logic.
     fn make_worker_state(
