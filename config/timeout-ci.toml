@@ -1,0 +1,33 @@
+# CI configuration: request_timeout enforcement against a black-hole server.
+#
+# scripts/blackhole-resp.py answers PING (so precheck passes) and never
+# answers anything else. Every request must be abandoned at request_timeout,
+# reported as a timeout, and the connection re-established.
+
+[general]
+duration = "4s"
+warmup = "1s"
+threads = 2
+
+[target]
+endpoints = ["127.0.0.1:6390"]
+protocol = "resp"
+
+[connection]
+connections = 4
+pipeline_depth = 8
+connect_timeout = "2s"
+request_timeout = "500ms"
+
+[workload.keyspace]
+length = 16
+count = 1000
+
+[workload.commands]
+get = 100
+
+[workload.values]
+length = 64
+
+[admin]
+format = "json"

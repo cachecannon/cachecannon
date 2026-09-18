@@ -98,6 +98,8 @@ struct ResultsOutput {
     append_batches: Option<u64>,
     conns_active: i64,
     conns_failed: u64,
+    /// Requests abandoned at `connection.request_timeout` (included in errors).
+    timeouts: u64,
     requests_dropped: u64,
     offered: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -335,6 +337,7 @@ impl OutputFormatter for JsonFormatter {
             },
             conns_active: results.conns_active,
             conns_failed: results.conns_failed,
+            timeouts: results.timeouts,
             requests_dropped: results.requests_dropped,
             offered: results.offered(),
             schedule_slip: if results.schedule_slip.p99_us > 0.0 || results.requests_dropped > 0 {

@@ -241,6 +241,36 @@ jobs:
       - name: Run benchmark against Valkey TLS
         run: ./target/release/cachecannon config/valkey-tls-ci.toml
 
+  request-timeout:
+    name: Request timeout (black-hole server)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build
+        run: cargo build --release
+      - name: Start a RESP server that answers PING and nothing else
+        run: |
+          python3 scripts/blackhole-resp.py 6390 &
+          sleep 1
+      - name: Run against the black hole
+        run: ./target/release/cachecannon config/timeout-ci.toml | tee out.json
+      - name: Every request must have timed out, none answered
+        run: |
+          python3 - <<'EOF'
+          import json
+          results = [json.loads(l) for l in open("out.json") if l.startswith('{"type":"result"')]
+          assert results, "no result line in output"
+          r = results[-1]
+          assert r["timeouts"] > 0, f"request_timeout not enforced: {r}"
+          assert r["responses"] == 0, f"black hole answered something: {r}"
+          assert r["errors"] >= r["timeouts"], f"timeouts not counted as errors: {r}"
+          # 4 conns x 8 pipeline, abandoned every 500ms over a 4s window: expect
+          # well over one round of timeouts, and a bounded number of them.
+          assert 32 <= r["timeouts"] <= 4 * 8 * 12, f"unexpected timeout count: {r}"
+          EOF
+
   memcache:
     name: Memcache
     runs-on: ubuntu-latest

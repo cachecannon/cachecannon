@@ -84,6 +84,9 @@ pub enum DisconnectReason {
     ErrorEvent,
     /// Failed to establish connection
     ConnectFailed,
+    /// A request outlived `connection.request_timeout`; the connection was
+    /// closed because replies are ordered and a stalled head blocks them all.
+    Timeout,
 }
 
 /// Shared state between workers and main thread.
@@ -802,10 +805,16 @@ fn spawn_protocol_tasks(
 
 /// Try to connect to an endpoint, returning Ok(conn) or Err with retry sleep.
 /// When `tls_server_name` is Some, uses TLS via `ringline::connect_tls`.
+///
+/// The attempt is bounded by `connect_timeout` (zero disables the bound).
+/// Without it a SYN to a host that never answers hangs the task for the
+/// kernel's own connect timeout, minutes on Linux, and the precheck deadline
+/// in the runner only covers the first attempt of the run, not reconnects.
 async fn establish_connection(
     endpoint: SocketAddr,
     worker_id: usize,
     tls_server_name: Option<&str>,
+    connect_timeout: Duration,
 ) -> Result<ConnCtx, DisconnectReason> {
     let connect_result = if let Some(server_name) = tls_server_name {
         ringline::connect_tls(endpoint, server_name)
@@ -814,20 +823,44 @@ async fn establish_connection(
     };
 
     match connect_result {
-        Ok(future) => match future.await {
-            Ok(conn) => Ok(conn),
-            Err(e) => {
-                tracing::debug!(
-                    worker = worker_id,
-                    endpoint = %endpoint,
-                    "connect failed: {}",
-                    e
-                );
-                metrics::CONNECTIONS_FAILED.increment();
-                metrics::DISCONNECTS_CONNECT_FAILED.increment();
-                Err(DisconnectReason::ConnectFailed)
+        Ok(future) => {
+            let outcome = if connect_timeout.is_zero() {
+                Some(future.await)
+            } else {
+                match ringline::try_timeout(connect_timeout, future) {
+                    Ok(bounded) => bounded.await.ok(),
+                    // Timer pool exhausted. The attempt was consumed by the
+                    // failed arm, so report it as a failed connect and let the
+                    // caller's retry loop try again.
+                    Err(_) => Some(connect_timer_exhausted()),
+                }
+            };
+            match outcome {
+                Some(Ok(conn)) => Ok(conn),
+                Some(Err(e)) => {
+                    tracing::debug!(
+                        worker = worker_id,
+                        endpoint = %endpoint,
+                        "connect failed: {}",
+                        e
+                    );
+                    metrics::CONNECTIONS_FAILED.increment();
+                    metrics::DISCONNECTS_CONNECT_FAILED.increment();
+                    Err(DisconnectReason::ConnectFailed)
+                }
+                None => {
+                    tracing::debug!(
+                        worker = worker_id,
+                        endpoint = %endpoint,
+                        timeout = ?connect_timeout,
+                        "connect timed out"
+                    );
+                    metrics::CONNECTIONS_FAILED.increment();
+                    metrics::DISCONNECTS_CONNECT_FAILED.increment();
+                    Err(DisconnectReason::ConnectFailed)
+                }
             }
-        },
+        }
         Err(e) => {
             tracing::warn!(
                 worker = worker_id,
@@ -943,16 +976,20 @@ async fn resp_connection_task(state: Arc<SharedWorkerState>, endpoint_idx: usize
             return;
         }
 
-        let conn =
-            match establish_connection(endpoint, state.task_state.worker_id, tls_name.as_deref())
-                .await
-            {
-                Ok(conn) => conn,
-                Err(_) => {
-                    ringline::sleep(Duration::from_millis(100)).await;
-                    continue;
-                }
-            };
+        let conn = match establish_connection(
+            endpoint,
+            state.task_state.worker_id,
+            tls_name.as_deref(),
+            state.task_state.config.connection.connect_timeout,
+        )
+        .await
+        {
+            Ok(conn) => conn,
+            Err(_) => {
+                ringline::sleep(Duration::from_millis(100)).await;
+                continue;
+            }
+        };
 
         metrics::CONNECTIONS_ACTIVE.increment();
         let builder = ringline_redis::Client::builder(conn).on_result(make_resp_callback());
@@ -1078,12 +1115,17 @@ async fn drive_resp_workload(
     let batch_size = config.connection.effective_batch_size();
     let total_connections = config.connection.total_connections();
     let mut prefill_in_flight: VecDeque<usize> = VecDeque::new();
+    let mut inflight = InFlight::new(config.connection.request_timeout, pipeline_depth);
 
     loop {
         let phase = state.task_state.shared.phase();
         if phase.should_stop() {
             return Ok(());
         }
+        // One clock read per iteration stamps every request fired in this
+        // batch; the batch is one coalesced send, so the error is bounded by
+        // the fire loop, not the network.
+        let fired_at = Instant::now();
 
         // Only refill when there's room for a full batch, so fire_* calls
         // accumulate into a single coalesced send rather than one-per-response.
@@ -1124,6 +1166,7 @@ async fn drive_resp_workload(
                     Ok(_) => {
                         metrics::REQUESTS_SENT.increment();
                         prefill_in_flight.push_back(key_id);
+                        inflight.push(fired_at);
                     }
                     Err(_) => {
                         state
@@ -1186,6 +1229,7 @@ async fn drive_resp_workload(
                         Ok(_) => {
                             metrics::REQUESTS_SENT.increment();
                             let _ = metrics::SCHEDULE_SLIP.increment(slip_ns);
+                            inflight.push(fired_at);
                         }
                         Err(_) => {
                             backfill_queue.push(key_id);
@@ -1268,6 +1312,7 @@ async fn drive_resp_workload(
                 if sent {
                     metrics::REQUESTS_SENT.increment();
                     let _ = metrics::SCHEDULE_SLIP.increment(slip_ns);
+                    inflight.push(fired_at);
                 } else {
                     break;
                 }
@@ -1303,17 +1348,23 @@ async fn drive_resp_workload(
         // value without materializing it: zero-copy over provided buffers on
         // io_uring, bounded streaming-drain on mio. One uniform call, no config
         // flag, no cfg split, no workload restriction.
-        let result = match client.recv_meta().await {
-            Ok(meta) => map_respmeta(meta),
-            Err(ringline_redis::Error::ConnectionClosed) => {
+        let conn = client.conn();
+        let result = match recv_with_timeout(client.recv_meta(), &inflight, conn).await {
+            Ok(Ok(meta)) => map_respmeta(meta),
+            Ok(Err(ringline_redis::Error::ConnectionClosed)) => {
                 requeue_drained_prefill(&state.task_state, key_buf, prefill_in_flight.drain(..));
                 return Err(DisconnectReason::Eof);
             }
-            Err(_) => {
+            Ok(Err(_)) => {
                 requeue_drained_prefill(&state.task_state, key_buf, prefill_in_flight.drain(..));
                 return Err(DisconnectReason::RecvError);
             }
+            Err(reason) => {
+                requeue_drained_prefill(&state.task_state, key_buf, prefill_in_flight.drain(..));
+                return Err(reason);
+            }
         };
+        inflight.pop();
 
         // Handle prefill tracking. The PREFILL_MARKER bit in user_data
         // identifies prefill SETs unambiguously across phases, so we don't
@@ -1554,6 +1605,14 @@ impl McClient {
             McClient::Binary(c) => c.recv().await,
         }
     }
+
+    #[inline]
+    fn conn(&self) -> ConnCtx {
+        match self {
+            McClient::Ascii(c) => c.conn(),
+            McClient::Binary(c) => c.conn(),
+        }
+    }
 }
 
 /// A single Memcache connection task (ASCII or binary, per protocol).
@@ -1571,16 +1630,20 @@ async fn memcache_connection_task(state: Arc<SharedWorkerState>, endpoint_idx: u
             return;
         }
 
-        let conn =
-            match establish_connection(endpoint, state.task_state.worker_id, tls_name.as_deref())
-                .await
-            {
-                Ok(conn) => conn,
-                Err(_) => {
-                    ringline::sleep(Duration::from_millis(100)).await;
-                    continue;
-                }
-            };
+        let conn = match establish_connection(
+            endpoint,
+            state.task_state.worker_id,
+            tls_name.as_deref(),
+            state.task_state.config.connection.connect_timeout,
+        )
+        .await
+        {
+            Ok(conn) => conn,
+            Err(_) => {
+                ringline::sleep(Duration::from_millis(100)).await;
+                continue;
+            }
+        };
 
         metrics::CONNECTIONS_ACTIVE.increment();
         let builder = ringline_memcache::Client::builder(conn)
@@ -1688,12 +1751,17 @@ async fn drive_memcache_workload(
     let batch_size = config.connection.effective_batch_size();
     let total_connections = config.connection.total_connections();
     let mut prefill_in_flight: VecDeque<usize> = VecDeque::new();
+    let mut inflight = InFlight::new(config.connection.request_timeout, pipeline_depth);
 
     loop {
         let phase = state.task_state.shared.phase();
         if phase.should_stop() {
             return Ok(());
         }
+        // One clock read per iteration stamps every request fired in this
+        // batch; the batch is one coalesced send, so the error is bounded by
+        // the fire loop, not the network.
+        let fired_at = Instant::now();
 
         // Only refill when there's room for a full batch, so fire_* calls
         // accumulate into a single coalesced send rather than one-per-response.
@@ -1727,6 +1795,7 @@ async fn drive_memcache_workload(
                     Ok(_) => {
                         metrics::REQUESTS_SENT.increment();
                         prefill_in_flight.push_back(key_id);
+                        inflight.push(fired_at);
                     }
                     Err(_) => {
                         state
@@ -1774,6 +1843,7 @@ async fn drive_memcache_workload(
                         Ok(_) => {
                             metrics::REQUESTS_SENT.increment();
                             let _ = metrics::SCHEDULE_SLIP.increment(slip_ns);
+                            inflight.push(fired_at);
                         }
                         Err(_) => {
                             backfill_queue.push(key_id);
@@ -1826,6 +1896,7 @@ async fn drive_memcache_workload(
                 if sent {
                     metrics::REQUESTS_SENT.increment();
                     let _ = metrics::SCHEDULE_SLIP.increment(slip_ns);
+                    inflight.push(fired_at);
                 } else {
                     break;
                 }
@@ -1852,17 +1923,23 @@ async fn drive_memcache_workload(
             continue;
         }
 
-        let op = match client.recv().await {
-            Ok(op) => op,
-            Err(ringline_memcache::Error::ConnectionClosed) => {
+        let conn = client.conn();
+        let op = match recv_with_timeout(client.recv(), &inflight, conn).await {
+            Ok(Ok(op)) => op,
+            Ok(Err(ringline_memcache::Error::ConnectionClosed)) => {
                 requeue_drained_prefill(&state.task_state, key_buf, prefill_in_flight.drain(..));
                 return Err(DisconnectReason::Eof);
             }
-            Err(_) => {
+            Ok(Err(_)) => {
                 requeue_drained_prefill(&state.task_state, key_buf, prefill_in_flight.drain(..));
                 return Err(DisconnectReason::RecvError);
             }
+            Err(reason) => {
+                requeue_drained_prefill(&state.task_state, key_buf, prefill_in_flight.drain(..));
+                return Err(reason);
+            }
         };
+        inflight.pop();
 
         // Map CompletedOp to RequestResult
         let result = map_memcache_op(op);
@@ -2008,16 +2085,20 @@ async fn ping_connection_task(state: Arc<SharedWorkerState>, endpoint_idx: usize
             return;
         }
 
-        let conn =
-            match establish_connection(endpoint, state.task_state.worker_id, tls_name.as_deref())
-                .await
-            {
-                Ok(conn) => conn,
-                Err(_) => {
-                    ringline::sleep(Duration::from_millis(100)).await;
-                    continue;
-                }
-            };
+        let conn = match establish_connection(
+            endpoint,
+            state.task_state.worker_id,
+            tls_name.as_deref(),
+            state.task_state.config.connection.connect_timeout,
+        )
+        .await
+        {
+            Ok(conn) => conn,
+            Err(_) => {
+                ringline::sleep(Duration::from_millis(100)).await;
+                continue;
+            }
+        };
 
         metrics::CONNECTIONS_ACTIVE.increment();
         let builder = ringline_ping::Client::builder(conn).on_result(make_ping_callback());
@@ -2087,11 +2168,17 @@ async fn drive_ping_workload(
     client: &mut ringline_ping::Client,
     state: &Arc<SharedWorkerState>,
 ) -> Result<(), DisconnectReason> {
+    // One request in flight at a time on the ping path.
+    let mut inflight = InFlight::new(state.task_state.config.connection.request_timeout, 1);
     loop {
         let phase = state.task_state.shared.phase();
         if phase.should_stop() {
             return Ok(());
         }
+        // One clock read per iteration stamps every request fired in this
+        // batch; the batch is one coalesced send, so the error is bounded by
+        // the fire loop, not the network.
+        let fired_at = Instant::now();
 
         // Skip Connect/Prefill phases (no prefill for ping)
         if phase != Phase::Warmup && phase != Phase::Running {
@@ -2137,15 +2224,19 @@ async fn drive_ping_workload(
 
         metrics::REQUESTS_SENT.increment();
         let _ = metrics::SCHEDULE_SLIP.increment(slip_ns);
-        match client.ping().await {
-            Ok(()) => {}
-            Err(ringline_ping::Error::ConnectionClosed) => {
+        inflight.push(fired_at);
+        let conn = client.conn();
+        match recv_with_timeout(client.ping(), &inflight, conn).await {
+            Ok(Ok(())) => {}
+            Ok(Err(ringline_ping::Error::ConnectionClosed)) => {
                 return Err(DisconnectReason::Eof);
             }
-            Err(_) => {
+            Ok(Err(_)) => {
                 return Err(DisconnectReason::RecvError);
             }
+            Err(reason) => return Err(reason),
         }
+        inflight.pop();
     }
 }
 
@@ -2358,16 +2449,20 @@ async fn resp_append_task(state: Arc<SharedWorkerState>, endpoint_idx: usize, se
             return;
         }
 
-        let conn =
-            match establish_connection(endpoint, state.task_state.worker_id, tls_name.as_deref())
-                .await
-            {
-                Ok(conn) => conn,
-                Err(_) => {
-                    ringline::sleep(Duration::from_millis(100)).await;
-                    continue;
-                }
-            };
+        let conn = match establish_connection(
+            endpoint,
+            state.task_state.worker_id,
+            tls_name.as_deref(),
+            state.task_state.config.connection.connect_timeout,
+        )
+        .await
+        {
+            Ok(conn) => conn,
+            Err(_) => {
+                ringline::sleep(Duration::from_millis(100)).await;
+                continue;
+            }
+        };
 
         metrics::APPEND_CONNECTIONS_ACTIVE.increment();
         let builder = ringline_redis::Client::builder(conn).on_result(make_resp_append_callback());
@@ -2435,11 +2530,13 @@ async fn drive_resp_append(
     let pipeline_depth = append.pipeline_depth;
     let queues = &state.task_state.append_queues;
     let mut in_flight: VecDeque<usize> = VecDeque::new();
+    let mut inflight = InFlight::new(config.connection.request_timeout, pipeline_depth);
 
     loop {
         if state.task_state.shared.phase().should_stop() {
             return Ok(());
         }
+        let fired_at = Instant::now();
 
         let free = pipeline_depth.saturating_sub(client.pending_count());
         if free > 0 && !queues.is_empty(endpoint_idx) {
@@ -2468,7 +2565,10 @@ async fn drive_resp_append(
                     client.fire_set(key_buf, value, user_data)
                 };
                 match res {
-                    Ok(_) => in_flight.push_back(key_id),
+                    Ok(_) => {
+                        in_flight.push_back(key_id);
+                        inflight.push(fired_at);
+                    }
                     Err(_) => {
                         queues.push_front(endpoint_idx, key_id);
                         break;
@@ -2483,17 +2583,23 @@ async fn drive_resp_append(
             continue;
         }
 
-        let result = match client.recv_meta().await {
-            Ok(meta) => map_respmeta(meta),
-            Err(ringline_redis::Error::ConnectionClosed) => {
+        let conn = client.conn();
+        let result = match recv_with_timeout(client.recv_meta(), &inflight, conn).await {
+            Ok(Ok(meta)) => map_respmeta(meta),
+            Ok(Err(ringline_redis::Error::ConnectionClosed)) => {
                 requeue_drained_append(&state.task_state, key_buf, in_flight.drain(..));
                 return Err(DisconnectReason::Eof);
             }
-            Err(_) => {
+            Ok(Err(_)) => {
                 requeue_drained_append(&state.task_state, key_buf, in_flight.drain(..));
                 return Err(DisconnectReason::RecvError);
             }
+            Err(reason) => {
+                requeue_drained_append(&state.task_state, key_buf, in_flight.drain(..));
+                return Err(reason);
+            }
         };
+        inflight.pop();
 
         if result.append {
             let key_id = in_flight
@@ -2532,16 +2638,20 @@ async fn memcache_append_task(state: Arc<SharedWorkerState>, endpoint_idx: usize
             return;
         }
 
-        let conn =
-            match establish_connection(endpoint, state.task_state.worker_id, tls_name.as_deref())
-                .await
-            {
-                Ok(conn) => conn,
-                Err(_) => {
-                    ringline::sleep(Duration::from_millis(100)).await;
-                    continue;
-                }
-            };
+        let conn = match establish_connection(
+            endpoint,
+            state.task_state.worker_id,
+            tls_name.as_deref(),
+            state.task_state.config.connection.connect_timeout,
+        )
+        .await
+        {
+            Ok(conn) => conn,
+            Err(_) => {
+                ringline::sleep(Duration::from_millis(100)).await;
+                continue;
+            }
+        };
 
         metrics::APPEND_CONNECTIONS_ACTIVE.increment();
         let builder = ringline_memcache::Client::builder(conn)
@@ -2598,11 +2708,13 @@ async fn drive_memcache_append(
     let pipeline_depth = append.pipeline_depth;
     let queues = &state.task_state.append_queues;
     let mut in_flight: VecDeque<usize> = VecDeque::new();
+    let mut inflight = InFlight::new(config.connection.request_timeout, pipeline_depth);
 
     loop {
         if state.task_state.shared.phase().should_stop() {
             return Ok(());
         }
+        let fired_at = Instant::now();
 
         let free = pipeline_depth.saturating_sub(client.pending_count());
         if free > 0 && !queues.is_empty(endpoint_idx) {
@@ -2624,7 +2736,10 @@ async fn drive_memcache_append(
                     make_value_guard(rng, &state.task_state.value_pool, value_len, pool_len);
                 let user_data = key_id as u64 | APPEND_MARKER;
                 match client.fire_set_with_guard(key_buf, guard, 0, 0, user_data) {
-                    Ok(_) => in_flight.push_back(key_id),
+                    Ok(_) => {
+                        in_flight.push_back(key_id);
+                        inflight.push(fired_at);
+                    }
                     Err(_) => {
                         queues.push_front(endpoint_idx, key_id);
                         break;
@@ -2638,17 +2753,23 @@ async fn drive_memcache_append(
             continue;
         }
 
-        let op = match client.recv().await {
-            Ok(op) => op,
-            Err(ringline_memcache::Error::ConnectionClosed) => {
+        let conn = client.conn();
+        let op = match recv_with_timeout(client.recv(), &inflight, conn).await {
+            Ok(Ok(op)) => op,
+            Ok(Err(ringline_memcache::Error::ConnectionClosed)) => {
                 requeue_drained_append(&state.task_state, key_buf, in_flight.drain(..));
                 return Err(DisconnectReason::Eof);
             }
-            Err(_) => {
+            Ok(Err(_)) => {
                 requeue_drained_append(&state.task_state, key_buf, in_flight.drain(..));
                 return Err(DisconnectReason::RecvError);
             }
+            Err(reason) => {
+                requeue_drained_append(&state.task_state, key_buf, in_flight.drain(..));
+                return Err(reason);
+            }
         };
+        inflight.pop();
         let result = map_memcache_op(op);
 
         if result.append {
@@ -2666,6 +2787,166 @@ async fn drive_memcache_append(
     }
 }
 
+// ── Request timeout ──────────────────────────────────────────────────────
+//
+// `connection.request_timeout` was parsed and documented but never consulted:
+// a request could sit in a pipeline for the whole run and the reported tail
+// latency would include it (see #127, p999 of 8-12 s under a 1 s timeout).
+// Replies on a pipelined connection are ordered, so a stalled head stalls
+// every request behind it, and the only recovery is to abandon the connection:
+// count everything in flight as timed out, close, reconnect.
+
+/// Fire times of the requests in flight on one connection, oldest first.
+/// Replies are FIFO, so the front entry is always the request the next reply
+/// answers, and its age is the age of the oldest outstanding request.
+struct InFlight {
+    fired: VecDeque<Instant>,
+    timeout: Duration,
+}
+
+impl InFlight {
+    fn new(timeout: Duration, capacity: usize) -> Self {
+        Self {
+            fired: VecDeque::with_capacity(capacity),
+            timeout,
+        }
+    }
+
+    #[inline]
+    fn push(&mut self, fired_at: Instant) {
+        self.fired.push_back(fired_at);
+    }
+
+    #[inline]
+    fn pop(&mut self) {
+        self.fired.pop_front();
+    }
+
+    fn len(&self) -> usize {
+        self.fired.len()
+    }
+
+    /// Time left before the oldest in-flight request expires. `None` when no
+    /// deadline applies (timeout disabled, or nothing in flight); `Some(ZERO)`
+    /// when it has already expired.
+    fn remaining(&self, now: Instant) -> Option<Duration> {
+        if self.timeout.is_zero() {
+            return None;
+        }
+        let oldest = *self.fired.front()?;
+        Some(
+            self.timeout
+                .saturating_sub(now.saturating_duration_since(oldest)),
+        )
+    }
+}
+
+/// Await one reply under the request timeout. On expiry every request in
+/// flight on this connection is counted as timed out (and as an error), the
+/// connection is closed, and the caller gets `DisconnectReason::Timeout` so it
+/// requeues its own bookkeeping and reconnects.
+async fn recv_with_timeout<F, T>(
+    recv: F,
+    inflight: &InFlight,
+    conn: ConnCtx,
+) -> Result<T, DisconnectReason>
+where
+    F: Future<Output = T>,
+{
+    let Some(remaining) = inflight.remaining(Instant::now()) else {
+        return Ok(recv.await);
+    };
+    let bounded = match ringline::try_timeout(remaining, recv) {
+        Ok(bounded) => bounded,
+        // Timer pool exhausted. The pool is sized from the connection count in
+        // the runner, so this should not happen. The recv future was consumed
+        // by the failed arm, so the connection cannot continue: drop it, let
+        // the caller reconnect, and say why once.
+        Err(_) => {
+            timer_exhausted_warn_once();
+            conn.close();
+            return Err(DisconnectReason::RecvError);
+        }
+    };
+    match bounded.await {
+        Ok(v) => Ok(v),
+        Err(_elapsed) => {
+            let n = inflight.len() as u64;
+            metrics::REQUEST_TIMEOUTS.add(n);
+            metrics::REQUEST_ERRORS.add(n);
+            conn.close();
+            Err(DisconnectReason::Timeout)
+        }
+    }
+}
+
+fn timer_exhausted_warn_once() {
+    use std::sync::Once;
+    static ONCE: Once = Once::new();
+    ONCE.call_once(|| {
+        tracing::warn!(
+            "ringline timer pool exhausted: a request timeout could not be armed and the \
+             connection was dropped; this indicates timer_slots is undersized for the \
+             connection count"
+        );
+    });
+}
+
+/// Connect path when the timer pool is exhausted: warn once, then report the
+/// attempt as failed so the caller's retry loop tries again.
+fn connect_timer_exhausted() -> Result<ConnCtx, std::io::Error> {
+    timer_exhausted_warn_once();
+    Err(std::io::Error::other("timer pool exhausted"))
+}
+
+#[cfg(test)]
+mod inflight_tests {
+    use super::InFlight;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn no_deadline_when_disabled_or_idle() {
+        let now = Instant::now();
+        let mut idle = InFlight::new(Duration::from_secs(1), 4);
+        assert_eq!(idle.remaining(now), None, "nothing in flight");
+        idle.push(now);
+        let disabled = InFlight::new(Duration::ZERO, 4);
+        let mut disabled = disabled;
+        disabled.push(now);
+        assert_eq!(disabled.remaining(now), None, "zero timeout disables");
+    }
+
+    #[test]
+    fn deadline_tracks_the_oldest_request() {
+        let t0 = Instant::now();
+        let mut f = InFlight::new(Duration::from_millis(1000), 4);
+        f.push(t0);
+        f.push(t0 + Duration::from_millis(600));
+        assert_eq!(
+            f.remaining(t0 + Duration::from_millis(300)),
+            Some(Duration::from_millis(700))
+        );
+        // Oldest answered: the deadline now belongs to the second request.
+        f.pop();
+        assert_eq!(
+            f.remaining(t0 + Duration::from_millis(300)),
+            Some(Duration::from_millis(1300).min(Duration::from_millis(1000)))
+        );
+        assert_eq!(f.len(), 1);
+    }
+
+    #[test]
+    fn expired_request_reports_zero_not_underflow() {
+        let t0 = Instant::now();
+        let mut f = InFlight::new(Duration::from_millis(100), 4);
+        f.push(t0);
+        assert_eq!(
+            f.remaining(t0 + Duration::from_secs(5)),
+            Some(Duration::ZERO)
+        );
+    }
+}
+
 // ── Utility functions ────────────────────────────────────────────────────
 
 /// Record disconnect reason metrics.
@@ -2677,6 +2958,7 @@ fn record_disconnect_reason(reason: DisconnectReason) {
         DisconnectReason::ClosedEvent => metrics::DISCONNECTS_CLOSED_EVENT.increment(),
         DisconnectReason::ErrorEvent => metrics::DISCONNECTS_ERROR_EVENT.increment(),
         DisconnectReason::ConnectFailed => metrics::DISCONNECTS_CONNECT_FAILED.increment(),
+        DisconnectReason::Timeout => metrics::DISCONNECTS_TIMEOUT.increment(),
     }
 }
 

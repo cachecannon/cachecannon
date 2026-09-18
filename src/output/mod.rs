@@ -131,7 +131,12 @@ pub struct Results {
     pub duration_secs: f64,
     pub requests: u64,
     pub responses: u64,
+    /// Request errors plus connection failures plus timeouts.
     pub errors: u64,
+    /// Requests abandoned because no reply arrived within
+    /// `connection.request_timeout`. Included in `errors`; never in
+    /// `responses` or any latency histogram.
+    pub timeouts: u64,
     pub hits: u64,
     pub misses: u64,
     pub bytes_tx: u64,
@@ -234,6 +239,7 @@ mod overload_tests {
             requests,
             responses: requests,
             errors: 0,
+            timeouts: 0,
             hits: 0,
             misses: 0,
             bytes_tx: 0,

@@ -22,8 +22,9 @@ protocol = "resp"         # "resp", "resp3", "memcache", "memcache-binary", "pin
 [connection]
 connections = 4           # Total connections distributed across threads
 pipeline_depth = 32       # Max in-flight requests per connection
-connect_timeout = "5s"
-request_timeout = "1s"
+connect_timeout = "5s"    # Per connect attempt, and the precheck deadline ("0s" = unbounded)
+request_timeout = "1s"    # Per request; on expiry all in-flight requests on that connection
+                          # count as timeouts (errors) and it reconnects ("0s" = unbounded)
 # request_distribution = "roundrobin"  # "roundrobin" (even spread) or "greedy" (fill pipeline first)
 
 [workload]

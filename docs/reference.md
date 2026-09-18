@@ -101,10 +101,17 @@ connections = 16
 # Typical values: 1 (no pipelining), 32 (high throughput)
 pipeline_depth = 32
 
-# Connection establishment timeout
+# Connection establishment timeout. Bounds each connect attempt (including
+# reconnects mid-run) and doubles as the precheck deadline. "0s" = unbounded.
 connect_timeout = "5s"
 
-# Individual request timeout
+# Individual request timeout. A pipelined connection's replies are ordered, so
+# when the oldest in-flight request exceeds this the connection is torn down:
+# every request in flight on it is counted as a timeout (and as an error),
+# none of them produce a latency sample, and the connection reconnects.
+# Timeouts are reported as `request_timeouts` / `disconnects_timeout` and on
+# the results throughput line. "0s" = unbounded (a stalled request would then
+# be reported as tail latency, however long it took).
 request_timeout = "1s"
 
 # Request distribution strategy

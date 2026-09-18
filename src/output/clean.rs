@@ -316,7 +316,15 @@ impl OutputFormatter for CleanFormatter {
         // Throughput line
         let throughput = results.throughput();
         let err_pct = results.err_pct();
-        let err_str = format!("{}% errors", format_pct(err_pct));
+        let err_str = if results.timeouts > 0 {
+            format!(
+                "{}% errors ({} timed out)",
+                format_pct(err_pct),
+                format_count(results.timeouts)
+            )
+        } else {
+            format!("{}% errors", format_pct(err_pct))
+        };
         let err_colored = self.maybe_red(&err_str, err_pct > 0.0);
         println!(
             "{}   {} req/s, {}",

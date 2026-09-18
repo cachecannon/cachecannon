@@ -14,3 +14,6 @@
 
 # Claude Code local config
 CLAUDE.local.md
+
+# Session worktrees created by Claude Code
+.claude/worktrees/
