@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.24] - 2026-09-18
+
 ### Changed
 - The per-connection idle poll no longer jitters its sleep. #153 (shipped in
   0.0.23, and undocumented here) replaced a fixed 100 us poll with one that
@@ -35,7 +37,51 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   measured, and self-reporting if it occurs, since unclaimed tokens are limiter
   backlog and backlog is what `schedule_slip` measures.
 
+### Fixed
+- `connection.request_timeout` and `connection.connect_timeout` are enforced.
+  `request_timeout` was parsed, documented and set in every shipped config, but
+  nothing consulted it: a request could sit in a pipeline for the whole run
+  and the reported tail latency would include it. #127 measured a p999 of
+  8-12 s under a 1 s timeout, with a max that outlived the measurement window.
+  Replies on a pipelined connection are ordered, so a stalled head stalls
+  everything behind it and the only recovery is to abandon the connection:
+  each connection now tracks the fire time of its in-flight requests and
+  awaits every reply under the remaining budget of the oldest one. On expiry,
+  everything in flight on that connection is counted as `request_timeouts`
+  (and as errors), no latency sample is recorded for it, the connection is
+  closed and re-established, and in-flight prefill and append keys are
+  requeued. `connect_timeout` was only the precheck deadline; it now also
+  bounds each connect attempt, including mid-run reconnects. `"0s"` disables
+  either. Timeouts surface as `request_timeouts` / `disconnects_timeout`, on
+  the results throughput line, and as `timeouts` in JSON. CI runs a job
+  against a RESP server that answers PING and swallows everything else.
+  (#157)
+
+  Rig-measured afterwards (Valkey 9.0.1, 8 generator threads, pipeline 32,
+  1 s timeout): at 2048 closed-loop connections, 1.27M req/s with p999 69 ms
+  and no timeouts; at 4096, max is capped at 1.07 s instead of 62 s and the
+  stalled requests report as ~8-9K timeouts/s, with every generator worker at
+  a full core. The #127 tail was the generator at saturation, not the target,
+  and the timeout now says so instead of hiding it in p999. At 4096
+  connections open-loop at 300K req/s: p999 3-6 ms, no timeouts.
+
 ### Added
+- `distribution = "recency"` and `[workload.append]`: a keyspace that grows in
+  batches on a cadence, read newest-first. Key ids are a monotonic sequence and
+  hotness attaches to the append batch: a read picks one of the
+  `hot_generations` newest batches with weight `hot_decay^age`, then a key
+  uniformly within it, and `hot_fraction` of reads land in that window while
+  the rest go uniformly to the body. Dedicated writer connections
+  (`append.connections`, their own pool so a batch never queues reads behind
+  SETs inside the client) drain per-endpoint append queues through the same
+  route / confirm-on-response / retry path prefill uses; the runner opens a
+  batch every `append.every` from the start of warmup and publishes the new
+  keyspace head only once the whole batch is confirmed, so a read never
+  targets an unwritten key. `pace = "burst" | "spread"`. Append SETs report
+  on their own `APPEND SET` line and as `append_set` / `append_batches` in
+  JSON, never in the read workload's totals. RESP and memcache. Landed in
+  #154 before 0.0.23 was cut and was not recorded there.
+
 - `general.recv_ring_size` and `general.recv_buffer_size` expose the per-worker
   provided recv-buffer ring, which was previously ringline's default with no way
   to change it. Both default to exactly what ringline would have used (256 x
