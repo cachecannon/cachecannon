@@ -81,18 +81,37 @@ waiter at once. The jitter was written without measurement, merged out of a
 working tree, and v0.0.23 (`82e375c`) was cut on top.
 
 Measured afterwards on macOS/mio, localhost, 4 threads, 1 KiB values, 20,000
-req/s, medians of 4-5 interleaved reps — cores per process:
+req/s — cores per process, medians of interleaved reps, each arm built from its
+release tag:
 
-| connections | no backoff | backoff + jitter | backoff only |
+| connections | v0.0.22 no backoff | v0.0.23 backoff+jitter | v0.0.24 backoff only |
 |---|---|---|---|
-| 64 | 0.54 | **1.10** | 0.51 |
-| 2048 | 3.50 | 1.27 | **0.51** |
+| 64 | — | **1.163** (1.157-1.205) | 0.664 (0.653-0.671) |
+| 2048 | 3.488 (3.451-3.502) | 1.317 (1.302-1.335) | **0.659** (0.655-0.671) |
 
-At 64 connections the sleep is already at `IDLE_SLEEP_MIN`, so the jitter was
-the only variable, and it doubled CPU on the case the floor exists to leave
-alone. Making it one-sided did not recover it; only removing it did, which
-restored 64 connections to bit-identical with pre-#153 (0.51 cores, p50 114 us
-both).
+Ranges are disjoint at every comparison. At 64 connections the sleep is already
+at `IDLE_SLEEP_MIN`, so the jitter is the only variable, and it costs 1.75x.
+Making it one-sided did not recover it; only removing it did.
+
+> **These figures were re-measured on 2026-09-18 and the first set should not be
+> cited.** The original table — `0.54 / 1.10 / 0.51` at 64 and `3.50 / 1.27 /
+> 0.51` at 2048 — was taken on a laptop that, unknown at the time, had up to
+> three other sessions compiling concurrently; a load average of 16.5 was
+> observed in the window, with most of it unattributed. Nothing recorded the
+> conditions per run, so the original numbers could not be defended after the
+> fact and were re-taken rather than argued for.
+>
+> What survived: the direction and the existence of the effect, and the
+> `no backoff` and `backoff+jitter` columns, which reproduce closely (3.50 ->
+> 3.488, 1.27 -> 1.317). What moved: `backoff only`, 0.51 -> 0.66 in both
+> configs — a baseline shift in the box rather than a fault, since it moved the
+> same way in each. The jitter penalty is therefore **1.75x at 64 connections
+> and 2.00x at 2048**, not the 2.16x and 2.49x originally implied.
+>
+> The re-take records timestamp, load average and external CPU per run. The
+> original recorded a number and nothing else, which is the whole reason this
+> paragraph exists. A measurement that does not carry its conditions cannot be
+> defended later, only repeated.
 
 Rack A/B on Linux/io_uring (Valkey 9.0.1, 8 threads, pipeline 32, 1 s timeout),
 `82f6168` vs `f56f1b9`, experiments `01a0b53b-0892` and `01a0b549-7052`:
