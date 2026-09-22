@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- `connection.request_timeout` (enforced since 0.0.24, #157) no longer costs
+  O(connections per worker) per reply. 0.0.24 armed an io_uring timeout for
+  every recv and cancelled it when the reply arrived; the kernel's
+  `io_timeout_cancel` walks the ring's pending-timeout list, which holds about
+  one timer per connection. Profiled on the rack at 4096 closed-loop
+  connections, 8 threads, pipeline 32: the cancel was 69% of generator CPU
+  (63% at 2048), every worker sat at a full core, and replies fell behind far
+  enough to pass the 1 s timeout -- 1.02M req/s with ~480K timeouts per 60 s.
+  With the timeout disabled the same cell ran 1.25M req/s on 2.16 cores with a
+  178 ms max and no timeouts, so the timeouts were caused by the timer cost,
+  not by the server.
+
+  Each connection now keeps one deadline timer across recvs, armed for its
+  oldest in-flight request and left running when replies arrive. When it
+  fires, it re-arms for the current oldest request or reports the timeout. A
+  healthy connection re-arms about once per `request_timeout` and never
+  cancels. Timeout behaviour is unchanged: the black-hole CI check and a mixed
+  healthy/stalled run report identical timeout counts before and after.
+
 ### Changed
 - Rate-limit tokens are dispatched once per worker instead of polled by every
   connection. Connections used to poll the shared `Ratelimiter` individually,
