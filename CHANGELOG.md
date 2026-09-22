@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.25] - 2026-09-22
+
 ### Fixed
 - `connection.request_timeout` (enforced since 0.0.24, #157) no longer costs
   O(connections per worker) per reply. 0.0.24 armed an io_uring timeout for
@@ -16,8 +18,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   connections, 8 threads, pipeline 32: the cancel was 69% of generator CPU
   (63% at 2048), every worker sat at a full core, and replies fell behind far
   enough to pass the 1 s timeout -- 1.02M req/s with ~480K timeouts per 60 s.
-  With the timeout disabled the same cell ran 1.25M req/s on 2.16 cores with a
-  178 ms max and no timeouts, so the timeouts were caused by the timer cost,
+  With the timeout disabled the same cell ran 1.25M req/s on 2.16 cores (whole
+  process; 0.194 per worker) with a 178 ms max and no timeouts, so the timeouts were caused by the timer cost,
   not by the server.
 
   Each connection now keeps one deadline timer across recvs, armed for its
@@ -72,8 +74,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Closed-loop is deliberately untouched and measured flat to three decimals: a
   run with no `rate_limit` and no `[workload.saturation_search]` has no limiter,
   so it gets no dispatcher and keeps the old poll, which it reaches only on send
-  backpressure. Whatever pins workers at 4096 closed-loop is a separate problem
-  and is not this one.
+  backpressure. The 4096 closed-loop pin had a separate cause, the per-recv
+  request timeout timer, fixed in this release (see Fixed above).
 
 
 ## [0.0.24] - 2026-09-18
