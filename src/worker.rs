@@ -1482,7 +1482,7 @@ async fn drive_resp_workload(
         // io_uring, bounded streaming-drain on mio. One uniform call, no config
         // flag, no cfg split, no workload restriction.
         let conn = client.conn();
-        let result = match recv_with_timeout(client.recv_meta(), &inflight, conn).await {
+        let result = match recv_with_timeout(client.recv_meta(), &mut inflight, conn).await {
             Ok(Ok(meta)) => map_respmeta(meta),
             Ok(Err(ringline_redis::Error::ConnectionClosed)) => {
                 requeue_drained_prefill(&state.task_state, key_buf, prefill_in_flight.drain(..));
@@ -2070,7 +2070,7 @@ async fn drive_memcache_workload(
         }
 
         let conn = client.conn();
-        let op = match recv_with_timeout(client.recv(), &inflight, conn).await {
+        let op = match recv_with_timeout(client.recv(), &mut inflight, conn).await {
             Ok(Ok(op)) => op,
             Ok(Err(ringline_memcache::Error::ConnectionClosed)) => {
                 requeue_drained_prefill(&state.task_state, key_buf, prefill_in_flight.drain(..));
@@ -2372,7 +2372,7 @@ async fn drive_ping_workload(
         let _ = metrics::SCHEDULE_SLIP.increment(slip_ns);
         inflight.push(fired_at);
         let conn = client.conn();
-        match recv_with_timeout(client.ping(), &inflight, conn).await {
+        match recv_with_timeout(client.ping(), &mut inflight, conn).await {
             Ok(Ok(())) => {}
             Ok(Err(ringline_ping::Error::ConnectionClosed)) => {
                 return Err(DisconnectReason::Eof);
@@ -2730,7 +2730,7 @@ async fn drive_resp_append(
         }
 
         let conn = client.conn();
-        let result = match recv_with_timeout(client.recv_meta(), &inflight, conn).await {
+        let result = match recv_with_timeout(client.recv_meta(), &mut inflight, conn).await {
             Ok(Ok(meta)) => map_respmeta(meta),
             Ok(Err(ringline_redis::Error::ConnectionClosed)) => {
                 requeue_drained_append(&state.task_state, key_buf, in_flight.drain(..));
@@ -2900,7 +2900,7 @@ async fn drive_memcache_append(
         }
 
         let conn = client.conn();
-        let op = match recv_with_timeout(client.recv(), &inflight, conn).await {
+        let op = match recv_with_timeout(client.recv(), &mut inflight, conn).await {
             Ok(Ok(op)) => op,
             Ok(Err(ringline_memcache::Error::ConnectionClosed)) => {
                 requeue_drained_append(&state.task_state, key_buf, in_flight.drain(..));
@@ -2945,9 +2945,14 @@ async fn drive_memcache_append(
 /// Fire times of the requests in flight on one connection, oldest first.
 /// Replies are FIFO, so the front entry is always the request the next reply
 /// answers, and its age is the age of the oldest outstanding request.
+///
+/// Also owns the connection's deadline timer. The timer outlives individual
+/// recvs: it is armed for the oldest request's deadline and left running when
+/// that request's reply arrives. See `recv_with_timeout` for why.
 struct InFlight {
     fired: VecDeque<Instant>,
     timeout: Duration,
+    timer: Option<ringline::SleepFuture>,
 }
 
 impl InFlight {
@@ -2955,6 +2960,7 @@ impl InFlight {
         Self {
             fired: VecDeque::with_capacity(capacity),
             timeout,
+            timer: None,
         }
     }
 
@@ -2970,6 +2976,18 @@ impl InFlight {
 
     fn len(&self) -> usize {
         self.fired.len()
+    }
+
+    /// Arm the deadline timer to fire after `after`. Returns false if the
+    /// timer pool is exhausted.
+    fn arm(&mut self, after: Duration) -> bool {
+        match ringline::try_sleep(after) {
+            Ok(t) => {
+                self.timer = Some(t);
+                true
+            }
+            Err(_) => false,
+        }
     }
 
     /// Time left before the oldest in-flight request expires. `None` when no
@@ -2991,37 +3009,85 @@ impl InFlight {
 /// flight on this connection is counted as timed out (and as an error), the
 /// connection is closed, and the caller gets `DisconnectReason::Timeout` so it
 /// requeues its own bookkeeping and reconnects.
+///
+/// The deadline timer is not armed per recv. On io_uring, cancelling a pending
+/// timeout (`io_timeout_cancel`) walks the ring's whole pending-timeout list,
+/// which holds about one timer per connection, so arming a timeout for every
+/// reply and cancelling it when the reply arrived made each reply cost
+/// O(connections per worker). Profiled at 4096 closed-loop connections on 8
+/// workers, that cancel was 69% of generator CPU and pinned every worker; with
+/// the timeout disabled the same cell used 2.16 cores and ran 22% faster.
+///
+/// Instead the timer lives in `InFlight` across recvs. It is armed for the
+/// oldest request's deadline and left running when that reply arrives. The
+/// oldest request only gets younger as replies arrive, so a running timer never
+/// fires later than the true deadline. When it fires, the deadline is checked
+/// against the current oldest request: expired means timeout, otherwise the
+/// timer is re-armed for what remains. A healthy connection re-arms about once
+/// per `timeout` and never cancels.
 async fn recv_with_timeout<F, T>(
     recv: F,
-    inflight: &InFlight,
+    inflight: &mut InFlight,
     conn: ConnCtx,
 ) -> Result<T, DisconnectReason>
 where
     F: Future<Output = T>,
 {
+    // No request in flight or the timeout is disabled. A timer left armed from
+    // an earlier recv keeps running; it is checked on the next bounded recv.
     let Some(remaining) = inflight.remaining(Instant::now()) else {
         return Ok(recv.await);
     };
-    let bounded = match ringline::try_timeout(remaining, recv) {
-        Ok(bounded) => bounded,
+    if inflight.timer.is_none() && !inflight.arm(remaining) {
         // Timer pool exhausted. The pool is sized from the connection count in
-        // the runner, so this should not happen. The recv future was consumed
-        // by the failed arm, so the connection cannot continue: drop it, let
-        // the caller reconnect, and say why once.
-        Err(_) => {
-            timer_exhausted_warn_once();
-            conn.close();
-            return Err(DisconnectReason::RecvError);
+        // the runner, so this should not happen. Without a timer the recv
+        // cannot be bounded: drop the connection, let the caller reconnect,
+        // and say why once.
+        timer_exhausted_warn_once();
+        conn.close();
+        return Err(DisconnectReason::RecvError);
+    }
+
+    let mut recv = std::pin::pin!(recv);
+    let expired = std::future::poll_fn(|cx| {
+        if let Poll::Ready(v) = recv.as_mut().poll(cx) {
+            return Poll::Ready(Ok(v));
         }
-    };
-    match bounded.await {
+        loop {
+            let Some(timer) = inflight.timer.as_mut() else {
+                // Re-arming failed below; treat as a recv error, as above.
+                return Poll::Ready(Err(false));
+            };
+            if Pin::new(timer).poll(cx).is_pending() {
+                return Poll::Pending;
+            }
+            inflight.timer = None;
+            // `InFlight` does not change while this recv is pending, so there
+            // is always a request in flight here.
+            match inflight.remaining(Instant::now()) {
+                Some(left) if !left.is_zero() => {
+                    if !inflight.arm(left) {
+                        timer_exhausted_warn_once();
+                    }
+                }
+                _ => return Poll::Ready(Err(true)),
+            }
+        }
+    })
+    .await;
+
+    match expired {
         Ok(v) => Ok(v),
-        Err(_elapsed) => {
+        Err(true) => {
             let n = inflight.len() as u64;
             metrics::REQUEST_TIMEOUTS.add(n);
             metrics::REQUEST_ERRORS.add(n);
             conn.close();
             Err(DisconnectReason::Timeout)
+        }
+        Err(false) => {
+            conn.close();
+            Err(DisconnectReason::RecvError)
         }
     }
 }
