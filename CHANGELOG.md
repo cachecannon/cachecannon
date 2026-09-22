@@ -27,6 +27,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   cancels. Timeout behaviour is unchanged: the black-hole CI check and a mixed
   healthy/stalled run report identical timeout counts before and after.
 
+  Same rig and cells, only the commit differing (cores per `ringline-worker`):
+
+  | cell | before | after |
+  |---|---|---|
+  | 2048 closed, 1 s timeout | 0.754 | 0.189 |
+  | 4096 closed, 1 s timeout | 0.999, 1.02M req/s, ~480K timeouts | 0.195, 1.22M req/s, 0 timeouts |
+  | 4096 closed, timeout off | 0.194 | 0.156 |
+
+  At 4096 with the timeout on, p99 went from 692 ms to 111 ms and max from
+  1.07 s to 180 ms, matching the timeout-off cell.
+
 ### Changed
 - Rate-limit tokens are dispatched once per worker instead of polled by every
   connection. Connections used to poll the shared `Ratelimiter` individually,
