@@ -7,6 +7,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- Rate-limit tokens are dispatched once per worker instead of polled by every
+  connection. Connections used to poll the shared `Ratelimiter` individually,
+  which made the wakeup rate `connections / sleep` -- and since offered-load
+  smoothness is *also* `connections / sleep`, how often anybody checks for a
+  token, CPU cost and measurement fidelity were the same quantity and could only
+  be traded against each other. Measured at 2048 connections and 20,000 req/s:
+  cutting the wakeup rate eightfold halved CPU and took p99 from ~270us to
+  376-1868us, with schedule slip p99 rising 100us -> 803us. No value of the
+  oversampling constant was a free win; it only picked a point on that line.
+
+  One task per worker now polls the limiter and funds queued claims, so wakeups
+  scale with the token rate rather than the connection count while the cadence
+  governing smoothness is set by the dispatcher alone. Measured on the rack
+  (Linux/io_uring, 8 threads, Valkey 9.0.1, identical cells, only the commit
+  differing) -- cores per `ringline-worker`:
+
+  | cell | before | after |
+  |---|---|---|
+  | 4096 conns @ 300K req/s | 0.999 | 0.149 |
+  | 4096 @ 200K | 0.964 | 0.117 |
+  | 4096 @ 100K | 0.685 | 0.047 |
+  | 4096 @ 50K | 0.406 | 0.026 |
+  | 2048 @ 100K | 0.434 | 0.053 |
+  | 4096 closed-loop | 0.999 | 1.000 |
+
+  85-94% less generator CPU on the rate-limited cells, with latency improving
+  rather than trading against it: 4096 @ 300K went p50 827 -> 238us and p99
+  1720 -> 409us. Every cell hit its target rate exactly and no open-loop cell
+  timed out in either arm.
+
+  Closed-loop is deliberately untouched and measured flat to three decimals: a
+  run with no `rate_limit` and no `[workload.saturation_search]` has no limiter,
+  so it gets no dispatcher and keeps the old poll, which it reaches only on send
+  backpressure. Whatever pins workers at 4096 closed-loop is a separate problem
+  and is not this one.
+
+
 ## [0.0.24] - 2026-09-18
 
 ### Changed

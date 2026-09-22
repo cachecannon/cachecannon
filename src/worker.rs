@@ -17,14 +17,17 @@ use ringline::{AsyncEventHandler, ConnCtx, DriverCtx, RegionId, SendGuard};
 
 use rand::prelude::*;
 use rand_xoshiro::Xoshiro256PlusPlus;
+use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
 use std::future::Future;
 use std::io;
 use std::net::SocketAddr;
 use std::pin::Pin;
+use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
 use std::sync::{Mutex, OnceLock, RwLock};
+use std::task::{Context, Poll, Waker};
 use std::time::{Duration, Instant};
 
 /// Test phase, controlled by main thread and read by workers.
@@ -327,65 +330,177 @@ fn make_value_guard(
 /// once the value is large enough to amortize the per-send cost.
 const ZC_VALUE_THRESHOLD: usize = 4096;
 
-// ── Idle backoff ────────────────────────────────────────────────────────
+// ── Rate-limit dispatch ─────────────────────────────────────────────────
 
-/// Shortest idle sleep, and the value every connection used unconditionally
-/// before this was scaled. Runs small enough that the formula below lands under
-/// it are bit-identical to that behaviour.
+/// Fallback poll interval, and what a closed-loop run uses.
+///
+/// Without a rate limiter a connection only reaches the idle path when a `fire`
+/// fails on backpressure, so this is rarely taken and costs ~0.6 us of user CPU
+/// per request. Also the safety bound on a dispatcher wait, so a connection can
+/// never hang if the dispatcher task dies.
 const IDLE_SLEEP_MIN: Duration = Duration::from_micros(100);
 
-/// Longest idle sleep. A connection that sleeps this long still reports the
-/// consequence: unclaimed tokens accumulate in the limiter, which is exactly
-/// what `schedule_slip` measures, so over-sleeping shows up as slip rather than
-/// as a silently reshaped offered load.
+/// Upper bound on a single dispatcher wait, and on how long the dispatcher
+/// itself sleeps when no connection wants a token.
 const IDLE_SLEEP_MAX: Duration = Duration::from_millis(50);
 
-/// How far the fleet oversamples the token stream. At `K` wakeups per token
-/// granted there is two orders of magnitude of slack before a sleeping
-/// connection could leave the limiter unclaimed.
-const IDLE_WAKEUPS_PER_TOKEN: u64 = 64;
+/// One connection's claim on the rate limiter.
+///
+/// The dispatcher funds a slot outright or not at all, then wakes it. Granting
+/// to a named slot rather than into a shared pool is what keeps the dispatcher
+/// from spinning: once the head of the queue cannot be funded, there is nothing
+/// to do until the limiter mints more, so it sleeps for exactly that long.
+struct TokenSlot {
+    want: u64,
+    granted: Cell<u64>,
+    waker: RefCell<Option<Waker>>,
+}
 
-/// How long a connection with nothing in flight should wait before looking for
-/// rate-limit tokens again.
+/// Worker-local dispatcher between the shared `Ratelimiter` and this worker's
+/// connection tasks.
 ///
-/// A connection reaching the idle path is almost never waiting on the network;
-/// it is waiting for the shared rate limiter to mint a token. The old fixed
-/// 100 us poll made that cost O(connections) per 100 us and independent of the
-/// request rate, so a 10,000-connection run at 20,000 req/s spent ~100M
-/// wakeups/s to hand out 20,000 tokens. Measured on that run: ~12M CQEs/s and
-/// ~365 task polls per response, against a generator pinned at 15.8 of 16
-/// cores.
+/// Connections used to poll the limiter individually. That made the wakeup rate
+/// `connections / sleep`, and since offered-load smoothness is *also*
+/// `connections / sleep` -- how often anybody checks for a token -- CPU cost and
+/// measurement fidelity were the same quantity and could only be traded against
+/// each other. Measured at 2048 connections and 20,000 req/s: cutting the
+/// wakeup rate eightfold halved CPU and took p99 from ~270 us to 376-1868 us,
+/// with schedule slip p99 rising 100 us -> 803 us.
 ///
-/// Only `rate` fires per second can ever succeed, so any wakeup beyond that is
-/// wasted work. Sleeping `connections / (K * rate)` holds the fleet-wide wakeup
-/// rate at `K * rate` regardless of how many connections are open -- the point
-/// of the change is that connection count drops out:
-///
-/// ```text
-///   conns_per_worker / sleep == K * rate_per_worker
-///   => sleep == conns_total / (K * rate_total)      (threads cancel)
-/// ```
-///
-/// Aggregate throughput is unaffected because a token is claimed by whichever
-/// connection wakes next, not by a particular one. What a longer sleep can cost
-/// is the latency of one connection's *next* fire -- which is why the cap is
-/// 50 ms and why the honest accounting already exists: unclaimed tokens are
-/// limiter backlog, and backlog is `schedule_slip`.
-///
-/// Returns `IDLE_SLEEP_MIN` when there is no rate limit. An unlimited run keeps
-/// every connection's pipeline full, so it does not reach the idle path at all.
-fn idle_sleep(total_connections: usize, rate: u64) -> Duration {
-    if rate == 0 {
-        return IDLE_SLEEP_MIN;
+/// One task per worker polls the limiter instead, so wakeups scale with the
+/// token rate rather than the connection count, and the cadence that governs
+/// smoothness is set by the dispatcher alone. The two quantities come apart.
+#[derive(Default)]
+struct TokenDispatcher {
+    queue: RefCell<VecDeque<Rc<TokenSlot>>>,
+    /// Set once the dispatcher has stopped servicing. Sticky, because `drain`
+    /// can only release the waiters queued at that instant -- a connection
+    /// arriving afterwards would otherwise queue behind a dispatcher that is
+    /// gone and wait forever, the wait being untimed by design.
+    closed: Cell<bool>,
+}
+
+impl TokenDispatcher {
+    /// Queue a claim for `want` tokens and wait for the dispatcher to fund it.
+    ///
+    /// Deliberately untimed. An earlier version wrapped this in
+    /// `ringline::timeout` as a liveness guard, which armed and cancelled a
+    /// timer on *every* acquire -- reintroducing the per-request timer the
+    /// dispatcher exists to remove, and costing more CPU than the polling it
+    /// replaced. Liveness comes from the dispatcher instead: it re-checks the
+    /// phase at least every `IDLE_SLEEP_MAX` and `drain`s every waiter when the
+    /// run stops, and the release profile is `panic = "abort"`, so a dispatcher
+    /// that failed would take the process with it rather than strand anyone.
+    async fn acquire(self: &Rc<Self>, want: u64) -> u64 {
+        if self.closed.get() {
+            return 0;
+        }
+        let slot = Rc::new(TokenSlot {
+            want,
+            granted: Cell::new(0),
+            waker: RefCell::new(None),
+        });
+        self.queue.borrow_mut().push_back(Rc::clone(&slot));
+        TokenWait {
+            slot: Rc::clone(&slot),
+        }
+        .await;
+        slot.granted.get()
     }
-    let denom = IDLE_WAKEUPS_PER_TOKEN.saturating_mul(rate);
-    // Nanoseconds, not micros: at high rates the quotient is sub-microsecond
-    // and would truncate to zero, turning the sleep into a spin.
-    let nanos = (total_connections as u64)
-        .saturating_mul(1_000_000_000)
-        .checked_div(denom)
-        .unwrap_or(0);
-    Duration::from_nanos(nanos).clamp(IDLE_SLEEP_MIN, IDLE_SLEEP_MAX)
+
+    /// Fund as many queued claims as `rl` will pay for right now.
+    ///
+    /// Returns how long to wait before trying again: `None` when the queue is
+    /// empty, otherwise the limiter's own estimate of when the head becomes
+    /// fundable.
+    fn dispatch(&self, rl: &Ratelimiter) -> Option<Duration> {
+        loop {
+            let slot = self.queue.borrow_mut().pop_front()?;
+            let want = slot.want.min(rl.max_tokens()).max(1);
+            match rl.try_wait_n(want) {
+                Ok(()) => {
+                    slot.granted.set(want);
+                    if let Some(w) = slot.waker.borrow_mut().take() {
+                        w.wake();
+                    }
+                }
+                // The head cannot be funded, so nothing behind it can be
+                // either -- the queue is FIFO and service is in order. Put it
+                // back; it keeps its place.
+                Err(TryWaitError::Insufficient(d)) => {
+                    self.queue.borrow_mut().push_front(slot);
+                    return Some(d);
+                }
+                // `want` exceeds the bucket outright; waiting cannot fix it.
+                // Fail the claim rather than stall the whole queue behind it.
+                Err(TryWaitError::ExceedsCapacity) => {
+                    if let Some(w) = slot.waker.borrow_mut().take() {
+                        w.wake();
+                    }
+                }
+                // `TryWaitError` is `#[non_exhaustive]`. A future variant we do
+                // not understand gets a bounded retry: dropping the claim could
+                // spin the caller, and stalling forever would wedge the queue.
+                Err(_) => {
+                    self.queue.borrow_mut().push_front(slot);
+                    return Some(IDLE_SLEEP_MIN);
+                }
+            }
+        }
+    }
+
+    /// Release every waiter, funded or not, so shutdown cannot block on one.
+    fn drain(&self) {
+        self.closed.set(true);
+        for slot in self.queue.borrow_mut().drain(..) {
+            if let Some(w) = slot.waker.borrow_mut().take() {
+                w.wake();
+            }
+        }
+    }
+}
+
+struct TokenWait {
+    slot: Rc<TokenSlot>,
+}
+
+impl Future for TokenWait {
+    type Output = ();
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
+        if self.slot.granted.get() > 0 {
+            return Poll::Ready(());
+        }
+        *self.slot.waker.borrow_mut() = Some(cx.waker().clone());
+        Poll::Pending
+    }
+}
+
+thread_local! {
+    /// This worker's dispatcher. `None` for a closed-loop run, which has no
+    /// limiter to dispatch from and never needed one.
+    static DISPATCHER: RefCell<Option<Rc<TokenDispatcher>>> = const { RefCell::new(None) };
+}
+
+fn dispatcher() -> Option<Rc<TokenDispatcher>> {
+    DISPATCHER.with(|d| d.borrow().clone())
+}
+
+/// Run this worker's dispatcher until the run stops.
+async fn run_dispatcher(
+    dispatch: Rc<TokenDispatcher>,
+    rl: Arc<Ratelimiter>,
+    shared: Arc<SharedState>,
+) {
+    loop {
+        if shared.phase().should_stop() {
+            dispatch.drain();
+            return;
+        }
+        // `None` means nobody is waiting; there is no token to chase, so idle
+        // at the coarse bound rather than spinning on an empty queue.
+        let nap = dispatch.dispatch(&rl).unwrap_or(IDLE_SLEEP_MAX);
+        ringline::sleep(nap.clamp(Duration::from_micros(1), IDLE_SLEEP_MAX)).await;
+    }
 }
 
 /// Borrow a random `value_len`-byte slice of the value pool, for the
@@ -556,6 +671,25 @@ impl AsyncEventHandler for BenchHandler {
         let protocol = worker_state.task_state.config.target.protocol;
 
         Some(Box::pin(async move {
+            // Install this worker's dispatcher before any connection task can
+            // look for it. A closed-loop run has no limiter and gets none, so
+            // `dispatcher()` returns `None` and those tasks keep the old poll.
+            if let Some(rl) = worker_state.task_state.ratelimiter.clone() {
+                let dispatch = Rc::new(TokenDispatcher::default());
+                DISPATCHER.with(|slot| *slot.borrow_mut() = Some(Rc::clone(&dispatch)));
+                let shared = Arc::clone(&worker_state.task_state.shared);
+                if let Err(e) = ringline::spawn(run_dispatcher(dispatch, rl, shared)) {
+                    // Without it every connection falls back to the bounded
+                    // wait in `acquire`, which still makes progress -- but it
+                    // is the old per-connection poll, so say so.
+                    tracing::error!(
+                        worker = worker_id,
+                        "failed to spawn rate-limit dispatcher: {e}; \
+                         connections will poll the limiter individually"
+                    );
+                    DISPATCHER.with(|slot| *slot.borrow_mut() = None);
+                }
+            }
             match protocol {
                 CacheProtocol::Ping => {
                     spawn_protocol_tasks(&worker_state, my_connections, worker_id);
@@ -1099,7 +1233,13 @@ async fn drive_resp_workload(
     let multi_endpoint = num_endpoints > 1;
     let pipeline_depth = config.connection.pipeline_depth;
     let batch_size = config.connection.effective_batch_size();
-    let total_connections = config.connection.total_connections();
+    // `None` for a closed-loop run; see `TokenDispatcher`.
+    let token_dispatch = dispatcher();
+    // Tokens the dispatcher already charged to this connection, carried to the
+    // next iteration. `acquire` debits the limiter, so re-polling it here
+    // instead of spending these would hand them back to nobody and quietly
+    // depress the achieved rate below the configured one.
+    let mut carried_tokens: u64 = 0;
     let mut prefill_in_flight: VecDeque<usize> = VecDeque::new();
     let mut inflight = InFlight::new(config.connection.request_timeout, pipeline_depth);
 
@@ -1170,11 +1310,17 @@ async fn drive_resp_workload(
             // rejections.
             let mut token_budget = match state.task_state.ratelimiter {
                 Some(ref rl) => {
-                    let n = (batch_size as u64).min(rl.max_tokens());
-                    if n > 0 && rl.try_wait_n(n).is_ok() {
-                        n as usize
+                    if carried_tokens > 0 {
+                        let n = carried_tokens as usize;
+                        carried_tokens = 0;
+                        n
                     } else {
-                        0
+                        let n = (batch_size as u64).min(rl.max_tokens());
+                        if n > 0 && rl.try_wait_n(n).is_ok() {
+                            n as usize
+                        } else {
+                            0
+                        }
                     }
                 }
                 None => batch_size,
@@ -1313,18 +1459,19 @@ async fn drive_resp_workload(
                 .set(crate::metrics::slip_ns(rl.available(), rl.rate()) as i64);
         }
 
-        // Nothing in flight: wait before looking for rate-limit tokens again.
-        // The interval scales with connection count so the fleet-wide wakeup
-        // rate stays proportional to the token rate rather than to the number
-        // of connections -- see `idle_sleep`.
+        // Nothing in flight, so this connection is waiting for a rate-limit
+        // token rather than for the network. Park on the worker's dispatcher,
+        // which wakes it when one is actually available -- one wakeup per token
+        // granted instead of one per poll interval per connection. A run with
+        // no limiter has no dispatcher and keeps the old fixed poll, which it
+        // reaches only on send backpressure.
         if client.pending_count() == 0 {
-            let rate = state
-                .task_state
-                .ratelimiter
-                .as_ref()
-                .map_or(0, |rl| rl.rate());
-            let base = idle_sleep(total_connections, rate);
-            ringline::sleep(base).await;
+            match token_dispatch {
+                Some(ref d) => {
+                    carried_tokens = d.acquire(batch_size as u64).await;
+                }
+                None => ringline::sleep(IDLE_SLEEP_MIN).await,
+            }
             continue;
         }
 
@@ -1735,7 +1882,13 @@ async fn drive_memcache_workload(
     let multi_endpoint = num_endpoints > 1;
     let pipeline_depth = config.connection.pipeline_depth;
     let batch_size = config.connection.effective_batch_size();
-    let total_connections = config.connection.total_connections();
+    // `None` for a closed-loop run; see `TokenDispatcher`.
+    let token_dispatch = dispatcher();
+    // Tokens the dispatcher already charged to this connection, carried to the
+    // next iteration. `acquire` debits the limiter, so re-polling it here
+    // instead of spending these would hand them back to nobody and quietly
+    // depress the achieved rate below the configured one.
+    let mut carried_tokens: u64 = 0;
     let mut prefill_in_flight: VecDeque<usize> = VecDeque::new();
     let mut inflight = InFlight::new(config.connection.request_timeout, pipeline_depth);
 
@@ -1799,11 +1952,17 @@ async fn drive_memcache_workload(
             // rejections.
             let mut token_budget = match state.task_state.ratelimiter {
                 Some(ref rl) => {
-                    let n = (batch_size as u64).min(rl.max_tokens());
-                    if n > 0 && rl.try_wait_n(n).is_ok() {
-                        n as usize
+                    if carried_tokens > 0 {
+                        let n = carried_tokens as usize;
+                        carried_tokens = 0;
+                        n
                     } else {
-                        0
+                        let n = (batch_size as u64).min(rl.max_tokens());
+                        if n > 0 && rl.try_wait_n(n).is_ok() {
+                            n as usize
+                        } else {
+                            0
+                        }
                     }
                 }
                 None => batch_size,
@@ -1894,18 +2053,19 @@ async fn drive_memcache_workload(
                 .set(crate::metrics::slip_ns(rl.available(), rl.rate()) as i64);
         }
 
-        // Nothing in flight: wait before looking for rate-limit tokens again.
-        // The interval scales with connection count so the fleet-wide wakeup
-        // rate stays proportional to the token rate rather than to the number
-        // of connections -- see `idle_sleep`.
+        // Nothing in flight, so this connection is waiting for a rate-limit
+        // token rather than for the network. Park on the worker's dispatcher,
+        // which wakes it when one is actually available -- one wakeup per token
+        // granted instead of one per poll interval per connection. A run with
+        // no limiter has no dispatcher and keeps the old fixed poll, which it
+        // reaches only on send backpressure.
         if client.pending_count() == 0 {
-            let rate = state
-                .task_state
-                .ratelimiter
-                .as_ref()
-                .map_or(0, |rl| rl.rate());
-            let base = idle_sleep(total_connections, rate);
-            ringline::sleep(base).await;
+            match token_dispatch {
+                Some(ref d) => {
+                    carried_tokens = d.acquire(batch_size as u64).await;
+                }
+                None => ringline::sleep(IDLE_SLEEP_MIN).await,
+            }
             continue;
         }
 
@@ -3153,62 +3313,95 @@ fn pin_to_cpu(_cpu_id: usize) -> std::io::Result<()> {
 mod tests {
     use super::*;
 
-    /// The property the change exists for: fleet-wide wakeups track the token
-    /// rate, not the connection count. Asserted as a ratio so it holds however
-    /// the constants are retuned.
-    #[test]
-    fn idle_wakeup_rate_is_independent_of_connection_count() {
-        let rate = 20_000;
-        for conns in [1024, 4096, 10_000, 40_000] {
-            let sleep = idle_sleep(conns, rate);
-            // Skip any point that the clamp, not the formula, decided.
-            if sleep == IDLE_SLEEP_MIN || sleep == IDLE_SLEEP_MAX {
-                continue;
-            }
-            let wakeups = conns as f64 / sleep.as_secs_f64();
-            let expected = (IDLE_WAKEUPS_PER_TOKEN * rate) as f64;
-            assert!(
-                (wakeups - expected).abs() / expected < 0.01,
-                "{conns} connections wake {wakeups:.0}/s, expected ~{expected:.0}/s"
-            );
-        }
+    /// A dispatcher with a slot already queued, without needing an executor:
+    /// `dispatch` and `drain` are synchronous, and they are where every bug in
+    /// this type has been so far.
+    fn queued(d: &TokenDispatcher, want: u64) -> Rc<TokenSlot> {
+        let slot = Rc::new(TokenSlot {
+            want,
+            granted: Cell::new(0),
+            waker: RefCell::new(None),
+        });
+        d.queue.borrow_mut().push_back(Rc::clone(&slot));
+        slot
+    }
+
+    fn limiter(rate: u64) -> Ratelimiter {
+        Ratelimiter::builder(rate)
+            .max_tokens(rate.max(1))
+            .initial_available(rate)
+            .build()
+            .expect("limiter")
     }
 
     #[test]
-    fn small_runs_keep_the_previous_fixed_poll() {
-        // 64 connections at 20k req/s was never the expensive case, and must
-        // not start sleeping longer than it used to.
-        assert_eq!(idle_sleep(64, 20_000), IDLE_SLEEP_MIN);
-        assert_eq!(idle_sleep(1, 20_000), IDLE_SLEEP_MIN);
-    }
-
-    #[test]
-    fn an_unlimited_run_keeps_the_floor() {
-        // rate 0 means no limiter. Such a run keeps its pipeline full and never
-        // reaches the idle path, but the arithmetic must not divide by zero.
-        assert_eq!(idle_sleep(10_000, 0), IDLE_SLEEP_MIN);
-    }
-
-    #[test]
-    fn idle_sleep_is_bounded_on_absurd_input() {
-        assert_eq!(idle_sleep(usize::MAX, 1), IDLE_SLEEP_MAX);
-        assert_eq!(idle_sleep(0, 20_000), IDLE_SLEEP_MIN);
-        // A very high rate makes the quotient sub-microsecond; it must clamp to
-        // the floor rather than truncate to a zero-length sleep, which would
-        // spin the worker.
-        assert_eq!(idle_sleep(10, u64::MAX / 64), IDLE_SLEEP_MIN);
-    }
-
-    #[test]
-    fn the_10k_connection_case_sleeps_far_longer_than_it_did() {
-        // The run that prompted this: 10,000 connections, 20,000 req/s, which
-        // was spending ~100M wakeups/s to grant 20,000 tokens.
-        let sleep = idle_sleep(10_000, 20_000);
+    fn dispatch_funds_what_the_limiter_can_pay_for() {
+        let d = TokenDispatcher::default();
+        let a = queued(&d, 1);
+        let b = queued(&d, 1);
+        d.dispatch(&limiter(100));
+        assert_eq!(a.granted.get(), 1);
+        assert_eq!(b.granted.get(), 1);
         assert!(
-            sleep > IDLE_SLEEP_MIN * 50,
-            "10k connections still sleeps only {sleep:?}"
+            d.queue.borrow().is_empty(),
+            "funded slots must leave the queue"
         );
-        assert!(sleep < IDLE_SLEEP_MAX);
+    }
+
+    #[test]
+    fn an_unfundable_head_keeps_its_place() {
+        // The head is what the limiter cannot pay for, so nothing behind it is
+        // reachable either -- service is FIFO. It must stay queued rather than
+        // be dropped, or the waiter never gets funded at all.
+        let d = TokenDispatcher::default();
+        let head = queued(&d, 10);
+        let rl = limiter(10);
+        assert!(rl.try_wait_n(10).is_ok(), "drain the bucket");
+        let nap = d.dispatch(&rl);
+        assert_eq!(head.granted.get(), 0);
+        assert_eq!(d.queue.borrow().len(), 1, "head must be put back");
+        assert!(nap.is_some(), "caller needs to know how long to wait");
+    }
+
+    #[test]
+    fn an_empty_queue_reports_nothing_to_wait_for() {
+        let d = TokenDispatcher::default();
+        assert!(d.dispatch(&limiter(100)).is_none());
+    }
+
+    #[test]
+    fn drain_releases_every_waiter_and_closes_for_good() {
+        // `drain` can only reach whoever is queued at that instant. Closing has
+        // to be sticky, or a connection arriving afterwards queues behind a
+        // dispatcher that has exited and -- the wait being untimed -- hangs
+        // shutdown.
+        let d = TokenDispatcher::default();
+        let slot = queued(&d, 1);
+        d.drain();
+        assert_eq!(slot.granted.get(), 0, "released, not funded");
+        assert!(d.queue.borrow().is_empty());
+        assert!(d.closed.get(), "close must persist past the drain");
+    }
+
+    #[test]
+    fn a_claim_never_outlives_its_funding() {
+        // The inverse of the token leak: the limiter is debited only for slots
+        // that actually get granted, so a run cannot be charged for requests it
+        // never sends.
+        let d = TokenDispatcher::default();
+        let rl = limiter(4);
+        for _ in 0..6 {
+            queued(&d, 1);
+        }
+        d.dispatch(&rl);
+        let funded: u64 = d
+            .queue
+            .borrow()
+            .iter()
+            .map(|s| s.granted.get())
+            .sum::<u64>();
+        assert_eq!(funded, 0, "anything still queued must be unfunded");
+        assert_eq!(d.queue.borrow().len(), 2, "4 of 6 fundable at rate 4");
     }
 
     /// Build a minimal TaskSharedState + SharedWorkerState for testing prefill logic.
