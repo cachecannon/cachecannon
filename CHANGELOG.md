@@ -16,6 +16,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   worker, so runs ended normally; the `ExceedsCapacity` case (only reachable
   with `max_tokens` at 0) would have stalled the connection for good. The wait
   now completes when the dispatcher is done with the claim, funded or not.
+- In a rate-limited run, only a connection the limiter has just turned away
+  parks on the token dispatcher. Since #166 every idle connection parked,
+  including ones in Prefill with their queue drained. The dispatcher funded
+  them, they looped and parked again, and each grant overwrote the last, so the
+  limiter was drained at the configured rate for tokens nothing spent, and
+  warmup opened with a batch held by every connection (up to 131K requests at
+  4096 connections x 32). All of it landed in warmup, so measured results were
+  not affected. Other idle states now use the fixed poll that closed-loop runs
+  use.
 
 ## [0.0.25] - 2026-09-22
 
