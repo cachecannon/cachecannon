@@ -1258,6 +1258,9 @@ async fn drive_resp_workload(
         // batch; the batch is one coalesced send, so the error is bounded by
         // the fire loop, not the network.
         let fired_at = Instant::now();
+        // Set when the limiter could not fund a batch in Warmup/Running. Only
+        // then does an idle connection park on the dispatcher; see below.
+        let mut starved = false;
 
         // Only refill when there's room for a full batch, so fire_* calls
         // accumulate into a single coalesced send rather than one-per-response.
@@ -1325,6 +1328,7 @@ async fn drive_resp_workload(
                         if n > 0 && rl.try_wait_n(n).is_ok() {
                             n as usize
                         } else {
+                            starved = true;
                             0
                         }
                     }
@@ -1465,18 +1469,24 @@ async fn drive_resp_workload(
                 .set(crate::metrics::slip_ns(rl.available(), rl.rate()) as i64);
         }
 
-        // Nothing in flight, so this connection is waiting for a rate-limit
-        // token rather than for the network. Park on the worker's dispatcher,
-        // which wakes it when one is actually available -- one wakeup per token
-        // granted instead of one per poll interval per connection. A run with
-        // no limiter has no dispatcher and keeps the old fixed poll, which it
-        // reaches only on send backpressure.
+        // Nothing in flight. If the limiter just turned this connection away,
+        // it is waiting for a token: park on the worker's dispatcher, which
+        // wakes it when one is actually available -- one wakeup per token
+        // granted instead of one per poll interval per connection.
+        //
+        // Any other idle state keeps the fixed poll that closed-loop runs use:
+        // Prefill with the queue drained, or send backpressure or a missed
+        // route in Warmup/Running. Parking there would fund a batch nothing
+        // spends. In Prefill a drained connection was funded, looped and
+        // parked again, each `acquire` overwriting the last grant, so the
+        // dispatcher drained the limiter at the full rate for the whole
+        // prefill and warmup opened with a batch held by every connection.
         if client.pending_count() == 0 {
             match token_dispatch {
-                Some(ref d) => {
+                Some(ref d) if starved => {
                     carried_tokens = d.acquire(batch_size as u64).await;
                 }
-                None => ringline::sleep(IDLE_SLEEP_MIN).await,
+                _ => ringline::sleep(IDLE_SLEEP_MIN).await,
             }
             continue;
         }
@@ -1907,6 +1917,9 @@ async fn drive_memcache_workload(
         // batch; the batch is one coalesced send, so the error is bounded by
         // the fire loop, not the network.
         let fired_at = Instant::now();
+        // Set when the limiter could not fund a batch in Warmup/Running. Only
+        // then does an idle connection park on the dispatcher; see below.
+        let mut starved = false;
 
         // Only refill when there's room for a full batch, so fire_* calls
         // accumulate into a single coalesced send rather than one-per-response.
@@ -1967,6 +1980,7 @@ async fn drive_memcache_workload(
                         if n > 0 && rl.try_wait_n(n).is_ok() {
                             n as usize
                         } else {
+                            starved = true;
                             0
                         }
                     }
@@ -2059,18 +2073,24 @@ async fn drive_memcache_workload(
                 .set(crate::metrics::slip_ns(rl.available(), rl.rate()) as i64);
         }
 
-        // Nothing in flight, so this connection is waiting for a rate-limit
-        // token rather than for the network. Park on the worker's dispatcher,
-        // which wakes it when one is actually available -- one wakeup per token
-        // granted instead of one per poll interval per connection. A run with
-        // no limiter has no dispatcher and keeps the old fixed poll, which it
-        // reaches only on send backpressure.
+        // Nothing in flight. If the limiter just turned this connection away,
+        // it is waiting for a token: park on the worker's dispatcher, which
+        // wakes it when one is actually available -- one wakeup per token
+        // granted instead of one per poll interval per connection.
+        //
+        // Any other idle state keeps the fixed poll that closed-loop runs use:
+        // Prefill with the queue drained, or send backpressure or a missed
+        // route in Warmup/Running. Parking there would fund a batch nothing
+        // spends. In Prefill a drained connection was funded, looped and
+        // parked again, each `acquire` overwriting the last grant, so the
+        // dispatcher drained the limiter at the full rate for the whole
+        // prefill and warmup opened with a batch held by every connection.
         if client.pending_count() == 0 {
             match token_dispatch {
-                Some(ref d) => {
+                Some(ref d) if starved => {
                     carried_tokens = d.acquire(batch_size as u64).await;
                 }
-                None => ringline::sleep(IDLE_SLEEP_MIN).await,
+                _ => ringline::sleep(IDLE_SLEEP_MIN).await,
             }
             continue;
         }
