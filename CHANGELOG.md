@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.26] - 2026-09-23
+
 ### Fixed
 - A connection released by the token dispatcher (0.0.25, #166) without tokens
   now returns from its wait instead of staying parked. `drain` at the end of a
