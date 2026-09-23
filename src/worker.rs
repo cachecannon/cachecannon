@@ -353,7 +353,23 @@ const IDLE_SLEEP_MAX: Duration = Duration::from_millis(50);
 struct TokenSlot {
     want: u64,
     granted: Cell<u64>,
+    /// Set when the dispatcher is finished with this slot, whether it funded
+    /// it or released it unfunded. `TokenWait` completes on this rather than
+    /// on `granted > 0`: a slot released by `drain` or failed with
+    /// `ExceedsCapacity` has nothing granted, and a wait keyed on the grant
+    /// would re-register its waker and never return.
+    done: Cell<bool>,
     waker: RefCell<Option<Waker>>,
+}
+
+impl TokenSlot {
+    fn complete(&self, granted: u64) {
+        self.granted.set(granted);
+        self.done.set(true);
+        if let Some(w) = self.waker.borrow_mut().take() {
+            w.wake();
+        }
+    }
 }
 
 /// Worker-local dispatcher between the shared `Ratelimiter` and this worker's
@@ -398,6 +414,7 @@ impl TokenDispatcher {
         let slot = Rc::new(TokenSlot {
             want,
             granted: Cell::new(0),
+            done: Cell::new(false),
             waker: RefCell::new(None),
         });
         self.queue.borrow_mut().push_back(Rc::clone(&slot));
@@ -418,12 +435,7 @@ impl TokenDispatcher {
             let slot = self.queue.borrow_mut().pop_front()?;
             let want = slot.want.min(rl.max_tokens()).max(1);
             match rl.try_wait_n(want) {
-                Ok(()) => {
-                    slot.granted.set(want);
-                    if let Some(w) = slot.waker.borrow_mut().take() {
-                        w.wake();
-                    }
-                }
+                Ok(()) => slot.complete(want),
                 // The head cannot be funded, so nothing behind it can be
                 // either -- the queue is FIFO and service is in order. Put it
                 // back; it keeps its place.
@@ -433,11 +445,7 @@ impl TokenDispatcher {
                 }
                 // `want` exceeds the bucket outright; waiting cannot fix it.
                 // Fail the claim rather than stall the whole queue behind it.
-                Err(TryWaitError::ExceedsCapacity) => {
-                    if let Some(w) = slot.waker.borrow_mut().take() {
-                        w.wake();
-                    }
-                }
+                Err(TryWaitError::ExceedsCapacity) => slot.complete(0),
                 // `TryWaitError` is `#[non_exhaustive]`. A future variant we do
                 // not understand gets a bounded retry: dropping the claim could
                 // spin the caller, and stalling forever would wedge the queue.
@@ -453,9 +461,7 @@ impl TokenDispatcher {
     fn drain(&self) {
         self.closed.set(true);
         for slot in self.queue.borrow_mut().drain(..) {
-            if let Some(w) = slot.waker.borrow_mut().take() {
-                w.wake();
-            }
+            slot.complete(0);
         }
     }
 }
@@ -467,7 +473,7 @@ struct TokenWait {
 impl Future for TokenWait {
     type Output = ();
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
-        if self.slot.granted.get() > 0 {
+        if self.slot.done.get() {
             return Poll::Ready(());
         }
         *self.slot.waker.borrow_mut() = Some(cx.waker().clone());
@@ -3386,6 +3392,7 @@ mod tests {
         let slot = Rc::new(TokenSlot {
             want,
             granted: Cell::new(0),
+            done: Cell::new(false),
             waker: RefCell::new(None),
         });
         d.queue.borrow_mut().push_back(Rc::clone(&slot));
@@ -3447,6 +3454,44 @@ mod tests {
         assert_eq!(slot.granted.get(), 0, "released, not funded");
         assert!(d.queue.borrow().is_empty());
         assert!(d.closed.get(), "close must persist past the drain");
+    }
+
+    fn wait_is_ready(slot: &Rc<TokenSlot>) -> bool {
+        let mut wait = TokenWait {
+            slot: Rc::clone(slot),
+        };
+        let mut cx = Context::from_waker(Waker::noop());
+        Pin::new(&mut wait).poll(&mut cx).is_ready()
+    }
+
+    #[test]
+    fn a_drained_waiter_returns_instead_of_hanging() {
+        // `drain` releases a waiter without funding it. The wait must complete
+        // with nothing granted; completing only on a grant re-registered the
+        // waker and left the connection parked forever.
+        let d = TokenDispatcher::default();
+        let slot = queued(&d, 4);
+        assert!(!wait_is_ready(&slot), "queued and unfunded: still waiting");
+        d.drain();
+        assert!(wait_is_ready(&slot));
+        assert_eq!(slot.granted.get(), 0);
+    }
+
+    #[test]
+    fn a_claim_the_bucket_cannot_hold_is_released() {
+        // With `max_tokens` at 0 no claim is fundable. The claim is failed
+        // rather than left at the head, and its wait returns 0.
+        let d = TokenDispatcher::default();
+        let slot = queued(&d, 1);
+        let rl = Ratelimiter::builder(100)
+            .max_tokens(1)
+            .initial_available(0)
+            .build()
+            .expect("limiter");
+        rl.set_max_tokens(0);
+        assert!(d.dispatch(&rl).is_none(), "released, queue empty");
+        assert!(wait_is_ready(&slot));
+        assert_eq!(slot.granted.get(), 0);
     }
 
     #[test]

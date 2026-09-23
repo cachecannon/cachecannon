@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- A connection released by the token dispatcher (0.0.25, #166) without tokens
+  now returns from its wait instead of staying parked. `drain` at the end of a
+  run, and a claim failed with `ExceedsCapacity`, woke the connection without a
+  grant, and the wait completed only on a non-zero grant, so it re-registered
+  and never returned. At shutdown the parked tasks were dropped with the
+  worker, so runs ended normally; the `ExceedsCapacity` case (only reachable
+  with `max_tokens` at 0) would have stalled the connection for good. The wait
+  now completes when the dispatcher is done with the claim, funded or not.
+
 ## [0.0.25] - 2026-09-22
 
 ### Fixed
