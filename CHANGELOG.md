@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- `schedule_slip` no longer reads milliseconds at low connection counts while
+  the configured rate is being delivered in full (#174). The token dispatcher
+  (0.0.25, #166) slept up to 50 ms whenever its queue of waiting connections
+  was empty, and a connection that queued a claim did not wake it. With few
+  connections per worker the queue empties often, so a new claim could wait
+  for the dispatcher's next wakeup while unspent tokens built up in the
+  limiter. Slip is that backlog divided by the rate, and perceived latency adds
+  slip to every response, so a saturation search judging on perceived
+  percentiles could stop climbing with the server nowhere near its limit. The
+  requests were also sent in bursts rather than on schedule. Queuing a claim
+  now wakes an idle dispatcher.
+
 ## [0.0.26] - 2026-09-23
 
 ### Fixed

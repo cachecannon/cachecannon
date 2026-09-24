@@ -394,6 +394,15 @@ struct TokenDispatcher {
     /// arriving afterwards would otherwise queue behind a dispatcher that is
     /// gone and wait forever, the wait being untimed by design.
     closed: Cell<bool>,
+    /// The dispatcher task's waker while it idles on an empty queue. `acquire`
+    /// takes and wakes it, so a claim is funded as soon as the limiter allows
+    /// rather than when the idle backstop next expires. Without it, a worker
+    /// whose queue emptied between claims left each new claim waiting up to
+    /// `IDLE_SLEEP_MAX`, unspent tokens built up in the limiter meanwhile, and
+    /// `schedule_slip` read milliseconds while the configured rate was being
+    /// delivered in full (#174). Few connections per worker empty the queue
+    /// most often, so low connection counts were hit hardest.
+    idle: RefCell<Option<Waker>>,
 }
 
 impl TokenDispatcher {
@@ -418,6 +427,9 @@ impl TokenDispatcher {
             waker: RefCell::new(None),
         });
         self.queue.borrow_mut().push_back(Rc::clone(&slot));
+        if let Some(w) = self.idle.borrow_mut().take() {
+            w.wake();
+        }
         TokenWait {
             slot: Rc::clone(&slot),
         }
@@ -455,6 +467,16 @@ impl TokenDispatcher {
                 }
             }
         }
+    }
+
+    /// True when a claim is queued. Otherwise registers `cx`'s waker for
+    /// `acquire` to wake, and returns false.
+    fn claim_pending(&self, cx: &mut Context<'_>) -> bool {
+        if !self.queue.borrow().is_empty() {
+            return true;
+        }
+        *self.idle.borrow_mut() = Some(cx.waker().clone());
+        false
     }
 
     /// Release every waiter, funded or not, so shutdown cannot block on one.
@@ -502,10 +524,26 @@ async fn run_dispatcher(
             dispatch.drain();
             return;
         }
-        // `None` means nobody is waiting; there is no token to chase, so idle
-        // at the coarse bound rather than spinning on an empty queue.
-        let nap = dispatch.dispatch(&rl).unwrap_or(IDLE_SLEEP_MAX);
-        ringline::sleep(nap.clamp(Duration::from_micros(1), IDLE_SLEEP_MAX)).await;
+        match dispatch.dispatch(&rl) {
+            // The head is waiting on the limiter: sleep until it can be funded.
+            Some(nap) => {
+                ringline::sleep(nap.clamp(Duration::from_micros(1), IDLE_SLEEP_MAX)).await;
+            }
+            // Nobody is waiting. Idle until `acquire` queues a claim and wakes
+            // us, with `IDLE_SLEEP_MAX` as a backstop so a stop is still
+            // noticed while every connection is busy.
+            None => {
+                let mut backstop = std::pin::pin!(ringline::sleep(IDLE_SLEEP_MAX));
+                std::future::poll_fn(|cx| {
+                    if dispatch.claim_pending(cx) {
+                        return Poll::Ready(());
+                    }
+                    backstop.as_mut().poll(cx)
+                })
+                .await;
+                dispatch.idle.borrow_mut().take();
+            }
+        }
     }
 }
 
@@ -3482,6 +3520,33 @@ mod tests {
         };
         let mut cx = Context::from_waker(Waker::noop());
         Pin::new(&mut wait).poll(&mut cx).is_ready()
+    }
+
+    #[test]
+    fn a_new_claim_wakes_an_idle_dispatcher() {
+        // An idle dispatcher must be woken by the next claim rather than left
+        // asleep until its backstop expires; see `TokenDispatcher::idle`.
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::task::Wake;
+        struct Count(AtomicUsize);
+        impl Wake for Count {
+            fn wake(self: Arc<Self>) {
+                self.0.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+        let d = Rc::new(TokenDispatcher::default());
+        let count = Arc::new(Count(AtomicUsize::new(0)));
+        let waker = Waker::from(Arc::clone(&count));
+        assert!(!d.claim_pending(&mut Context::from_waker(&waker)));
+
+        // Run `acquire` up to its wait: it queues the claim and wakes.
+        let mut claim = std::pin::pin!(d.acquire(1));
+        let mut cx = Context::from_waker(Waker::noop());
+        assert!(claim.as_mut().poll(&mut cx).is_pending());
+
+        assert_eq!(count.0.load(Ordering::Relaxed), 1, "dispatcher woken");
+        assert!(d.idle.borrow().is_none(), "waker consumed");
+        assert!(d.claim_pending(&mut Context::from_waker(&waker)));
     }
 
     #[test]
