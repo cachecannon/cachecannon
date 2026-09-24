@@ -209,3 +209,21 @@ which is why this entry is open and no code exists.
   under `uniform` at 113% of RAM: p50 356us and p99 979us both inside a
   500us/1ms SLO, while p999 was 44.3ms. A median-based health check calls that
   configuration healthy.
+
+  **CORRECTION (2026-09-11): the 44.3ms is not a steady-state figure and should
+  not be cited as one.** It is the aggregate over all 631 seconds of a
+  saturation search, which by construction includes every step driven past the
+  knee. That run's own per-second lines never exceeded 7.50ms. Re-measuring the
+  same configuration at a fixed 4,000 req/s for 300s gives **p50 360us, p99
+  897us, p999 4.23ms, p9999 9.57ms** — an order of magnitude lower at p999.
+
+  The underlying point survives and is arguably cleaner: p50 and p99 sit inside
+  the SLO while p999 is 4.7x the p99, so a median-based health check still calls
+  it healthy. But the gap is single-digit milliseconds, not forty, and any
+  argument resting on "tens of milliseconds of recoverable software overhead"
+  does not hold.
+
+  The general lesson is about the harness rather than the server: a saturation
+  search reports whole-run percentiles that mix compliant and deliberately
+  over-limit traffic, so its summary block is not a measurement of anything the
+  server does in production. Quote the compliant step, or run a fixed rate.
