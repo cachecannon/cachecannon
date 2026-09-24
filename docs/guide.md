@@ -787,34 +787,62 @@ What to do about it:
 ### Separating server time from reaping delay
 
 `perceived` above `response` catches a generator that is behind on *issuing*
-requests. It does not catch one behind on *reading* replies, because that delay
-lands inside `response_latency`: the measurement runs from send to
-response-parsed, and parsing happens in userspace after cachecannon notices the
-reply. A generator late to read a reply that already arrived charges the wait to
-the server.
+requests. It does not catch one behind on *reading* replies, because where that
+delay lands depends on `[timestamps] mode`, which also decides whether it is
+measured at all.
 
-Two ways to separate them:
+**`mode = "userspace"` (the default) includes reaping delay in
+`response_latency`.** The measurement is `Instant::elapsed()` sampled after the
+response is parsed, and parsing happens in userspace after cachecannon notices
+the reply. A generator late to read a reply that already arrived charges the
+wait to the server, and nothing in cachecannon's own output separates the two.
+Use
+`tcp_packet_latency` from client-side Rezolus — see
+[Is the generator the bottleneck?](#is-the-generator-the-bottleneck).
 
-- **`tcp_packet_latency`** from client-side Rezolus, per
-  [Is the generator the bottleneck?](#is-the-generator-the-bottleneck). Measures
-  socket-becomes-readable to userspace-reads-it directly.
-- **`get_latency` minus `get_ttfb`** from cachecannon's own metrics, which needs
-  no second tool. `get_ttfb` is first-byte-arrived; the difference is
-  first-byte-to-parsed, which is client-side by construction. If that gap grows
-  as offered load rises while the server's own work does not, the tail is
-  reaping delay.
-
-**`get_ttfb` requires kernel timestamping, which is not the default:**
+**`mode = "software"` excludes it.** Latency becomes
+`kernel_recv_timestamp - userspace_send_timestamp`, so the clock stops when the
+data arrived rather than when cachecannon got to it:
 
 ```toml
 [timestamps]
-mode = "software"    # Linux only. Without this, get_ttfb has no samples.
+mode = "software"    # Linux only (SO_TIMESTAMPING)
 ```
 
-Under the default `mode = "userspace"` the histogram is never incremented and
-does not appear in the Parquet snapshot, so a missing `get_ttfb` column means
-the mode was not set rather than that the metric failed. Set it before a run
-where generator reaping is a candidate — it cannot be recovered afterwards.
+A `software`-mode `response_latency` cannot be inflated by slow reaping, which
+makes it the better choice when the question is what the server did. It does not
+*measure* the reaping delay; it removes it.
+
+**The two modes are not comparable on latency.** Switching mid-comparison moves
+every latency figure by however much reaping delay there was, which looks like a
+server or configuration change and is neither. Pick one mode for a whole set of
+runs.
+
+**`get_ttfb` cannot be used to difference out reaping delay.** Under `software`
+it is computed from the same kernel timestamp as `response_latency`:
+
+```rust
+// ringline-memcache / ringline-redis, identical bodies
+fn finish_timing(&self, send_ts: u64, start: Instant) -> u64 {   // latency_ns
+    if self.use_kernel_ts {
+        let recv_ts = self.conn.recv_timestamp();
+        if recv_ts > 0 && recv_ts > send_ts { return recv_ts - send_ts; }
+    }
+    start.elapsed().as_nanos() as u64
+}
+fn compute_ttfb(&self, send_ts: u64) -> Option<u64> {            // ttfb_ns
+    if self.use_kernel_ts {
+        let recv_ts = self.conn.recv_timestamp();
+        if recv_ts > 0 && recv_ts > send_ts { return Some(recv_ts - send_ts); }
+    }
+    None
+}
+```
+
+So `get_ttfb` equals `get_latency` under `software` and has no samples under
+`userspace` — the difference is zero or unavailable, never informative. An empty
+metriken histogram does not reach the Parquet snapshot, so a missing `get_ttfb`
+column means `userspace` mode rather than a broken metric.
 
 ### Per-worker CPU, not total CPU
 
