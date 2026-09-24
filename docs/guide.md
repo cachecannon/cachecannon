@@ -763,9 +763,11 @@ Corroborating signals, all from client-side Rezolus:
 - **TCP srtt flat while reported latency climbs** — the network is fine, so the
   delay is above it.
 - **Generator CPU plateaus** as connections rise, especially below the core
-  count. A plateau at roughly one core per worker thread is a thread-count
-  ceiling, not a machine ceiling — read it per worker, not summed, per
-  [Per-worker CPU, not total CPU](#per-worker-cpu-not-total-cpu).
+  count. A plateau at roughly one core per worker thread *may* be a thread-count
+  ceiling rather than a machine ceiling — but a worker at a full core can also
+  be spinning with capacity to spare, so this reading has to be tested rather
+  than acted on. See
+  [Per-worker CPU, and why 1.00 is ambiguous](#per-worker-cpu-and-why-100-is-ambiguous).
 - **Context switches collapse** as connections rise. Worker threads that stop
   sleeping are saturated, not idle.
 
@@ -844,29 +846,65 @@ So `get_ttfb` equals `get_latency` under `software` and has no samples under
 metriken histogram does not reach the Parquet snapshot, so a missing `get_ttfb`
 column means `userspace` mode rather than a broken metric.
 
-### Per-worker CPU, not total CPU
+### Per-worker CPU, and why 1.00 is ambiguous
 
-Read generator CPU per worker, not summed. `threads` workers each pinned near
-1.00 core is a saturated generator even when the machine is mostly idle — eight
-workers at a full core each on a 28-core box is 8 cores of ceiling and 20 cores
-of headroom you are not using.
+Read generator CPU per worker rather than summed — the summed figure and the
+machine's load average can both look fine while every worker is pinned. But
+**a worker at 1.00 core does not by itself mean the generator is the limit**,
+and acting on that reading alone can waste most of a machine.
 
-The failure is easy to miss because the summed figure looks reasonable and the
-machine's load average looks fine. Two readings tell them apart:
+A ringline worker blocks only when it has nothing runnable
+(`backend/uring/event_loop.rs`):
 
-- **Busiest worker near 1.00** — generator-bound. Raise `threads`.
-- **All workers well below 1.00** — the generator is not the limit, and the
-  number belongs to the server.
+```rust
+if self.executor.ready_queue.is_empty() {
+    self.driver.ring.submit_and_wait(1)?;      // blocks
+} else {
+    self.driver.ring.submit_and_get_events()?; // returns immediately
+}
+```
 
-A corollary for SMT machines: if roughly half the workers sit near 1.00 and half
+At high connection counts something is runnable at almost every instant — a
+rate-limiter grant landing, a recv completing, a task woken — so the queue
+rarely empties, the loop spins, and the worker burns a core whether or not it is
+short of capacity. **1.00 means "never idle", which is saturation at low
+connection counts and a busy loop at high ones.**
+
+Measured on one rig at 512 connections: 8 workers at 1.01 core each and 24
+workers at 1.00 core each delivered the **same** throughput at the same server
+CPU. Tripling the workers tripled generator CPU and moved nothing. The same
+generator at 64 connections read 0.65-0.72 per worker, where the metric is
+informative because the ready queue does empty.
+
+**So treat 1.00 as a prompt to test, not a conclusion.** The discriminating
+check is two runs:
+
+1. Raise `threads` — double it, or set it to the machine's core count.
+2. Compare achieved throughput, not CPU.
+
+- **Throughput rises** — the generator was the limit and now has headroom.
+- **Throughput is flat** — the workers were spinning, not short of capacity. The
+  ceiling is elsewhere (the server, the network, or the device), and the extra
+  workers are pure cost. Put `threads` back.
+
+Below the connection count where the ready queue stops emptying, the simple
+reading still holds: workers well under 1.00 mean the generator is not the
+limit.
+
+A corollary for SMT machines, which only applies while the metric is
+informative at all: if roughly half the workers sit near 1.00 and half
 materially lower under the same offered load, the workers are paired on
 hyperthread siblings and the effective core count is half the thread count.
 cachecannon does not pin unless `cpu_list` is set, so this normally only happens
-with an explicit `cpu_list` — and note that consecutive CPU IDs are frequently
-siblings of each other, so `cpu_list = "0-23"` can mean twelve cores rather than
-twenty-four. Check the host's `thread_siblings_list` before writing one.
+with an explicit `cpu_list` — and
+consecutive CPU IDs are frequently siblings of each other, so
+`cpu_list = "0-23"` can mean twelve cores rather than twenty-four. Check the
+host's `thread_siblings_list` before writing one. Where every worker reads 1.00
+the clustering check cannot distinguish placements either, so it is moot there
+too.
 
 ### High Latency Variance
+
 
 For consistent measurements:
 1. Use `cpu_list` to pin threads to dedicated cores
