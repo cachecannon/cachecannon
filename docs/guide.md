@@ -784,6 +784,38 @@ What to do about it:
 2. Re-run the point that looked bad and confirm `tcp_packet_latency` dropped.
 3. Only then compare servers.
 
+### Separating server time from reaping delay
+
+`perceived` above `response` catches a generator that is behind on *issuing*
+requests. It does not catch one behind on *reading* replies, because that delay
+lands inside `response_latency`: the measurement runs from send to
+response-parsed, and parsing happens in userspace after cachecannon notices the
+reply. A generator late to read a reply that already arrived charges the wait to
+the server.
+
+Two ways to separate them:
+
+- **`tcp_packet_latency`** from client-side Rezolus, per
+  [Is the generator the bottleneck?](#is-the-generator-the-bottleneck). Measures
+  socket-becomes-readable to userspace-reads-it directly.
+- **`get_latency` minus `get_ttfb`** from cachecannon's own metrics, which needs
+  no second tool. `get_ttfb` is first-byte-arrived; the difference is
+  first-byte-to-parsed, which is client-side by construction. If that gap grows
+  as offered load rises while the server's own work does not, the tail is
+  reaping delay.
+
+**`get_ttfb` requires kernel timestamping, which is not the default:**
+
+```toml
+[timestamps]
+mode = "software"    # Linux only. Without this, get_ttfb has no samples.
+```
+
+Under the default `mode = "userspace"` the histogram is never incremented and
+does not appear in the Parquet snapshot, so a missing `get_ttfb` column means
+the mode was not set rather than that the metric failed. Set it before a run
+where generator reaping is a candidate — it cannot be recovered afterwards.
+
 ### Per-worker CPU, not total CPU
 
 Read generator CPU per worker, not summed. `threads` workers each pinned near
