@@ -216,7 +216,30 @@ max_rate = 100000000
 # Minimum ratio of achieved/target throughput (0.0-1.0)
 # Fails the step if achieved throughput drops below this fraction
 min_throughput_ratio = 0.9
+
+# Extra consecutive measurements required to confirm an SLO failure.
+# With 1, a rate must fail twice in a row to count as failed; a retry that
+# passes clears the count. Guards against one transient capping the whole run.
+# Costs one extra sample window per failure. 0 = act on the first failure.
+confirm_failures = 1
+
+# Minimum fractional latency improvement expected when the search halves the
+# rate, before it concludes the target's latency floor is above the SLO.
+# Only applies while no rate has passed yet. 0 disables the check.
+floor_improvement_ratio = 0.10
+
+# Relative interval width at which the bisection stops (0.0-1.0)
+bisect_tolerance = 0.05
+
+# Hard cap on the number of bisection probes
+max_bisect_steps = 8
 ```
+
+The latency half of the SLO is evaluated against **perceived** latency
+(`response_latency + schedule_slip`), not response latency alone. See
+[Perceived latency is the criterion](guide.md#perceived-latency-is-the-criterion)
+in the guide for how to read a step that fails with response latency inside the
+SLO.
 
 ### Timestamp Settings
 
@@ -483,6 +506,8 @@ Each snapshot contains the full set of metrics. The file uses the metriken expos
 | `delete_latency` | DELETE response latency |
 | `get_ttfb` | GET time-to-first-byte |
 | `backfill_set_latency` | Backfill SET latency |
+| `schedule_slip` | Queueing the latency clock omits: unspent rate-limiter tokens divided by rate. Zero without a rate limit |
+| `perceived_latency` | `response_latency + schedule_slip`. What a client issuing at the target rate experienced |
 
 ### Programmatic Analysis
 
