@@ -254,12 +254,17 @@ enabled = true
 mode = "userspace"
 ```
 
-`mode = "software"` is also what populates the `get_ttfb` histogram, the only
-client-side measure of how long cachecannon took to read a reply that had
-already arrived. Under `userspace` the metric has no samples and does not appear
-in the Parquet snapshot at all. See
+The mode also decides what `response_latency` measures. Under `userspace` it is
+sampled after the response is parsed, so it includes time cachecannon spent
+getting to a reply that had already arrived. Under `software` it is
+`kernel_recv_timestamp - userspace_send_timestamp`, which excludes that.
+**The two are not comparable**, so pick one mode for a whole set of runs. See
 [Separating server time from reaping delay](guide.md#separating-server-time-from-reaping-delay)
 in the guide.
+
+`mode = "software"` is also what populates `get_ttfb`, from the same kernel
+timestamp — so under `software` it equals `response_latency`, and under
+`userspace` it has no samples and does not appear in the snapshot.
 
 ### Output Settings
 
@@ -511,7 +516,7 @@ Each snapshot contains the full set of metrics. The file uses the metriken expos
 | `get_latency` | GET response latency |
 | `set_latency` | SET response latency |
 | `delete_latency` | DELETE response latency |
-| `get_ttfb` | GET time-to-first-byte. **Only populated with `[timestamps] mode = "software"`** (Linux); absent from the snapshot otherwise |
+| `get_ttfb` | GET time-to-first-byte. **Only populated with `[timestamps] mode = "software"`** (Linux), where it is computed from the same kernel timestamp as `get_latency` and equals it; absent from the snapshot otherwise |
 | `backfill_set_latency` | Backfill SET latency |
 | `schedule_slip` | Queueing the latency clock omits: unspent rate-limiter tokens divided by rate. Zero without a rate limit |
 | `perceived_latency` | `response_latency + schedule_slip`. What a client issuing at the target rate experienced |
