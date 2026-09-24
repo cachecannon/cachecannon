@@ -25,27 +25,52 @@ metric the change can move.
 
 ## Two regimes, not one setting
 
-`idle_sleep` (`src/worker.rs`) returns `IDLE_SLEEP_MIN` *unchanged* when
-`rate == 0`, and `rate` is 0 whenever there is no ratelimiter:
+Whether a run has a ratelimiter decides which waiting code a connection uses:
 
 ```rust
 let ratelimiter = if initial_rate > 0 || config.workload.saturation_search.is_some() {
 ```
 
 - **Rate-limited** (`workload.rate_limit`, *or* `[workload.saturation_search]` —
-  either creates a ratelimiter): the sleep scales as
-  `connections / (IDLE_WAKEUPS_PER_TOKEN * rate)`.
-- **Closed-loop** (neither key): the sleep is a constant, and the fire loop
-  always has budget so the idle branch is rarely reached at all.
+  either creates a ratelimiter): one `run_dispatcher` task per worker polls the
+  limiter and funds queued claims. A connection the limiter has just refused
+  parks on `TokenDispatcher::acquire`; wakeups scale with the token rate, not
+  with the connection count.
+- **Closed-loop** (neither key): no limiter, so no dispatcher. A connection
+  reaches the idle path only when `fire` fails on backpressure, and polls at the
+  `IDLE_SLEEP_MIN` constant when it does.
 
 These are different code paths. Do not reason about one from the other — that
-error was made twice, in both directions, during the effort recorded in
-`docs/journal/2026-09-18-generator-saturation.md`. Classifying a spec by
-grepping `rate_limit` alone misses the saturation-search case.
+error was made repeatedly during the effort recorded in
+`docs/journal/2026-09-18-generator-saturation.md`, and the closed-loop cause was
+misdiagnosed for a week because a rate-limited mechanism was assumed to apply.
+Classifying a spec by grepping `rate_limit` alone misses the saturation-search
+case.
 
-Known open issue: `IDLE_WAKEUPS_PER_TOKEN = 64` means the fleet wakes 64x per
-token granted by construction — millions of wakeups/s/worker at four-figure
-connection counts. See the journal entry.
+Two traps from that effort, both live:
+
+- **Only a refused connection may park on the dispatcher.** Parking on any idle
+  state (#171) made the dispatcher fund connections that had nothing to send, so
+  the limiter was drained for tokens nothing spent and each grant overwrote the
+  last. Any other idle state uses `IDLE_SLEEP_MIN`.
+- **`acquire` is deliberately untimed.** Wrapping it in `ringline::timeout`
+  reintroduces a per-acquire timer, which is the cost the dispatcher exists to
+  remove. Liveness comes from the dispatcher's own `drain`.
+
+## Price any per-request timer
+
+`connection.request_timeout` is enforced by **one deadline timer per
+connection**, armed for its oldest in-flight request and left running when
+replies arrive (`InFlight`, `recv_with_timeout` in `src/worker.rs`). The obvious
+implementation — arm a timeout per recv, cancel it on reply — was measured at
+**69% of generator CPU** at 4096 closed-loop connections, because the kernel's
+`io_timeout_cancel` walks the ring's pending-timeout list, which holds about one
+timer per connection. At that cost the workers could not read replies fast
+enough to meet the 1 s deadline, so the run also reported ~480K timeouts per
+60 s that the timer had caused.
+
+Measure any new per-request kernel operation against the same path disabled, at
+the highest connection count, before trusting the counters it drives.
 
 ## ringline
 
