@@ -11,7 +11,16 @@ response that already arrived is indistinguishable from server time in the
 benchmark's own numbers. `docs/guide.md` → "Is the generator the bottleneck?"
 has the procedure; the short version is to compare client-side
 `tcp_packet_latency` (socket-readable → userspace-read) against reported
-latency, and to treat per-worker CPU near 1.00 core as disqualifying.
+latency.
+
+**Per-worker CPU at 1.00 is ambiguous, not disqualifying.** A ringline worker
+blocks only when its ready queue is empty (`backend/uring/event_loop.rs`), so at
+high connection counts it spins and burns a core whether or not it is short of
+capacity. Measured: 8 workers at 1.01 and 24 workers at 1.00 delivered the same
+throughput at 512 connections; the same generator at 64 connections read
+0.65-0.72 and the metric was informative. Test it by raising `threads` and
+comparing achieved throughput, not CPU — flat throughput means the workers were
+spinning and the extra ones are pure cost. `docs/guide.md` has the procedure.
 
 Since #151 the generator's own runtime counters reach `/metrics` and the parquet
 snapshot: `ringline/pool{op="recv_parked"}`, `ringline/bytes{op="fallback_received"}`,
@@ -19,9 +28,10 @@ snapshot: `ringline/pool{op="recv_parked"}`, `ringline/bytes{op="fallback_receiv
 story.
 
 **A metric pinned at its ceiling cannot show an improvement.** Per-worker CPU
-reading 1.00 in both arms of an A/B means saturated, not unchanged — the gain,
-if any, shows up as more work done per unit of the pinned resource. Pick a
-metric the change can move.
+reading 1.00 in both arms of an A/B does not mean unchanged — it means the
+metric could not move, whether the workers were saturated or spinning. Either
+way the gain, if any, shows up as more work done per unit of the pinned
+resource. Pick a metric the change can move.
 
 ## Two regimes, not one setting
 
