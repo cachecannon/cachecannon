@@ -317,10 +317,10 @@ min_throughput_ratio = 0.9
 2. Run the workload at the current rate for `sample_window` (default: 5s)
 3. Collect the latency histogram and achieved throughput for the window
 4. Check the dual SLO:
-   - **Latency**: All specified percentile thresholds must be met (e.g., p99.9 < 1ms)
+   - **Latency**: All specified percentile thresholds must be met (e.g., p99.9 < 1ms), measured against **perceived** latency — see [Perceived latency is the criterion](#perceived-latency-is-the-criterion)
    - **Throughput**: Achieved throughput must be at least `min_throughput_ratio` of the target rate (default: 90%). This detects when the server can't keep up regardless of latency.
 5. If the SLO passes: record this rate as the current maximum, multiply by `step_multiplier`, continue
-6. If the SLO fails: increment the consecutive failure counter
+6. If the SLO fails: re-measure the same rate `confirm_failures` more times (default 1) before acting on it; a retry that passes clears the failure
 7. If consecutive failures reach `stop_after_failures` (default: 3): stop and report
 8. Otherwise: continue stepping up
 9. The rate is capped at `max_rate` (default: 100M req/s)
@@ -338,6 +338,83 @@ slo = { p99 = "500us", p999 = "2ms" }
 
 # Available percentiles: p50, p99, p999
 ```
+
+### Perceived latency is the criterion
+
+**The SLO is evaluated against `perceived` latency, not `response` latency.**
+This is deliberate and it is the difference between a saturation search and a
+throughput number that hides coordinated omission, but it has to be known to
+read a result.
+
+    response_latency   fire to reply. What the server did.
+    schedule_slip      how far behind its own schedule the generator was,
+                       measured as unspent rate-limiter tokens divided by rate.
+    perceived_latency  response_latency + schedule_slip. What a client that
+                       wanted to send at the target rate experienced.
+
+A generator that falls behind and then reports only `response_latency` flatters
+the server: requests it never managed to send have no latency at all. Judging on
+`perceived` prevents that — a step that could not offer the rate fails even if
+every request it did send was answered quickly.
+
+The consequence for reading a result: **a step can fail with `response` latency
+well inside the SLO.** That is not a server result. Every step prints both
+figures at the SLO's percentile, so they can be compared directly:
+
+```
+STEP 10 — FAIL — Latency Exceeded
+
+SLO:    28.1K @ p999 ≤ 10ms
+Result: 28.3K @ p999=2.10 ms        <- response latency, well inside the SLO
+Perceived: p999=27.8 ms             <- what the SLO was judged against
+Transitions: slip onset, first SLO breach
+Latency: p999 27787us > 10000us SLO
+```
+
+`Result` is response latency; `Perceived` is response plus slip, and the fail
+reason quotes the perceived figure. If the two are equal, the generator kept up
+and the step's verdict is the server's. If `Perceived` is much larger — as here,
+27.8 ms against a response latency of 2.10 ms — the step is carrying generator
+debt and the verdict is at least partly the generator's. Note that this step
+also delivered its target rate (28.3K against 28.1K requested), so nothing in
+the `Result` line suggests the generator was behind.
+
+`Transitions: slip onset` marks the first step where slip p99 exceeds 1 ms.
+**Read it against the step that prints `first SLO breach`:**
+
+- Slip onset at or after the breach, or never — the breach is the server. The
+  result is a server knee.
+- Slip onset several steps before the breach — the criterion was already
+  carrying milliseconds of generator debt when it failed. Treat the reported
+  rate as a floor on the server, not a knee, and see
+  [Is the generator the bottleneck?](#is-the-generator-the-bottleneck).
+
+The per-step table is printed by the clean formatter only; the JSON output
+carries whole-run `schedule_slip` and `perceived_latency` rather than per-step
+figures. For a time series, both are in the Parquet snapshot.
+
+### Confirming failures
+
+`confirm_failures` (default 1) requires a rate to fail twice in a row before the
+search acts on it. A retry that passes clears the count and the rate counts as
+passing.
+
+It exists because the search is otherwise anchored by its first failing sample:
+a failure during the climb fixes the bisection ceiling permanently and nothing
+above that rate is retried again. One transient — a writeback burst, a noisy
+neighbour, a step-onset herd — then caps the whole run, and the output looks
+like a clean convergence rather than an error.
+
+**Raise it when the run has a known source of transients.** Each additional
+confirmation costs one sample window per failure and does not bias a real
+ceiling upward, since a genuine limit fails every time. At 3, a spurious
+termination needs four consecutive transients instead of two.
+
+One symptom worth knowing, because it is what the default does not always
+catch: if two consecutive steps fail at the same rate with `response` latency
+well inside the SLO and only `perceived` over it, the climb ended on generator
+debt and the result is capped below the server's real knee. Re-run at a higher
+`confirm_failures` before believing the number.
 
 ### Results
 
@@ -685,17 +762,49 @@ Corroborating signals, all from client-side Rezolus:
 
 - **TCP srtt flat while reported latency climbs** — the network is fine, so the
   delay is above it.
-- **Total generator CPU plateaus** as connections rise, especially below the
-  core count. A plateau at roughly one core per worker thread is a thread-count
-  ceiling, not a machine ceiling.
+- **Generator CPU plateaus** as connections rise, especially below the core
+  count. A plateau at roughly one core per worker thread is a thread-count
+  ceiling, not a machine ceiling — read it per worker, not summed, per
+  [Per-worker CPU, not total CPU](#per-worker-cpu-not-total-cpu).
 - **Context switches collapse** as connections rise. Worker threads that stop
   sleeping are saturated, not idle.
+
+And one signal that needs no Rezolus at all, because cachecannon reports it
+itself (see
+[Perceived latency is the criterion](#perceived-latency-is-the-criterion)):
+
+- **`perceived` latency materially above `response` latency.** The difference is
+  `schedule_slip`: time the generator was behind its own schedule. Under a rate
+  limit this is the cheapest generator check there is, and in a saturation
+  search it decides pass and fail.
 
 What to do about it:
 
 1. Leave `threads` unset so it picks up the full CPU count.
 2. Re-run the point that looked bad and confirm `tcp_packet_latency` dropped.
 3. Only then compare servers.
+
+### Per-worker CPU, not total CPU
+
+Read generator CPU per worker, not summed. `threads` workers each pinned near
+1.00 core is a saturated generator even when the machine is mostly idle — eight
+workers at a full core each on a 28-core box is 8 cores of ceiling and 20 cores
+of headroom you are not using.
+
+The failure is easy to miss because the summed figure looks reasonable and the
+machine's load average looks fine. Two readings tell them apart:
+
+- **Busiest worker near 1.00** — generator-bound. Raise `threads`.
+- **All workers well below 1.00** — the generator is not the limit, and the
+  number belongs to the server.
+
+A corollary for SMT machines: if roughly half the workers sit near 1.00 and half
+materially lower under the same offered load, the workers are paired on
+hyperthread siblings and the effective core count is half the thread count.
+cachecannon does not pin unless `cpu_list` is set, so this normally only happens
+with an explicit `cpu_list` — and note that consecutive CPU IDs are frequently
+siblings of each other, so `cpu_list = "0-23"` can mean twelve cores rather than
+twenty-four. Check the host's `thread_siblings_list` before writing one.
 
 ### High Latency Variance
 
