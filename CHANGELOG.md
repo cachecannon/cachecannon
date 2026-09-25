@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- The append stream's per-batch `append batch opened` / `append batch
+  committed` lines are logged at info only when `append.every` is at least
+  10 s. At a shorter interval they are logged at debug
+  (`RUST_LOG=cachecannon=debug`), since at a sub-second cadence they were
+  several info lines a second. The `append stream configured` line at startup
+  now says which level they use.
+
 ### Fixed
 - `schedule_slip` no longer reads milliseconds at low connection counts while
   the configured rate is being delivered in full (#174). The token dispatcher
