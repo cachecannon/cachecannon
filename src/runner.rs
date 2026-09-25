@@ -222,6 +222,11 @@ pub fn run_benchmark_full(
             every = ?a.every,
             pace = ?a.pace,
             connections = a.connections,
+            per_batch_log = if a.every >= APPEND_INFO_LOG_MIN_INTERVAL {
+                "info"
+            } else {
+                "debug"
+            },
             "append stream configured"
         );
     }
@@ -395,6 +400,11 @@ pub fn run_benchmark_full(
     let mut append_next_at: Option<Instant> = None;
     let mut append_batch_open = false;
     let mut append_batches_committed: u64 = 0;
+    // Per-batch open/commit lines go to info only when batches are far enough
+    // apart to read; at a sub-second cadence they were several lines a second.
+    let append_log_info = append_cfg
+        .as_ref()
+        .is_some_and(|a| a.every >= APPEND_INFO_LOG_MIN_INTERVAL);
 
     // Track when warmup actually starts (after prefill completes)
     let mut warmup_start: Option<Instant> = None;
@@ -698,11 +708,19 @@ pub fn run_benchmark_full(
                     head.store(append_next_id, std::sync::atomic::Ordering::Release);
                     metrics::APPEND_HEAD.set(append_next_id as i64);
                     metrics::APPEND_BATCHES.set(append_batches_committed as i64);
-                    tracing::info!(
-                        batch = append_batches_committed,
-                        head = append_next_id,
-                        "append batch committed"
-                    );
+                    if append_log_info {
+                        tracing::info!(
+                            batch = append_batches_committed,
+                            head = append_next_id,
+                            "append batch committed"
+                        );
+                    } else {
+                        tracing::debug!(
+                            batch = append_batches_committed,
+                            head = append_next_id,
+                            "append batch committed"
+                        );
+                    }
                 }
             } else if Instant::now() >= next_at {
                 let start = append_next_id;
@@ -727,12 +745,21 @@ pub fn run_benchmark_full(
                 }
                 // Schedule from the nominal time so cadence does not drift.
                 append_next_at = Some(next_at + append.every);
-                tracing::info!(
-                    batch = append_batches_committed + 1,
-                    first_id = start,
-                    count = append.batch,
-                    "append batch opened"
-                );
+                if append_log_info {
+                    tracing::info!(
+                        batch = append_batches_committed + 1,
+                        first_id = start,
+                        count = append.batch,
+                        "append batch opened"
+                    );
+                } else {
+                    tracing::debug!(
+                        batch = append_batches_committed + 1,
+                        first_id = start,
+                        count = append.batch,
+                        "append batch opened"
+                    );
+                }
             }
         }
 
@@ -1195,6 +1222,10 @@ fn standalone_task_capacity(total_connections: usize, num_threads: usize) -> u32
 /// Sizing only the task slab moved the ceiling from a silent cap at 2040
 /// connections to a hard abort at 4096, which is how this was found.
 ///
+/// Shortest append interval at which the per-batch open/commit lines are
+/// logged at info. Below it they are logged at debug.
+const APPEND_INFO_LOG_MIN_INTERVAL: Duration = Duration::from_secs(10);
+
 /// Allows two concurrent timers per connection. A connection can hold a request
 /// timeout and a retry sleep across its lifecycle, and timer slots are small
 /// enough that the margin costs nothing next to being one short.
