@@ -18,6 +18,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Workers are staggered across one claim interval, so separate limiters do not
   fund their claims at the same instant and hit the server in synchronised
   bursts.
+- `schedule_slip` counts only the tokens a worker holds beyond one claim (one
+  batch): the time since its next claim became fundable. Tokens short of a
+  claim cannot be sent yet and are no longer reported as slip. Earlier
+  versions rounded the limiter's holdings down to whole requests, which hid
+  fractions of a request at pipeline 1 but counted up to a batch of unspent
+  tokens at higher pipeline depths.
   `schedule_slip` is unaffected. Measured locally at 64 connections,
   pipeline 1 and 8 threads, with the rate delivered in full and no slip in
   either build: generator CPU for a 14 s run went from 15.5-16.4 s to 5.4-5.5 s

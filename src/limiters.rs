@@ -36,12 +36,14 @@ const SUB: u64 = 1024;
 /// request so its phase can be offset by a fraction of a claim.
 pub struct WorkerLimiter {
     inner: Ratelimiter,
+    /// Size of one claim in sub-units: the batch every claim asks for.
+    claim: u64,
 }
 
 impl WorkerLimiter {
     /// `rate` requests per `period`, holding at most `burst` requests plus
-    /// `stagger` sub-units, and starting full.
-    fn build(rate: u64, period: Duration, burst: u64, stagger: u64) -> Self {
+    /// `stagger` sub-units, and starting full. Claims are `claim` requests.
+    fn build(rate: u64, period: Duration, burst: u64, stagger: u64, claim: u64) -> Self {
         let cap = burst.saturating_mul(SUB).saturating_add(stagger);
         let inner = Ratelimiter::builder(rate.saturating_mul(SUB))
             .period(period)
@@ -49,12 +51,16 @@ impl WorkerLimiter {
             .initial_available(cap)
             .build()
             .expect("failed to build worker rate limiter");
-        Self { inner }
+        Self {
+            inner,
+            claim: claim.max(1).saturating_mul(SUB),
+        }
     }
 
-    /// A limiter at `rate` requests per second holding `burst`, unstaggered.
+    /// A limiter at `rate` requests per second holding `burst`, unstaggered,
+    /// with one-request claims.
     pub fn per_second(rate: u64, burst: u64) -> Self {
-        Self::build(rate, Duration::from_secs(1), burst, 0)
+        Self::build(rate, Duration::from_secs(1), burst, 0, 1)
     }
 
     /// Take `n` requests' worth of tokens, or report how long until they are
@@ -72,16 +78,21 @@ impl WorkerLimiter {
         self.inner.max_tokens() / SUB
     }
 
-    /// How far behind its schedule this worker is: unspent tokens times the
-    /// time each represents. The units cancel, and `rate` is per `period`,
-    /// which is not a second for a per-worker limiter.
+    /// How far behind its schedule this worker is: the time since its next
+    /// claim became fundable, `(available - claim) / rate`, or zero while it
+    /// holds less than a claim. Tokens short of a claim cannot be spent yet, so
+    /// they are not lag; counting them would report the worker's position
+    /// within the claim interval (which the stagger deliberately varies) as
+    /// slip. The units cancel, and `rate` is per `period`, which is not a
+    /// second for a per-worker limiter.
     pub fn slip_ns(&self) -> u64 {
         let rate = self.inner.rate();
         if rate == 0 {
             return 0;
         }
-        ((self.inner.available() as u128) * self.inner.period().as_nanos() / rate as u128)
-            .min(u64::MAX as u128) as u64
+        let behind = self.inner.available().saturating_sub(self.claim);
+        ((behind as u128) * self.inner.period().as_nanos() / rate as u128).min(u64::MAX as u128)
+            as u64
     }
 
     /// Requests' worth of tokens dropped for exceeding the cap.
@@ -144,6 +155,7 @@ impl WorkerLimiters {
                     period,
                     burst,
                     stagger,
+                    claim,
                 )))
             })
             .collect();
@@ -288,9 +300,22 @@ mod tests {
     #[test]
     fn slip_accounts_for_the_period() {
         // One worker at 1000/s expressed as 8000 per 8 s, full at 125
-        // requests: 125 unspent requests are 125 ms of schedule.
-        let rl = WorkerLimiter::build(8000, Duration::from_secs(8), 125, 0);
+        // requests with 5-request claims: 120 requests beyond the next claim
+        // are 120 ms of schedule.
+        let rl = WorkerLimiter::build(8000, Duration::from_secs(8), 125, 0, 5);
         let slip = rl.slip_ns();
-        assert!((125_000_000..=126_000_000).contains(&slip), "slip {slip}");
+        assert!((120_000_000..=121_000_000).contains(&slip), "slip {slip}");
+    }
+
+    #[test]
+    fn less_than_a_claim_is_not_slip() {
+        // Drained to below one claim, a worker holds only a fraction of its
+        // next claim; nothing is fundable, so nothing is late.
+        let l = WorkerLimiters::new(800, &[1; 8], 4);
+        for i in 0..8 {
+            let rl = l.worker(i).unwrap();
+            while rl.try_wait_n(4).is_ok() {}
+            assert_eq!(rl.slip_ns(), 0, "worker {i}");
+        }
     }
 }
