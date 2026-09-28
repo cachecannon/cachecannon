@@ -903,6 +903,38 @@ host's `thread_siblings_list` before writing one. Where every worker reads 1.00
 the clustering check cannot distinguish placements either, so it is moot there
 too.
 
+### Server stalls from pinning with no spare cores
+
+A server pinned to exactly as many cores as it runs busy threads has no room
+for anything else on those cores, and the tail shows it. Measured against Valkey
+9.0.1 with `--io-threads 8` pinned to 8 cores, at 64 connections, pipeline 1 and
+100K req/s:
+
+- Valkey's io-threads spin while waiting for work, so all 8 cores stay busy.
+- Whenever another task needs one of those cores (kernel softirq, a metrics
+  agent, a packet capture), a Valkey thread is preempted for a scheduler slice,
+  measured at up to 7 ms.
+- The main thread waits on every io-thread each cycle, so one preempted thread
+  stalls every client at once. Server-side packet captures show 5-8 ms stalls
+  hitting all connections together.
+
+How often this happens depends on the arrival pattern. Requests that arrive on
+schedule keep Valkey's main thread busy, which removes the last idle time on
+those cores; bursty arrivals leave gaps that absorb the preemption. So an
+open-loop client that keeps its schedule (cachecannon 0.0.27 and later) reads a
+higher p999 from such a server than one that sends in bursts: 6.3-6.9 ms
+against 2.4-3.2 ms from 0.0.26 in the run above, with memtier_benchmark in
+between.
+
+With the same 8 threads pinned to 12 cores, the stalls go away and p999 is
+0.4-0.7 ms for all three clients. memcached with 8 threads on 8 cores showed no
+such stalls.
+
+If a server's tail looks worse than expected, check its thread count against its
+pinned cores before blaming the client or the network. Leave spare cores beyond
+the server's busy threads, or report the tail as a property of that
+configuration.
+
 ### High Latency Variance
 
 
