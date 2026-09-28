@@ -15,6 +15,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   dispatcher now sleeps until its own next token and is woken only by its own
   claims. A worker's share is expressed exactly as `rate * conns` tokens per
   `total_conns` seconds, so shares below one token a second stay limited.
+  Workers are staggered across one claim interval, so separate limiters do not
+  fund their claims at the same instant and hit the server in synchronised
+  bursts.
   `schedule_slip` is unaffected. Measured locally at 64 connections,
   pipeline 1 and 8 threads, with the rate delivered in full and no slip in
   either build: generator CPU for a 14 s run went from 15.5-16.4 s to 5.4-5.5 s
