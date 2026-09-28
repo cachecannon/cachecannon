@@ -17,19 +17,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `total_conns` seconds, so shares below one token a second stay limited.
   Workers are staggered across one claim interval, so separate limiters do not
   fund their claims at the same instant and hit the server in synchronised
-  bursts.
+  bursts. The saturation search now holds the set of per-worker limiters
+  (`SaturationSearchState::new` takes an `Arc<WorkerLimiters>`).
+
+  Measured on the rack against Valkey 9.0.1 (8 threads on 12 cores), two runs
+  per build, 0.0.27 against this change: generator cycles fell 43-47% and
+  io_uring syscalls 59-68% (64 connections, pipeline 1, 17.1K req/s: 4.7 to
+  2.5 Gcycles/s; 4096 connections, pipeline 32, 300K: 4.5 to 2.4). GET p99
+  moved within about 12% either way: 651 to 610-618 us at 2048 connections,
+  pipeline 32, 100K; 335 to 333-411 us at 64 connections, pipeline 1, 17.1K;
+  409-413 to 423-516 us at 4096 connections, pipeline 32, 300K. The server's own
+  p99 moved by similar amounts. A likely cause of the increases is that a
+  worker can no longer spend another worker's tokens when its own connections
+  are all busy; that has not been verified.
+
 - `schedule_slip` counts only the tokens a worker holds beyond one claim (one
   batch): the time since its next claim became fundable. Tokens short of a
   claim cannot be sent yet and are no longer reported as slip. Earlier
   versions rounded the limiter's holdings down to whole requests, which hid
   fractions of a request at pipeline 1 but counted up to a batch of unspent
-  tokens at higher pipeline depths.
-  `schedule_slip` is unaffected. Measured locally at 64 connections,
-  pipeline 1 and 8 threads, with the rate delivered in full and no slip in
-  either build: generator CPU for a 14 s run went from 15.5-16.4 s to 5.4-5.5 s
-  at 17.1K req/s, and from 29.6 s to 8.8-9.3 s at 40K. The saturation search
-  now holds the set of per-worker limiters (`SaturationSearchState::new` takes
-  an `Arc<WorkerLimiters>`).
+  tokens at higher pipeline depths: at pipeline 32, 0.0.27 reported 80-100 us
+  of slip p999 with the rate delivered in full, and this change reports 0.
 
 ## [0.0.27] - 2026-09-28
 
