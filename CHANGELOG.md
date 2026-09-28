@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.27] - 2026-09-28
+
 ### Changed
 - The append stream's per-batch `append batch opened` / `append batch
   committed` lines are logged at info only when `append.every` is at least
@@ -27,6 +29,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   percentiles could stop climbing with the server nowhere near its limit. The
   requests were also sent in bursts rather than on schedule. Queuing a claim
   now wakes an idle dispatcher.
+
+  Requests now go out on schedule rather than in bursts, which changes how
+  some servers respond. Against Valkey 9.0.1 configured with as many
+  io-threads as cores it is pinned to (8 on 8), p999 at high rates can read
+  higher than with 0.0.26: at 64 connections, pipeline 1 and 100K req/s,
+  server-side p999 went from 2.4-3.2 ms to 6.3-6.9 ms. Server-side packet
+  captures and scheduler traces show Valkey's threads occupying every pinned
+  core and being preempted by other tasks for up to 7 ms; on-schedule arrivals
+  keep the main thread busy and leave no slack, where bursts did.
+  memtier_benchmark sees the same stalls. With four spare cores (8 threads on
+  12 cores) they go away and p999 is 0.4-0.7 ms for all clients tested.
+  memcached is unaffected. Generator CPU is also higher at high rates; that is
+  tracked in #183.
 
 ## [0.0.26] - 2026-09-23
 
