@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.28] - 2026-09-28
+
 ### Changed
 - Each worker now has its own rate limiter at its connection share of the rate,
   instead of all workers drawing on one shared limiter (#183). Since 0.0.27
