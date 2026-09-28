@@ -10,6 +10,7 @@ use crate::client::{RequestResult, RequestType};
 use crate::config::TimestampMode;
 use crate::config::{Config, Protocol as CacheProtocol};
 use crate::keydist::KeyDist;
+use crate::limiters::WorkerLimiter;
 use crate::metrics;
 use ratelimit::{Ratelimiter, TryWaitError};
 
@@ -226,7 +227,7 @@ pub struct BenchWorkerConfig {
     pub id: usize,
     pub config: Config,
     pub shared: Arc<SharedState>,
-    pub ratelimiter: Option<Arc<Ratelimiter>>,
+    pub ratelimiter: Option<Arc<WorkerLimiter>>,
     /// Whether to record metrics (only true during Running phase)
     pub recording: bool,
     /// Shared per-endpoint prefill queues (full keyspace, built once by the
@@ -372,8 +373,10 @@ impl TokenSlot {
     }
 }
 
-/// Worker-local dispatcher between the shared `Ratelimiter` and this worker's
-/// connection tasks.
+/// Worker-local dispatcher between this worker's `Ratelimiter` and its
+/// connection tasks. Each worker has its own limiter at its connection share of
+/// the rate (`crate::limiters`), so dispatchers do not race each other for
+/// tokens.
 ///
 /// Connections used to poll the limiter individually. That made the wakeup rate
 /// `connections / sleep`, and since offered-load smoothness is *also*
@@ -442,7 +445,7 @@ impl TokenDispatcher {
     /// Returns how long to wait before trying again: `None` when the queue is
     /// empty, otherwise the limiter's own estimate of when the head becomes
     /// fundable.
-    fn dispatch(&self, rl: &Ratelimiter) -> Option<Duration> {
+    fn dispatch(&self, rl: &WorkerLimiter) -> Option<Duration> {
         loop {
             let slot = self.queue.borrow_mut().pop_front()?;
             let want = slot.want.min(rl.max_tokens()).max(1);
@@ -516,7 +519,7 @@ fn dispatcher() -> Option<Rc<TokenDispatcher>> {
 /// Run this worker's dispatcher until the run stops.
 async fn run_dispatcher(
     dispatch: Rc<TokenDispatcher>,
-    rl: Arc<Ratelimiter>,
+    rl: Arc<WorkerLimiter>,
     shared: Arc<SharedState>,
 ) {
     loop {
@@ -611,7 +614,7 @@ impl PrefillQueues {
 struct TaskSharedState {
     config: Config,
     shared: Arc<SharedState>,
-    ratelimiter: Option<Arc<Ratelimiter>>,
+    ratelimiter: Option<Arc<WorkerLimiter>>,
     value_pool: Arc<Vec<u8>>,
     endpoints: Vec<SocketAddr>,
     ring: ketama::Ring,
@@ -1378,7 +1381,7 @@ async fn drive_resp_workload(
             // limiter backlog) so each sent request can be charged a sample
             // and the result callback can compute perceived latency.
             let slip_ns = match state.task_state.ratelimiter {
-                Some(ref rl) => crate::metrics::slip_ns(rl.available(), rl.rate()),
+                Some(ref rl) => rl.slip_ns(),
                 None => 0,
             };
             crate::metrics::CURRENT_SLIP_NS.set(slip_ns as i64);
@@ -1503,8 +1506,7 @@ async fn drive_resp_workload(
         // is full and we did not fire) so perceived latency reflects a still-
         // growing backlog.
         if let Some(ref rl) = state.task_state.ratelimiter {
-            crate::metrics::CURRENT_SLIP_NS
-                .set(crate::metrics::slip_ns(rl.available(), rl.rate()) as i64);
+            crate::metrics::CURRENT_SLIP_NS.set(rl.slip_ns() as i64);
         }
 
         // Nothing in flight. If the limiter just turned this connection away,
@@ -2027,7 +2029,7 @@ async fn drive_memcache_workload(
             };
 
             let slip_ns = match state.task_state.ratelimiter {
-                Some(ref rl) => crate::metrics::slip_ns(rl.available(), rl.rate()),
+                Some(ref rl) => rl.slip_ns(),
                 None => 0,
             };
             crate::metrics::CURRENT_SLIP_NS.set(slip_ns as i64);
@@ -2107,8 +2109,7 @@ async fn drive_memcache_workload(
         }
 
         if let Some(ref rl) = state.task_state.ratelimiter {
-            crate::metrics::CURRENT_SLIP_NS
-                .set(crate::metrics::slip_ns(rl.available(), rl.rate()) as i64);
+            crate::metrics::CURRENT_SLIP_NS.set(rl.slip_ns() as i64);
         }
 
         // Nothing in flight. If the limiter just turned this connection away,
@@ -2427,7 +2428,7 @@ async fn drive_ping_workload(
         }
 
         let slip_ns = match state.task_state.ratelimiter {
-            Some(ref rl) => crate::metrics::slip_ns(rl.available(), rl.rate()),
+            Some(ref rl) => rl.slip_ns(),
             None => 0,
         };
         crate::metrics::CURRENT_SLIP_NS.set(slip_ns as i64);
@@ -2495,7 +2496,11 @@ fn confirm_prefill_key(state: &Arc<SharedWorkerState>) {
 /// Split `total` connections across `num_threads` workers the same way
 /// `spawn_protocol_tasks` does, returning this worker's share and the global
 /// index of its first connection.
-fn connection_share(total: usize, num_threads: usize, worker_id: usize) -> (usize, usize) {
+pub(crate) fn connection_share(
+    total: usize,
+    num_threads: usize,
+    worker_id: usize,
+) -> (usize, usize) {
     let num_threads = num_threads.max(1);
     let base = total / num_threads;
     let rem = total % num_threads;
@@ -3457,12 +3462,8 @@ mod tests {
         slot
     }
 
-    fn limiter(rate: u64) -> Ratelimiter {
-        Ratelimiter::builder(rate)
-            .max_tokens(rate.max(1))
-            .initial_available(rate)
-            .build()
-            .expect("limiter")
+    fn limiter(rate: u64) -> WorkerLimiter {
+        WorkerLimiter::per_second(rate, rate.max(1))
     }
 
     #[test]
@@ -3568,11 +3569,7 @@ mod tests {
         // rather than left at the head, and its wait returns 0.
         let d = TokenDispatcher::default();
         let slot = queued(&d, 1);
-        let rl = Ratelimiter::builder(100)
-            .max_tokens(1)
-            .initial_available(0)
-            .build()
-            .expect("limiter");
+        let rl = WorkerLimiter::per_second(100, 1);
         rl.set_max_tokens(0);
         assert!(d.dispatch(&rl).is_none(), "released, queue empty");
         assert!(wait_is_ready(&slot));

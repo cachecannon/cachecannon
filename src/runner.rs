@@ -2,6 +2,7 @@
 use crate::config::TimestampMode;
 use crate::config::{Config, Protocol as CacheProtocol};
 use crate::keydist::KeyDist;
+use crate::limiters::WorkerLimiters;
 use crate::metrics;
 use crate::output::{PrefillDiagnostics, PrefillSample, PrefillStallCause};
 use crate::saturation::SaturationSearchState;
@@ -111,17 +112,20 @@ pub fn run_benchmark_full(
         config.workload.rate_limit.unwrap_or(0)
     };
 
+    // One limiter per worker, each at its connection share of the rate; see
+    // `crate::limiters`. Burst capacity holds at least a full batch so
+    // try_wait_n(batch_size) in the worker fire loops never deadlocks under
+    // very low rates.
     let ratelimiter = if initial_rate > 0 || config.workload.saturation_search.is_some() {
-        // Ensure max_tokens can hold a full batch so try_wait_n(batch_size)
-        // in the worker fire loops never deadlocks under very low rates.
-        let max_tokens = initial_rate.max(config.connection.effective_batch_size() as u64);
-        Some(Arc::new(
-            Ratelimiter::builder(initial_rate)
-                .initial_available(initial_rate)
-                .max_tokens(max_tokens)
-                .build()
-                .expect("failed to build ratelimiter"),
-        ))
+        let total_conns = config.connection.total_connections();
+        let conns: Vec<usize> = (0..num_threads)
+            .map(|id| crate::worker::connection_share(total_conns, num_threads, id).0)
+            .collect();
+        Some(Arc::new(WorkerLimiters::new(
+            initial_rate,
+            &conns,
+            config.connection.effective_batch_size() as u64,
+        )))
     } else {
         None
     };
@@ -255,7 +259,7 @@ pub fn run_benchmark_full(
                 id,
                 config: config.clone(),
                 shared: Arc::clone(&shared),
-                ratelimiter: ratelimiter.clone(),
+                ratelimiter: ratelimiter.as_ref().and_then(|l| l.worker(id)),
                 recording: false,
                 prefill_queues: Arc::clone(&prefill_queues),
                 append_queues: Arc::clone(&append_queues),

@@ -348,7 +348,9 @@ read a result.
 
     response_latency   fire to reply. What the server did.
     schedule_slip      how far behind its own schedule the generator was,
-                       measured as unspent rate-limiter tokens divided by rate.
+                       measured as the rate-limiter tokens beyond one claim
+                       (one batch) divided by rate; less than a claim cannot
+                       be sent yet, so it is not counted.
     perceived_latency  response_latency + schedule_slip. What a client that
                        wanted to send at the target rate experienced.
 

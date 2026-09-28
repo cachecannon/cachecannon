@@ -518,7 +518,7 @@ Each snapshot contains the full set of metrics. The file uses the metriken expos
 | `delete_latency` | DELETE response latency |
 | `get_ttfb` | GET time-to-first-byte. **Only populated with `[timestamps] mode = "software"`** (Linux), where it is computed from the same kernel timestamp as `get_latency` and equals it; absent from the snapshot otherwise |
 | `backfill_set_latency` | Backfill SET latency |
-| `schedule_slip` | Queueing the latency clock omits: unspent rate-limiter tokens divided by rate. Zero without a rate limit |
+| `schedule_slip` | Queueing the latency clock omits: rate-limiter tokens beyond one claim (one batch), divided by rate, per worker. Zero without a rate limit |
 | `perceived_latency` | `response_latency + schedule_slip`. What a client issuing at the target rate experienced |
 
 ### Programmatic Analysis
