@@ -4,6 +4,7 @@ pub mod client;
 pub mod cluster;
 pub mod config;
 pub mod keydist;
+pub mod limiters;
 pub mod metrics;
 pub mod output;
 pub mod runner;

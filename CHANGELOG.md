@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- Each worker now has its own rate limiter at its connection share of the rate,
+  instead of all workers drawing on one shared limiter (#183). Since 0.0.27
+  every worker's token dispatcher woke for every token of the shared limiter:
+  one funded a claim and the rest found the bucket empty and slept again. A
+  dispatcher now sleeps until its own next token and is woken only by its own
+  claims. A worker's share is expressed exactly as `rate * conns` tokens per
+  `total_conns` seconds, so shares below one token a second stay limited.
+  `schedule_slip` is unaffected. Measured locally at 64 connections,
+  pipeline 1 and 8 threads, with the rate delivered in full and no slip in
+  either build: generator CPU for a 14 s run went from 15.5-16.4 s to 5.4-5.5 s
+  at 17.1K req/s, and from 29.6 s to 8.8-9.3 s at 40K. The saturation search
+  now holds the set of per-worker limiters (`SaturationSearchState::new` takes
+  an `Arc<WorkerLimiters>`).
+
 ## [0.0.27] - 2026-09-28
 
 ### Changed

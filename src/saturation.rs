@@ -4,9 +4,9 @@
 //! maximum throughput while maintaining SLO compliance.
 
 use crate::config::SaturationSearch;
+use crate::limiters::WorkerLimiters;
 use crate::metrics;
 use crate::output::{OutputFormatter, SaturationResults, SaturationStep};
-use ratelimit::Ratelimiter;
 
 use metriken::histogram::Histogram;
 use std::sync::Arc;
@@ -17,7 +17,7 @@ pub struct SaturationSearchState {
     /// Configuration for the search.
     config: SaturationSearch,
     /// Dynamic rate limiter (shared with workers).
-    ratelimiter: Arc<Ratelimiter>,
+    ratelimiter: Arc<WorkerLimiters>,
 
     /// Current target rate.
     current_rate: u64,
@@ -248,7 +248,7 @@ impl RateSearch {
 
 impl SaturationSearchState {
     /// Create a new saturation search state.
-    pub fn new(config: SaturationSearch, ratelimiter: Arc<Ratelimiter>) -> Self {
+    pub fn new(config: SaturationSearch, ratelimiter: Arc<WorkerLimiters>) -> Self {
         let start_rate = config.start_rate;
 
         // Set initial rate
@@ -640,12 +640,7 @@ mod tests {
             max_bisect_steps: 8,
         };
 
-        let rl = Arc::new(
-            Ratelimiter::builder(1000)
-                .initial_available(1000)
-                .build()
-                .unwrap(),
-        );
+        let rl = Arc::new(WorkerLimiters::new(1000, &[1], 1));
         let state = SaturationSearchState::new(config, rl);
 
         // Under thresholds - should pass
