@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- Requires ringline 0.6.8 (was 0.6.2), picking up the io_uring fixes in
+  ringline 0.6.4 through 0.6.8. Those that apply to cachecannon's use of
+  ringline: a zero-copy send notification is expected whenever the send's
+  completion carries `IORING_CQE_F_MORE`, so a late notification no longer
+  releases a send-slab entry the kernel may still hold; a copied send larger
+  than one send-pool slot is admitted whole or not at all, instead of sending
+  a prefix and failing; a send that cannot be pushed on a full submission
+  queue is retried instead of dropped; and a multishot recv completion for a
+  closed connection is no longer attributed to the next connection in its
+  slot. The changes to `forward_held`, send chains and segmented recv do not
+  affect cachecannon, which uses none of them.
+
 ## [0.0.28] - 2026-09-28
 
 ### Changed
