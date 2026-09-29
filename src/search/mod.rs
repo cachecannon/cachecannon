@@ -120,7 +120,7 @@ struct SearchHandler {
 
 impl ringline::AsyncEventHandler for SearchHandler {
     #[allow(clippy::manual_async_fn)]
-    fn on_accept(&self, _conn: ringline::ConnCtx) -> impl Future<Output = ()> + 'static {
+    fn on_accept(&self, _conn: ringline::Connection) -> impl Future<Output = ()> + 'static {
         // Client-only: no accepts expected.
         async {}
     }

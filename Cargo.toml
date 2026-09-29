@@ -179,3 +179,11 @@ debug = true
 # two versions cannot coexist), so `dump_msgpack_fixture` writes the bytes for
 # an out-of-tree decode and this dep covers the in-graph half.
 rmp-serde = "1"
+
+# Build against unreleased ringline main. Pinned to a commit so builds are
+# reproducible; drop this section once the next ringline release is on crates.io.
+[patch.crates-io]
+ringline = { git = "https://github.com/ringline-rs/ringline", rev = "0a536e0" }
+ringline-redis = { git = "https://github.com/ringline-rs/ringline", rev = "0a536e0" }
+ringline-memcache = { git = "https://github.com/ringline-rs/ringline", rev = "0a536e0" }
+ringline-ping = { git = "https://github.com/ringline-rs/ringline", rev = "0a536e0" }
