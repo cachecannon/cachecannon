@@ -54,7 +54,7 @@ ctrlc = { version = "3", features = ["termination"] }
 # completions for as long as any task stayed runnable (under DEFER_TASKRUN
 # neither the non-blocking submit nor the skipped flush set GETEVENTS), so no
 # send-pool slots were recycled and a wait-for-capacity loop never woke.
-ringline = "0.6.2"
+ringline = "0.7.0-alpha.0"
 
 # Consistent hashing
 ketama = "0.0.1"
@@ -106,7 +106,7 @@ rand_distr = "0.5"
 
 # Kernel SO_TIMESTAMPING support is Linux-only.
 [target.'cfg(target_os = "linux")'.dependencies]
-ringline = { version = "0.6.2", features = ["timestamps"] }
+ringline = { version = "0.7.0-alpha.0", features = ["timestamps"] }
 ringline-redis = { version = "0.7.0", features = ["timestamps"] }
 ringline-memcache = { version = "0.7.1", features = ["timestamps"] }
 ringline-ping = { version = "0.6.0", features = ["timestamps"] }
@@ -182,8 +182,12 @@ rmp-serde = "1"
 
 # Build against unreleased ringline main. Pinned to a commit so builds are
 # reproducible; drop this section once the next ringline release is on crates.io.
+# ringline main carries 0.7.0-alpha.0, so the `ringline` requirements above must
+# be `0.7.0-alpha.0` for this patch to apply: a `0.6.x` requirement does not
+# match a 0.7 pre-release, and cargo then builds a second ringline from
+# crates.io alongside the patched one the client crates use.
 [patch.crates-io]
-ringline = { git = "https://github.com/ringline-rs/ringline", rev = "0a536e0" }
-ringline-redis = { git = "https://github.com/ringline-rs/ringline", rev = "0a536e0" }
-ringline-memcache = { git = "https://github.com/ringline-rs/ringline", rev = "0a536e0" }
-ringline-ping = { git = "https://github.com/ringline-rs/ringline", rev = "0a536e0" }
+ringline = { git = "https://github.com/ringline-rs/ringline", rev = "1be7049" }
+ringline-redis = { git = "https://github.com/ringline-rs/ringline", rev = "1be7049" }
+ringline-memcache = { git = "https://github.com/ringline-rs/ringline", rev = "1be7049" }
+ringline-ping = { git = "https://github.com/ringline-rs/ringline", rev = "1be7049" }
