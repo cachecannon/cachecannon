@@ -1,9 +1,15 @@
 ---
 name: release
-description: Create a release PR with version bump, then tag after merge
+description: Create a release PR with version bump on main or a release branch; CI tags it after merge
 ---
 
-Create a release PR that bumps the version. After the PR is merged, tag the release to trigger the release workflow which builds and publishes packages.
+Create a release PR that bumps the version. After the PR is merged, `tag-release.yml` tags the merge commit (which triggers `release.yml` to build and publish packages) and opens the post-release version bump PR.
+
+## Branching model
+
+- `main` is the development line. New minor and major releases are cut from it.
+- Each release line has a branch named `X.Y.x` (for example `0.0.x`), created at the line's first release tag. Patch releases for that line are cut from it, and fixes reach it by cherry-pick or backport PR.
+- Run this skill on `main` for a new minor/major release, or on an `X.Y.x` branch for a patch release on that line. The release PR targets the branch you started from.
 
 ## Arguments
 
@@ -15,25 +21,28 @@ The skill accepts a version level argument:
 
 Example: `/release minor`
 
+On an `X.Y.x` branch only `patch` (or an explicit `X.Y.Z` on that line) makes sense.
+
 ## Steps
 
 1. **Verify prerequisites**:
-   - Must be on `main` branch
-   - Working directory must be clean
-   - Must be up to date with origin/main
+   - On `main` or an `X.Y.x` release branch
+   - Working directory clean
+   - Up to date with the same branch on origin
 
    ```bash
    git fetch origin
-   if [ "$(git branch --show-current)" != "main" ]; then
-     echo "Error: Must be on main branch"
+   BASE=$(git branch --show-current)
+   if [ "$BASE" != "main" ] && ! echo "$BASE" | grep -Eq '^[0-9]+\.[0-9]+\.x$'; then
+     echo "Error: run on main or an X.Y.x release branch"
      exit 1
    fi
    if [ -n "$(git status --porcelain)" ]; then
      echo "Error: Working directory not clean"
      exit 1
    fi
-   if [ "$(git rev-parse HEAD)" != "$(git rev-parse origin/main)" ]; then
-     echo "Error: Not up to date with origin/main"
+   if [ "$(git rev-parse HEAD)" != "$(git rev-parse origin/$BASE)" ]; then
+     echo "Error: Not up to date with origin/$BASE"
      exit 1
    fi
    ```
@@ -46,8 +55,8 @@ Example: `/release minor`
    If checks fail, stop and report the errors.
 
 3. **Determine the new version**:
-   - Read the current version from `Cargo.toml` (root, single crate)
-   - Calculate the new version based on the level argument (patch/minor/major) or use the explicit version provided
+   - Read the current version from `Cargo.toml` (root, single crate). On a development line it carries an `-alpha.N` suffix; the release version drops it.
+   - Calculate the new version based on the level argument or use the explicit version provided. On an `X.Y.x` branch the result must stay on `X.Y`.
 
 4. **Create release branch**:
    ```bash
@@ -67,36 +76,31 @@ Example: `/release minor`
 
 7. **Commit changes**:
 
-   **CRITICAL**: The commit message MUST start with `release: v` for consistency.
+   **CRITICAL**: The commit message MUST start with `release: v`. `tag-release.yml` keys on it; any other prefix means no tag and no release.
 
    ```bash
    git add Cargo.toml Cargo.lock CHANGELOG.md
    git commit -m "release: v${NEW_VERSION}"
    ```
 
-8. **Push and create PR**:
+8. **Push and create PR** against the branch you started from:
    ```bash
    git push -u origin release/v${NEW_VERSION}
 
    gh pr create \
+     --base "$BASE" \
      --title "release: v${NEW_VERSION}" \
      --body "$(cat <<EOF
    ## Release v${NEW_VERSION}
 
-   This PR prepares the release of v${NEW_VERSION}.
+   This PR prepares the release of v${NEW_VERSION} from \`${BASE}\`.
 
    ### Changes
    - Version bump to ${NEW_VERSION}
    - Changelog update
 
    ### After Merge
-   After this PR is merged, run \`/release-tag\` or manually create and push the tag:
-   \`\`\`
-   git tag v${NEW_VERSION} <merge-commit-sha>
-   git push origin v${NEW_VERSION}
-   \`\`\`
-
-   This will trigger the release workflow to build and publish packages.
+   \`tag-release.yml\` tags the merge commit \`v${NEW_VERSION}\`, which triggers the release workflow, and opens the post-release bump PR against \`${BASE}\`.
    EOF
    )"
    ```
@@ -105,21 +109,29 @@ Example: `/release minor`
 
 ## After PR Merge
 
-After the PR is merged to main, a git tag must be created and pushed to trigger the `release.yml` workflow:
-```bash
-git checkout main
-git pull origin main
-git tag v${NEW_VERSION}
-git push origin v${NEW_VERSION}
-```
+Do **not** tag by hand. Squash-merging the PR produces a commit on `$BASE` titled `release: vX.Y.Z (#N)`, and `tag-release.yml` then:
 
-The release workflow will then:
-1. Build .deb and .rpm packages (amd64 + arm64)
-2. Sign packages with GPG
-3. Publish to APT and YUM S3 repositories
-4. Create a GitHub Release with artifacts
+1. Creates and pushes the annotated tag `vX.Y.Z`
+2. Opens `chore: bump to X.Y.(Z+1)-alpha.0` as a PR against `$BASE`
+
+A tag pushed by hand before the workflow runs makes it see an existing tag and skip step 2, so the branch is left on the release version with no development bump.
+
+The tag triggers `release.yml`, which:
+1. Builds .deb and .rpm packages (amd64 + arm64)
+2. Signs packages with GPG
+3. Publishes to APT and YUM S3 repositories
+4. Creates a GitHub Release with artifacts
+
+Then merge the bump PR once its checks pass.
+
+For a new minor or major release from `main`, create the release line's branch at the new tag once it exists:
+
+```bash
+git push origin vX.Y.0^{commit}:refs/heads/X.Y.x
+```
 
 ## Troubleshooting
 
 - **gh CLI not installed**: `brew install gh` or see https://cli.github.com/
 - **Not authenticated with gh**: `gh auth login`
+- **No tag after merge**: check the merge commit message starts with `release: v`, and that `tag-release.yml` triggers on this branch.
