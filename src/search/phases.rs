@@ -29,7 +29,9 @@ pub(super) async fn run_all(job: &'static Job) -> Result<RunReport, String> {
         .map_err(|e| format!("connect {}: {e}", job.endpoint))?
         .await
         .map_err(|e| format!("connect {}: {e:?}", job.endpoint))?;
-    let mut client = ringline_redis::Client::builder(conn).build();
+    let mut client = ringline_redis::Client::builder(conn)
+        .build()
+        .map_err(|e| format!("client {}: {e}", job.endpoint))?;
     client
         .ping()
         .await
@@ -382,7 +384,9 @@ async fn query_phase(
                 },
                 Err(e) => return Err(format!("connect {}: {e}", job.endpoint)),
             };
-            let mut client = ringline_redis::Client::builder(conn).build();
+            let mut client = ringline_redis::Client::builder(conn)
+                .build()
+                .map_err(|e| format!("client {}: {e}", job.endpoint))?;
             let ctx = QueryCtx::new(job);
             let mut latencies_ns: Vec<u64> = Vec::new();
             let mut recall_sum = 0.0f64;

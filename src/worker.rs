@@ -706,7 +706,7 @@ pub struct BenchHandler {
 
 impl AsyncEventHandler for BenchHandler {
     #[allow(clippy::manual_async_fn)]
-    fn on_accept(&self, _conn: ConnCtx) -> impl Future<Output = ()> + 'static {
+    fn on_accept(&self, _conn: ringline::Connection) -> impl Future<Output = ()> + 'static {
         // Benchmark is client-only, no accepts expected
         async {}
     }
@@ -1168,9 +1168,25 @@ async fn resp_connection_task(state: Arc<SharedWorkerState>, endpoint_idx: usize
         // without materializing it (zero-copy on io_uring, streaming-drain on
         // mio). `fire_*` is unchanged and metrics are identical (recorded by the
         // `on_result` callback above).
-        let mut client = builder
+        let mut client = match builder
             .max_batch_size(config.connection.effective_batch_size())
-            .build();
+            .build()
+        {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::debug!(
+                    worker = state.task_state.worker_id,
+                    endpoint = %endpoint,
+                    "RESP client setup failed: {}",
+                    e
+                );
+                conn.close();
+                metrics::CONNECTIONS_ACTIVE.decrement();
+                metrics::CONNECTIONS_FAILED.increment();
+                ringline::sleep(Duration::from_millis(100)).await;
+                continue;
+            }
+        };
         log_resp_recv_path_once();
 
         tracing::debug!(
@@ -1240,6 +1256,7 @@ async fn resp_connection_task(state: Arc<SharedWorkerState>, endpoint_idx: usize
 
         let result = drive_resp_workload(
             &mut client,
+            conn,
             &state,
             endpoint_idx,
             &mut rng,
@@ -1264,6 +1281,7 @@ async fn resp_connection_task(state: Arc<SharedWorkerState>, endpoint_idx: usize
 /// Drive the RESP workload on a connected client using fire/recv pipelining.
 async fn drive_resp_workload(
     client: &mut ringline_redis::Client,
+    conn: ConnCtx,
     state: &Arc<SharedWorkerState>,
     endpoint_idx: usize,
     rng: &mut Xoshiro256PlusPlus,
@@ -1537,7 +1555,6 @@ async fn drive_resp_workload(
         // value without materializing it: zero-copy over provided buffers on
         // io_uring, bounded streaming-drain on mio. One uniform call, no config
         // flag, no cfg split, no workload restriction.
-        let conn = client.conn();
         let result = match recv_with_timeout(client.recv_meta(), &mut inflight, conn).await {
             Ok(Ok(meta)) => map_respmeta(meta),
             Ok(Err(ringline_redis::Error::ConnectionClosed)) => {
@@ -1742,25 +1759,28 @@ fn check_resp_redirect_parsed(redirect: &resp_proto::Redirect, state: &Arc<Share
 /// loop serves both the ASCII and binary protocols. `Client` and `BinaryClient`
 /// expose the same fire/recv pipelining surface (only the ASCII client adds the
 /// high-level request API and `version()`), so each method here just forwards.
+/// The ASCII or binary client, plus the connection it was built on. The
+/// clients no longer hand out their `ConnCtx` (ringline keeps the read side
+/// exclusive), so the handle is kept here for closing and logging.
 enum McClient {
-    Ascii(ringline_memcache::Client),
-    Binary(ringline_memcache::BinaryClient),
+    Ascii(ringline_memcache::Client, ConnCtx),
+    Binary(ringline_memcache::BinaryClient, ConnCtx),
 }
 
 impl McClient {
     #[inline]
     fn pending_count(&self) -> usize {
         match self {
-            McClient::Ascii(c) => c.pending_count(),
-            McClient::Binary(c) => c.pending_count(),
+            McClient::Ascii(c, _) => c.pending_count(),
+            McClient::Binary(c, _) => c.pending_count(),
         }
     }
 
     #[inline]
     fn fire_get(&mut self, key: &[u8], user_data: u64) -> Result<(), ringline_memcache::Error> {
         match self {
-            McClient::Ascii(c) => c.fire_get(key, user_data),
-            McClient::Binary(c) => c.fire_get(key, user_data),
+            McClient::Ascii(c, _) => c.fire_get(key, user_data),
+            McClient::Binary(c, _) => c.fire_get(key, user_data),
         }
     }
 
@@ -1774,32 +1794,31 @@ impl McClient {
         user_data: u64,
     ) -> Result<(), ringline_memcache::Error> {
         match self {
-            McClient::Ascii(c) => c.fire_set_with_guard(key, guard, flags, exptime, user_data),
-            McClient::Binary(c) => c.fire_set_with_guard(key, guard, flags, exptime, user_data),
+            McClient::Ascii(c, _) => c.fire_set_with_guard(key, guard, flags, exptime, user_data),
+            McClient::Binary(c, _) => c.fire_set_with_guard(key, guard, flags, exptime, user_data),
         }
     }
 
     #[inline]
     fn fire_delete(&mut self, key: &[u8], user_data: u64) -> Result<(), ringline_memcache::Error> {
         match self {
-            McClient::Ascii(c) => c.fire_delete(key, user_data),
-            McClient::Binary(c) => c.fire_delete(key, user_data),
+            McClient::Ascii(c, _) => c.fire_delete(key, user_data),
+            McClient::Binary(c, _) => c.fire_delete(key, user_data),
         }
     }
 
     #[inline]
     async fn recv(&mut self) -> Result<ringline_memcache::CompletedOp, ringline_memcache::Error> {
         match self {
-            McClient::Ascii(c) => c.recv().await,
-            McClient::Binary(c) => c.recv().await,
+            McClient::Ascii(c, _) => c.recv().await,
+            McClient::Binary(c, _) => c.recv().await,
         }
     }
 
     #[inline]
     fn conn(&self) -> ConnCtx {
         match self {
-            McClient::Ascii(c) => c.conn(),
-            McClient::Binary(c) => c.conn(),
+            McClient::Ascii(_, conn) | McClient::Binary(_, conn) => *conn,
         }
     }
 }
@@ -1842,10 +1861,26 @@ async fn memcache_connection_task(state: Arc<SharedWorkerState>, endpoint_idx: u
         let builder =
             builder.kernel_timestamps(matches!(config.timestamps.mode, TimestampMode::Software));
         let binary = matches!(config.target.protocol, CacheProtocol::MemcacheBinary);
-        let mut client = if binary {
-            McClient::Binary(builder.build_binary())
+        let built = if binary {
+            builder.build_binary().map(|c| McClient::Binary(c, conn))
         } else {
-            McClient::Ascii(builder.build())
+            builder.build().map(|c| McClient::Ascii(c, conn))
+        };
+        let mut client = match built {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::debug!(
+                    worker = state.task_state.worker_id,
+                    endpoint = %endpoint,
+                    "Memcache client setup failed: {}",
+                    e
+                );
+                conn.close();
+                metrics::CONNECTIONS_ACTIVE.decrement();
+                metrics::CONNECTIONS_FAILED.increment();
+                ringline::sleep(Duration::from_millis(100)).await;
+                continue;
+            }
         };
 
         tracing::debug!(
@@ -1858,11 +1893,11 @@ async fn memcache_connection_task(state: Arc<SharedWorkerState>, endpoint_idx: u
         // Precheck: send VERSION to verify connectivity
         if state.task_state.shared.phase() == Phase::Precheck && !state.is_precheck_done() {
             let precheck = match &mut client {
-                McClient::Ascii(c) => c.version().await.map(|_| ()),
+                McClient::Ascii(c, _) => c.version().await.map(|_| ()),
                 // The binary subset has no VERSION opcode (some servers drop the
                 // connection on it) and BinaryClient exposes no version(); a live
                 // connection is a sufficient precheck.
-                McClient::Binary(_) => Ok(()),
+                McClient::Binary(..) => Ok(()),
             };
             match precheck {
                 Ok(_version) => {
@@ -2316,7 +2351,22 @@ async fn ping_connection_task(state: Arc<SharedWorkerState>, endpoint_idx: usize
         #[cfg(target_os = "linux")]
         let builder =
             builder.kernel_timestamps(matches!(config.timestamps.mode, TimestampMode::Software));
-        let mut client = builder.build();
+        let mut client = match builder.build() {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::debug!(
+                    worker = state.task_state.worker_id,
+                    endpoint = %endpoint,
+                    "Ping client setup failed: {}",
+                    e
+                );
+                conn.close();
+                metrics::CONNECTIONS_ACTIVE.decrement();
+                metrics::CONNECTIONS_FAILED.increment();
+                ringline::sleep(Duration::from_millis(100)).await;
+                continue;
+            }
+        };
 
         tracing::debug!(
             worker = state.task_state.worker_id,
@@ -2359,7 +2409,7 @@ async fn ping_connection_task(state: Arc<SharedWorkerState>, endpoint_idx: usize
             }
         }
 
-        let result = drive_ping_workload(&mut client, &state).await;
+        let result = drive_ping_workload(&mut client, conn, &state).await;
 
         metrics::CONNECTIONS_ACTIVE.decrement();
 
@@ -2377,6 +2427,7 @@ async fn ping_connection_task(state: Arc<SharedWorkerState>, endpoint_idx: usize
 /// Drive the Ping workload: send PING, parse PONG, repeat.
 async fn drive_ping_workload(
     client: &mut ringline_ping::Client,
+    conn: ConnCtx,
     state: &Arc<SharedWorkerState>,
 ) -> Result<(), DisconnectReason> {
     // One request in flight at a time on the ping path.
@@ -2436,7 +2487,6 @@ async fn drive_ping_workload(
         metrics::REQUESTS_SENT.increment();
         let _ = metrics::SCHEDULE_SLIP.increment(slip_ns);
         inflight.push(fired_at);
-        let conn = client.conn();
         match recv_with_timeout(client.ping(), &mut inflight, conn).await {
             Ok(Ok(())) => {}
             Ok(Err(ringline_ping::Error::ConnectionClosed)) => {
@@ -2684,7 +2734,22 @@ async fn resp_append_task(state: Arc<SharedWorkerState>, endpoint_idx: usize, se
         #[cfg(target_os = "linux")]
         let builder =
             builder.kernel_timestamps(matches!(config.timestamps.mode, TimestampMode::Software));
-        let mut client = builder.max_batch_size(append.pipeline_depth).build();
+        let mut client = match builder.max_batch_size(append.pipeline_depth).build() {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::debug!(
+                    worker = state.task_state.worker_id,
+                    endpoint = %endpoint,
+                    "RESP append writer client setup failed: {}",
+                    e
+                );
+                conn.close();
+                metrics::APPEND_CONNECTIONS_ACTIVE.decrement();
+                metrics::CONNECTIONS_FAILED.increment();
+                ringline::sleep(Duration::from_millis(100)).await;
+                continue;
+            }
+        };
 
         // Same RESP3 negotiation as the reader connections.
         if matches!(config.target.protocol, CacheProtocol::Resp3)
@@ -2711,8 +2776,15 @@ async fn resp_append_task(state: Arc<SharedWorkerState>, endpoint_idx: usize, se
             "connected (RESP, append writer)"
         );
 
-        let result =
-            drive_resp_append(&mut client, &state, endpoint_idx, &mut rng, &mut key_buf).await;
+        let result = drive_resp_append(
+            &mut client,
+            conn,
+            &state,
+            endpoint_idx,
+            &mut rng,
+            &mut key_buf,
+        )
+        .await;
 
         metrics::APPEND_CONNECTIONS_ACTIVE.decrement();
 
@@ -2728,6 +2800,7 @@ async fn resp_append_task(state: Arc<SharedWorkerState>, endpoint_idx: usize, se
 /// Drain the append queue for this endpoint on a connected RESP client.
 async fn drive_resp_append(
     client: &mut ringline_redis::Client,
+    conn: ConnCtx,
     state: &Arc<SharedWorkerState>,
     endpoint_idx: usize,
     rng: &mut Xoshiro256PlusPlus,
@@ -2798,7 +2871,6 @@ async fn drive_resp_append(
             continue;
         }
 
-        let conn = client.conn();
         let result = match recv_with_timeout(client.recv_meta(), &mut inflight, conn).await {
             Ok(Ok(meta)) => map_respmeta(meta),
             Ok(Err(ringline_redis::Error::ConnectionClosed)) => {
@@ -2876,10 +2948,26 @@ async fn memcache_append_task(state: Arc<SharedWorkerState>, endpoint_idx: usize
         let builder =
             builder.kernel_timestamps(matches!(config.timestamps.mode, TimestampMode::Software));
         let binary = matches!(config.target.protocol, CacheProtocol::MemcacheBinary);
-        let mut client = if binary {
-            McClient::Binary(builder.build_binary())
+        let built = if binary {
+            builder.build_binary().map(|c| McClient::Binary(c, conn))
         } else {
-            McClient::Ascii(builder.build())
+            builder.build().map(|c| McClient::Ascii(c, conn))
+        };
+        let mut client = match built {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::debug!(
+                    worker = state.task_state.worker_id,
+                    endpoint = %endpoint,
+                    "Memcache append writer client setup failed: {}",
+                    e
+                );
+                conn.close();
+                metrics::APPEND_CONNECTIONS_ACTIVE.decrement();
+                metrics::CONNECTIONS_FAILED.increment();
+                ringline::sleep(Duration::from_millis(100)).await;
+                continue;
+            }
         };
 
         tracing::debug!(

@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- Built against unreleased ringline main (ringline-rs/ringline `0a536e0`:
+  ringline 0.6.4, ringline-redis 0.7.0, ringline-memcache 0.7.2,
+  ringline-ping 0.6.0) through `[patch.crates-io]`, until those changes are
+  released. main is now the 0.1 development line; 0.0 patch releases come from
+  the `0.0.x` branch. Ringline's connection-handle redesign changes three
+  things here: handlers take an owned `ringline::Connection` in `on_accept`;
+  client construction is fallible, and a failure is counted and retried like a
+  failed connect; and clients no longer expose their `ConnCtx`, so cachecannon
+  keeps the one from `connect()` for closing on a request timeout and for
+  logging.
+
 ## [0.0.28] - 2026-09-28
 
 ### Changed
