@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.29] - 2026-09-29
+
 ### Changed
 - Requires ringline 0.6.8 (was 0.6.2), picking up the io_uring fixes in
   ringline 0.6.4 through 0.6.8. Those that apply to cachecannon's use of
