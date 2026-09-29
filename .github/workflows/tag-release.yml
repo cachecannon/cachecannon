@@ -2,7 +2,8 @@ name: Tag Release
 
 on:
   push:
-    branches: [main]
+    # main for new minor/major releases, X.Y.x for patch releases on a line.
+    branches: [main, '*.*.x']
 
 env:
   CARGO_TERM_COLOR: always
@@ -72,7 +73,7 @@ jobs:
           # Update all Cargo.toml files
           cargo release version "$NEXT_DEV" --execute --no-confirm
 
-          # Create a PR instead of pushing directly to main
+          # Open the bump PR against the branch the release landed on
           BRANCH="chore/bump-${NEXT_DEV}"
           git checkout -b "$BRANCH"
           git add -A
@@ -82,7 +83,7 @@ jobs:
           gh pr create \
             --title "chore: bump to ${NEXT_DEV}" \
             --body "Automated post-release version bump to ${NEXT_DEV}." \
-            --base main \
+            --base "${{ github.ref_name }}" \
             --head "$BRANCH"
         env:
           GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
