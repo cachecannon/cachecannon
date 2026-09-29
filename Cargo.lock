@@ -2059,8 +2059,8 @@ dependencies = [
 
 [[package]]
 name = "ringline"
-version = "0.6.4"
-source = "git+https://github.com/ringline-rs/ringline?rev=0a536e0#0a536e0e88b0099878bb60748940504a1c67809e"
+version = "0.7.0-alpha.0"
+source = "git+https://github.com/ringline-rs/ringline?rev=1be7049#1be70491636a559822fd44d2fefc9fb144758f35"
 dependencies = [
  "bytes",
  "crossbeam-channel",
@@ -2077,7 +2077,7 @@ dependencies = [
 [[package]]
 name = "ringline-memcache"
 version = "0.7.2"
-source = "git+https://github.com/ringline-rs/ringline?rev=0a536e0#0a536e0e88b0099878bb60748940504a1c67809e"
+source = "git+https://github.com/ringline-rs/ringline?rev=1be7049#1be70491636a559822fd44d2fefc9fb144758f35"
 dependencies = [
  "bytes",
  "histogram 0.11.5",
@@ -2092,7 +2092,7 @@ dependencies = [
 [[package]]
 name = "ringline-ping"
 version = "0.6.0"
-source = "git+https://github.com/ringline-rs/ringline?rev=0a536e0#0a536e0e88b0099878bb60748940504a1c67809e"
+source = "git+https://github.com/ringline-rs/ringline?rev=1be7049#1be70491636a559822fd44d2fefc9fb144758f35"
 dependencies = [
  "histogram 0.11.5",
  "libc",
@@ -2104,7 +2104,7 @@ dependencies = [
 [[package]]
 name = "ringline-redis"
 version = "0.7.0"
-source = "git+https://github.com/ringline-rs/ringline?rev=0a536e0#0a536e0e88b0099878bb60748940504a1c67809e"
+source = "git+https://github.com/ringline-rs/ringline?rev=1be7049#1be70491636a559822fd44d2fefc9fb144758f35"
 dependencies = [
  "bytes",
  "histogram 0.11.5",
