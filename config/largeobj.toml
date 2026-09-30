@@ -1,0 +1,49 @@
+# Server-initiated RMA against a valkeylargeobj server.
+#
+#   cargo build --release --features dma
+#   ./target/release/cachecannon config/largeobj.toml
+#
+# The server side:
+#
+#   valkey-server --loadmodule libvalkey_largeobj.so fabric-provider EfaDirect
+#
+# with `fabric-provider Emulated` for a host without EFA, which pairs with `provider = "tcp"` here.
+# Needs libfabric on the load host (on EFA instances: /opt/amazon/efa/lib64, plus its pkgconfig
+# directory on PKG_CONFIG_PATH).
+
+[general]
+duration = "60s"
+warmup = "10s"
+threads = 8
+
+[target]
+endpoints = ["172.31.17.61:6379"]
+protocol = "dma"
+
+[connection]
+# One transfer per connection, as for vdma; concurrency is the connection count.
+connections = 32
+pipeline_depth = 1
+
+[workload]
+prefill = true
+
+[workload.keyspace]
+count = 16
+
+[workload.values]
+length = 1048576
+
+[workload.commands]
+get = 80
+set = 20
+
+[dma]
+module = "largeobj"
+provider = "efa-direct"
+interfaces = []
+# Registered buffer per connection. Unset means the value length; the server refuses an object the
+# advertised length cannot hold.
+# buffer_capacity = 1048576
+# A largeobj write takes no checksum argument, so `true` is refused. Reads return a CRC-32c unasked.
+checksum = false

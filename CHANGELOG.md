@@ -33,6 +33,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `values_read_bytes` counter, which is 0 when the option is off.
   `docs/reference.md` "Reading values" lists the per-backend work and the
   timing, memory and error-handling differences.
+- `protocol = "dma"` (`--features dma`): RESP carries the commands and the
+  values transmit over libfabric, server-initiated. `[dma] module` picks the
+  server module dialect, `largeobj` (`LO.*`, the default) or `vdma`
+  (`DMA.*`). The fabric, buffers, and connection task are the same for both.
 
 ### Changed
 - metriken 0.9 → 0.11.3 (metriken-core 0.3), metriken-exposition 0.16 → 0.22,
