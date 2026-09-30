@@ -3,6 +3,8 @@ pub mod buffer;
 pub mod client;
 pub mod cluster;
 pub mod config;
+#[cfg(feature = "dma")]
+pub mod dma;
 pub mod keydist;
 pub mod limiters;
 pub mod metrics;

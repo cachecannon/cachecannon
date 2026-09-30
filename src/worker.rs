@@ -553,19 +553,30 @@ async fn run_dispatcher(
 /// Borrow a random `value_len`-byte slice of the value pool, for the
 /// copy-based `fire_set` path (the bytes are copied into the send pool
 /// synchronously, so the borrow only needs to outlive the fire call).
-fn value_slice<'a>(
+pub(crate) fn value_slice<'a>(
     rng: &mut Xoshiro256PlusPlus,
     value_pool: &'a Arc<Vec<u8>>,
     value_len: usize,
     pool_len: usize,
 ) -> &'a [u8] {
+    let offset = value_offset(rng, value_len, pool_len);
+    &value_pool[offset..offset + value_len]
+}
+
+/// Where in the pool the next value starts.
+///
+/// The DMA path needs the offset rather than the bytes: the pool is registered with the fabric, so
+/// a transfer advertises the window in place instead of copying it anywhere.
+pub(crate) fn value_offset(
+    rng: &mut Xoshiro256PlusPlus,
+    value_len: usize,
+    pool_len: usize,
+) -> usize {
     debug_assert!(
         value_len > 0 && value_len <= pool_len,
         "value_len ({value_len}) must be in 1..={pool_len}"
     );
-    let max_offset = pool_len - value_len;
-    let offset = rng.random_range(0..=max_offset);
-    &value_pool[offset..offset + value_len]
+    rng.random_range(0..=(pool_len - value_len))
 }
 
 // ── Shared task state (Arc-wrapped, accessed by all connection tasks) ────
@@ -597,11 +608,11 @@ impl PrefillQueues {
         self.queues[endpoint_idx].lock().unwrap().push_back(key_id);
     }
 
-    fn push_front(&self, endpoint_idx: usize, key_id: usize) {
+    pub(crate) fn push_front(&self, endpoint_idx: usize, key_id: usize) {
         self.queues[endpoint_idx].lock().unwrap().push_front(key_id);
     }
 
-    fn pop_front(&self, endpoint_idx: usize) -> Option<usize> {
+    pub(crate) fn pop_front(&self, endpoint_idx: usize) -> Option<usize> {
         self.queues[endpoint_idx].lock().unwrap().pop_front()
     }
 
@@ -611,12 +622,12 @@ impl PrefillQueues {
 }
 
 /// State shared across all connection tasks spawned by a single worker.
-struct TaskSharedState {
-    config: Config,
-    shared: Arc<SharedState>,
-    ratelimiter: Option<Arc<WorkerLimiter>>,
-    value_pool: Arc<Vec<u8>>,
-    endpoints: Vec<SocketAddr>,
+pub(crate) struct TaskSharedState {
+    pub(crate) config: Config,
+    pub(crate) shared: Arc<SharedState>,
+    pub(crate) ratelimiter: Option<Arc<WorkerLimiter>>,
+    pub(crate) value_pool: Arc<Vec<u8>>,
+    pub(crate) endpoints: Vec<SocketAddr>,
     ring: ketama::Ring,
     slot_table: RwLock<Option<Vec<u16>>>,
     /// Per-endpoint prefill key queues, SHARED across all workers (one queue
@@ -624,7 +635,7 @@ struct TaskSharedState {
     /// the full keyspace so any worker's connection-task can drain the queue
     /// for the endpoint it serves — required when connections-per-worker is
     /// fewer than the number of cluster nodes.
-    prefill_queues: Arc<PrefillQueues>,
+    pub(crate) prefill_queues: Arc<PrefillQueues>,
     /// Per-endpoint append queues, SHARED across all workers. The runner
     /// enqueues each batch; writer connection tasks drain the queue for the
     /// endpoint they serve. Empty queues when no append stream is configured.
@@ -636,9 +647,9 @@ struct TaskSharedState {
     /// `BenchWorkerConfig::endpoint_keys`). Empty for single-endpoint setups.
     endpoint_keys: Arc<Vec<Vec<u32>>>,
     /// Worker ID for logging.
-    worker_id: usize,
+    pub(crate) worker_id: usize,
     /// Whether backfill_on_miss is enabled.
-    backfill_on_miss: bool,
+    pub(crate) backfill_on_miss: bool,
     /// Whether TLS is enabled for connections.
     tls_enabled: bool,
     /// SNI server name for TLS connections.
@@ -649,8 +660,8 @@ struct TaskSharedState {
 
 /// State shared between the BenchHandler (on_tick) and connection tasks.
 /// Wrapped in Arc so on_tick and spawned tasks can both access it.
-struct SharedWorkerState {
-    task_state: Arc<TaskSharedState>,
+pub(crate) struct SharedWorkerState {
+    pub(crate) task_state: Arc<TaskSharedState>,
     /// Prefill tracking: total keys assigned to this worker.
     prefill_total: usize,
     /// Number of prefill keys confirmed by this worker.
@@ -662,16 +673,16 @@ struct SharedWorkerState {
 }
 
 impl SharedWorkerState {
-    fn is_prefill_done(&self) -> bool {
+    pub(crate) fn is_prefill_done(&self) -> bool {
         self.prefill_done.load(Ordering::Acquire) != 0
     }
 
-    fn is_precheck_done(&self) -> bool {
+    pub(crate) fn is_precheck_done(&self) -> bool {
         self.precheck_done.load(Ordering::Acquire) != 0
     }
 
     /// Mark this worker's precheck as complete (only the first connection to succeed does this).
-    fn mark_precheck_done(&self) {
+    pub(crate) fn mark_precheck_done(&self) {
         if self
             .precheck_done
             .compare_exchange(0, 1, Ordering::AcqRel, Ordering::Acquire)
@@ -749,6 +760,22 @@ impl AsyncEventHandler for BenchHandler {
                 }
                 CacheProtocol::MemcacheBinary => {
                     spawn_protocol_tasks(&worker_state, my_connections, worker_id);
+                }
+                // The fabric endpoint opens before any connection task, so a card that will not
+                // open fails at startup rather than once per connection.
+                #[cfg(feature = "dma")]
+                CacheProtocol::Dma => {
+                    if crate::dma::open_fabric(
+                        worker_id,
+                        &worker_state.task_state.config,
+                        &worker_state.task_state.value_pool,
+                    ) {
+                        spawn_protocol_tasks(&worker_state, my_connections, worker_id);
+                    }
+                }
+                #[cfg(not(feature = "dma"))]
+                CacheProtocol::Dma => {
+                    tracing::error!("dma protocol requires a build with --features dma");
                 }
             }
             spawn_append_tasks(&worker_state, worker_id);
@@ -956,6 +983,13 @@ fn spawn_protocol_tasks(
                 CacheProtocol::Ping => {
                     ping_connection_task(state, endpoint_idx, session_seed).await;
                 }
+                #[cfg(feature = "dma")]
+                CacheProtocol::Dma => {
+                    crate::dma::dma_connection_task(state, endpoint_idx, session_seed).await;
+                }
+                // Refused in `on_start`, so no task is ever spawned for it.
+                #[cfg(not(feature = "dma"))]
+                CacheProtocol::Dma => {}
             }
         }) {
             tracing::error!(
@@ -977,7 +1011,7 @@ fn spawn_protocol_tasks(
 /// Without it a SYN to a host that never answers hangs the task for the
 /// kernel's own connect timeout, minutes on Linux, and the precheck deadline
 /// in the runner only covers the first attempt of the run, not reconnects.
-async fn establish_connection(
+pub(crate) async fn establish_connection(
     endpoint: SocketAddr,
     worker_id: usize,
     tls_server_name: Option<&str>,
@@ -2504,7 +2538,7 @@ async fn drive_ping_workload(
 // ── Prefill helpers ──────────────────────────────────────────────────────
 
 /// Confirm a single prefill key was successfully stored.
-fn confirm_prefill_key(state: &Arc<SharedWorkerState>) {
+pub(crate) fn confirm_prefill_key(state: &Arc<SharedWorkerState>) {
     // Increment global counter (used by runner for progress reporting).
     state
         .task_state
@@ -2589,8 +2623,9 @@ fn spawn_append_tasks(worker_state: &Arc<SharedWorkerState>, worker_id: usize) {
                 CacheProtocol::Memcache | CacheProtocol::MemcacheBinary => {
                     memcache_append_task(state, endpoint_idx, seed).await;
                 }
-                // Rejected by config validation: ping has no SET.
-                CacheProtocol::Ping => {}
+                // Rejected by config validation: ping has no SET, and the
+                // DMA path has no append writer.
+                CacheProtocol::Ping | CacheProtocol::Dma => {}
             }
         }) {
             tracing::error!(
@@ -3332,7 +3367,7 @@ fn record_disconnect_reason(reason: DisconnectReason) {
 }
 
 /// Record counter metrics for a completed request result (always called).
-fn record_counters(result: &RequestResult) {
+pub(crate) fn record_counters(result: &RequestResult) {
     metrics::RESPONSES_RECEIVED.increment();
     if result.redirect.is_some() {
         // Redirects are counted via CLUSTER_REDIRECTS, not as errors
@@ -3475,7 +3510,7 @@ pub(crate) fn build_endpoint_keys(
 /// `run_benchmark_full` before any key is generated. See `config::KeyFormat`.
 pub(crate) static KEY_FORMAT: AtomicU8 = AtomicU8::new(0);
 
-fn write_key(buf: &mut [u8], id: usize) {
+pub(crate) fn write_key(buf: &mut [u8], id: usize) {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     // Canonical UUID form: 8-4-4-4-12 hex with dashes at indices 8/13/18/23.
     // A typical UUID parser accepts any hex in those positions, and the trailing

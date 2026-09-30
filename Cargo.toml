@@ -82,6 +82,10 @@ ringline-ping = "0.6.0"
 hdf5-metno = { version = "0.13", features = ["static"], optional = true }
 ndarray = { version = "0.17", optional = true }
 
+# `dma` feature only.
+ofi-libfabric-sys = { version = "0.2", optional = true }
+crc-fast = { version = "1.10", default-features = false, features = ["std"], optional = true }
+
 # Metrics
 histogram = "1.1"
 metriken = "0.9"
@@ -120,6 +124,9 @@ default = []
 # Vector-search benchmarking (`valkey-lab search`). Gated so the core binaries
 # don't pull in HDF5; the bundled build needs cmake >= 3.26.
 search = ["dep:hdf5-metno", "dep:ndarray"]
+# Server-initiated RDMA against a valkey server with a compatible module. Off by default: Needs
+# libfabric on the host via pkg-config.
+dma = ["dep:crc-fast", "dep:ofi-libfabric-sys"]
 
 [[bin]]
 name = "cachecannon"
