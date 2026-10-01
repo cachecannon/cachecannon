@@ -82,6 +82,15 @@ pub fn run_benchmark_full(
         std::sync::atomic::Ordering::Relaxed,
     );
 
+    // One seed for the run's connection RNGs: configured, or fresh from OS
+    // entropy so separate processes do not replay each other's key sequence.
+    // Logged either way so the run can be repeated with `general.seed`.
+    let seed = *config.general.seed.get_or_insert_with(rand::random);
+    tracing::info!(
+        seed,
+        "rng seed (set general.seed = {seed} to repeat this key sequence)"
+    );
+
     // Cluster mode: discover topology and replace endpoints with primaries
     let slot_table = if config.target.cluster {
         match config.target.protocol {
