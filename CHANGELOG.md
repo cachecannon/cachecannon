@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- Each process now draws a fresh RNG seed, so separate cachecannon processes no
+  longer send the same key sequence. Every connection's RNG was seeded from its
+  position alone (`42 + worker_id * 10000 + i`), so with the same `threads` and
+  `connections` every process replayed the same keys on every connection. Runs
+  that start several processes against one prefilled server (a ladder of
+  steps, A/B/A phases) were skewed by it: keys that missed and were backfilled
+  in one phase hit when the next phase requested them again, so the miss rate
+  and the backfill write load fell phase by phase. Measured at zipf 0.90 over a
+  140M-key keyspace with 45M keys prefilled: 12.3% miss in phase 1, 6.8% in
+  phase 2, 4.0% in phase 3, against a steady 12.4% within one process. A single
+  process was not affected.
+
+  The seed is `general.seed` when set and OS entropy otherwise, and is logged
+  at startup (`rng seed (set general.seed = N ...)`) so a run can be repeated.
+  Connection seeds mix the run seed with the connection's role (reader or
+  append writer) and position through SplitMix64, so connections within a run,
+  and the same connection across runs, never share a stream.
+
 ## [0.0.29] - 2026-09-29
 
 ### Changed

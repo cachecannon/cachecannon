@@ -934,12 +934,13 @@ fn spawn_protocol_tasks(
     };
 
     let protocol = worker_state.task_state.config.target.protocol;
+    let seed = run_seed(&worker_state.task_state.config);
 
     for i in 0..my_connections {
         let global_conn_idx = my_start + i;
         let endpoint_idx = global_conn_idx % num_endpoints;
         let state = Arc::clone(worker_state);
-        let session_seed = 42 + worker_id as u64 * 10000 + i as u64;
+        let session_seed = connection_seed(seed, SeedRole::Reader, worker_id, i);
 
         // A failed spawn means this connection never exists. Discarding the
         // error made an over-capacity run look like a clean success with fewer
@@ -2513,6 +2514,45 @@ pub(crate) fn connection_share(
     (mine, start)
 }
 
+/// Which kind of connection an RNG seed is for, so a reader and an append
+/// writer at the same position never draw the same stream.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum SeedRole {
+    Reader = 0,
+    Append = 1,
+}
+
+/// RNG seed for one connection: the run seed mixed with the connection's role
+/// and its position (`worker_id`, index within the worker).
+///
+/// Position alone used to be the whole seed, so every process sent the same
+/// key sequence on every connection (see `General::seed`). Both mixing steps
+/// are bijections: within a run, distinct positions get distinct seeds, and at
+/// one position, distinct run seeds give distinct seeds. Mixing rather than
+/// adding keeps nearby run seeds (1, 2, ...) from shifting one run's streams
+/// onto a neighbouring connection of the other.
+pub(crate) fn connection_seed(run_seed: u64, role: SeedRole, worker_id: usize, i: usize) -> u64 {
+    let position = ((role as u64) << 62) ^ ((worker_id as u64) << 32) ^ (i as u64);
+    splitmix64(run_seed ^ splitmix64(position))
+}
+
+/// SplitMix64 finalizer (Steele, Lea and Flood). A bijection on `u64`.
+fn splitmix64(x: u64) -> u64 {
+    let mut z = x.wrapping_add(0x9E37_79B9_7F4A_7C15);
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    z ^ (z >> 31)
+}
+
+/// The run's RNG seed. `run_benchmark_full` resolves `general.seed` (config or
+/// OS entropy) before any worker starts.
+fn run_seed(config: &Config) -> u64 {
+    config
+        .general
+        .seed
+        .expect("general.seed is resolved by the runner before workers start")
+}
+
 /// Spawn this worker's share of the append-stream writer connections. A
 /// no-op without `[workload.append]`.
 fn spawn_append_tasks(worker_state: &Arc<SharedWorkerState>, worker_id: usize) {
@@ -2523,13 +2563,13 @@ fn spawn_append_tasks(worker_state: &Arc<SharedWorkerState>, worker_id: usize) {
     let num_threads = worker_state.task_state.config.general.threads;
     let (mine, start) = connection_share(append.connections, num_threads, worker_id);
     let protocol = worker_state.task_state.config.target.protocol;
+    let run = run_seed(&worker_state.task_state.config);
 
     for i in 0..mine {
         let global_idx = start + i;
         let endpoint_idx = global_idx % num_endpoints;
         let state = Arc::clone(worker_state);
-        // Distinct seed space from the reader connections.
-        let seed = 0xA99E_0000_0000 + worker_id as u64 * 10000 + i as u64;
+        let seed = connection_seed(run, SeedRole::Append, worker_id, i);
 
         if let Err(e) = ringline::spawn(async move {
             match protocol {
@@ -3714,5 +3754,76 @@ mod tests {
         // via confirm_prefill_key (it's handled at init time instead).
         confirm_prefill_key(&worker);
         assert_eq!(shared.prefill_complete_count(), 0);
+    }
+}
+
+#[cfg(test)]
+mod seed_tests {
+    use super::{SeedRole, connection_seed};
+    use crate::keydist::KeyDist;
+    use rand_xoshiro::Xoshiro256PlusPlus;
+    use rand_xoshiro::rand_core::SeedableRng;
+    use std::collections::HashSet;
+
+    /// The layout the bug was found under: 8 workers, 2300 connections.
+    const WORKERS: usize = 8;
+    const PER_WORKER: usize = 288;
+
+    fn seeds(run: u64) -> Vec<u64> {
+        let mut out = Vec::new();
+        for role in [SeedRole::Reader, SeedRole::Append] {
+            for w in 0..WORKERS {
+                for i in 0..PER_WORKER {
+                    out.push(connection_seed(run, role, w, i));
+                }
+            }
+        }
+        out
+    }
+
+    fn keys(seed: u64, n: usize) -> Vec<usize> {
+        let dist = KeyDist::zipf(140_000_000, 0.9);
+        let mut rng = Xoshiro256PlusPlus::seed_from_u64(seed);
+        (0..n).map(|_| dist.sample(&mut rng)).collect()
+    }
+
+    #[test]
+    fn every_connection_in_a_run_gets_its_own_seed() {
+        let s = seeds(7);
+        let unique: HashSet<_> = s.iter().collect();
+        assert_eq!(unique.len(), s.len(), "two connections share an RNG stream");
+    }
+
+    #[test]
+    fn separate_runs_share_no_seed() {
+        // Adjacent run seeds are the case plain addition got wrong: run 2's
+        // stream would have been run 1's on the neighbouring connection.
+        for (a, b) in [(1, 2), (0, u64::MAX), (42, 43)] {
+            let sa: HashSet<_> = seeds(a).into_iter().collect();
+            let shared = seeds(b).into_iter().filter(|s| sa.contains(s)).count();
+            assert_eq!(
+                shared, 0,
+                "runs {a} and {b} share {shared} connection seeds"
+            );
+        }
+    }
+
+    #[test]
+    fn same_seed_repeats_the_key_sequence_and_a_new_one_does_not() {
+        let same = connection_seed(11, SeedRole::Reader, 3, 17);
+        assert_eq!(
+            keys(same, 1000),
+            keys(same, 1000),
+            "a set seed must repeat the run"
+        );
+
+        // The regression: two processes at the same position drew identical
+        // keys. With different run seeds, the first 1000 keys of one
+        // connection should mostly differ, except where both hit the few
+        // hottest ids, which zipf 0.9 draws often.
+        let a = keys(connection_seed(11, SeedRole::Reader, 3, 17), 1000);
+        let b = keys(connection_seed(12, SeedRole::Reader, 3, 17), 1000);
+        let equal = a.iter().zip(&b).filter(|(x, y)| x == y).count();
+        assert!(equal < 100, "{equal}/1000 keys repeated across runs");
     }
 }

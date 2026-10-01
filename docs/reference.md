@@ -48,6 +48,12 @@ ringline_diag = false
 # Bytes per buffer. Default: 16384. A response larger than this spans several
 # buffers and costs one recv CQE each.
 # recv_buffer_size = 16384
+
+# Seed for the per-connection RNGs that choose keys and commands. Unset draws
+# one from OS entropy, so separate processes send different key sequences; the
+# seed in use is logged at startup. Set it to repeat a run's key sequence
+# exactly.
+# seed = 12345
 ```
 
 ### Target Settings
