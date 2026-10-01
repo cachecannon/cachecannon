@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.30] - 2026-10-01
+
 ### Fixed
 - Each process now draws a fresh RNG seed, so separate cachecannon processes no
   longer send the same key sequence. Every connection's RNG was seeded from its
