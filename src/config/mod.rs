@@ -59,6 +59,19 @@ pub struct General {
     /// sizing the buffer to the response moves ~0.5% of the CQE budget.
     #[serde(default)]
     pub recv_buffer_size: Option<u32>,
+    /// Seed for the per-connection RNGs that choose keys and commands. Unset
+    /// draws one from OS entropy; either way the runner logs the seed in use,
+    /// so a run can be repeated exactly by setting it here.
+    ///
+    /// Before this existed every connection was seeded from its position alone,
+    /// so every process sent the same key sequence. A run that starts several
+    /// processes against one prefilled server (a ladder of steps, A/B/A phases)
+    /// then had each later process re-request keys an earlier one had missed and
+    /// backfilled: they hit, and the miss rate fell phase by phase (measured
+    /// 12.3% -> 6.8% -> 4.0% at zipf 0.90) with the backfill write load falling
+    /// with it.
+    #[serde(default)]
+    pub seed: Option<u64>,
 }
 
 impl Default for General {
@@ -71,6 +84,7 @@ impl Default for General {
             ringline_diag: false,
             recv_ring_size: None,
             recv_buffer_size: None,
+            seed: None,
         }
     }
 }
@@ -1075,6 +1089,19 @@ mod validation_tests {
         let config: Config = toml::from_str(toml).map_err(|e| ConfigError::Parse(e.to_string()))?;
         config.validate()?;
         Ok(config)
+    }
+
+    #[test]
+    fn seed_defaults_unset_and_parses() {
+        let config = parse_config("[target]\nendpoints = [\"127.0.0.1:6379\"]\n").unwrap();
+        assert_eq!(
+            config.general.seed, None,
+            "unset means the runner draws one"
+        );
+        let config =
+            parse_config("[general]\nseed = 12345\n[target]\nendpoints = [\"127.0.0.1:6379\"]\n")
+                .unwrap();
+        assert_eq!(config.general.seed, Some(12345));
     }
 
     #[test]
