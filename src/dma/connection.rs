@@ -297,10 +297,13 @@ async fn run_transfers(
             .increment(latency_ns + metrics::CURRENT_SLIP_NS.value() as u64);
 
         let failed = outcome.is_err();
+        // The server replied with an ERR. Anything else is the socket or the fabric.
+        let is_error_response =
+            matches!(outcome, Err(Error::Resp(ringline_redis::Error::Redis(_))));
         record_counters(&RequestResult {
             id: key_id as u64,
             success: !failed,
-            is_error_response: false,
+            is_error_response,
             latency_ns,
             // The payload never crosses the socket, so there is no first byte to timestamp.
             ttfb_ns: None,
@@ -329,8 +332,9 @@ async fn run_transfers(
             }
         }
         // A failed transfer takes the connection down rather than being retried in place: the
-        // failure may be the fabric or the control channel, and this path cannot tell which.
-        if failed {
+        // failure may be the fabric or the control channel An error reply means the server answered
+        // though, so it shouldn't disconnect the client.
+        if failed && !is_error_response {
             return Err(DisconnectReason::RecvError);
         }
     }
