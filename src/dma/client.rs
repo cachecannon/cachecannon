@@ -211,11 +211,6 @@ fn parse(reply: Value) -> Result<TransferReply, DmaError> {
                 )));
             }
         },
-        Value::Error(message) => {
-            return Err(DmaError::Protocol(
-                String::from_utf8_lossy(&message).into_owned(),
-            ));
-        }
         other => return Err(DmaError::Protocol(format!("unexpected reply {other:?}"))),
     })
 }
