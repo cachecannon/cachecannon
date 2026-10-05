@@ -645,7 +645,7 @@ pub(crate) struct TaskSharedState {
     append_ratelimiter: Option<Arc<Ratelimiter>>,
     /// Per-endpoint key-id lists for steady-state key selection (see
     /// `BenchWorkerConfig::endpoint_keys`). Empty for single-endpoint setups.
-    endpoint_keys: Arc<Vec<Vec<u32>>>,
+    pub(crate) endpoint_keys: Arc<Vec<Vec<u32>>>,
     /// Worker ID for logging.
     pub(crate) worker_id: usize,
     /// Whether backfill_on_miss is enabled.
@@ -655,7 +655,7 @@ pub(crate) struct TaskSharedState {
     /// SNI server name for TLS connections.
     tls_server_name: Option<String>,
     /// Steady-state key-id distribution (see `BenchWorkerConfig::key_dist`).
-    key_dist: Arc<KeyDist>,
+    pub(crate) key_dist: Arc<KeyDist>,
 }
 
 /// State shared between the BenchHandler (on_tick) and connection tasks.
@@ -3394,12 +3394,12 @@ pub(crate) fn record_counters(result: &RequestResult) {
 /// hashing; the multiplier provides enough headroom that hitting the cap is
 /// vanishingly unlikely in a healthy setup, while still bounding CPU if the
 /// hash distribution is degenerate (e.g. a tiny keyspace).
-fn max_routing_attempts(num_endpoints: usize) -> usize {
+pub(crate) fn max_routing_attempts(num_endpoints: usize) -> usize {
     num_endpoints.saturating_mul(64).max(64)
 }
 
 /// Route a key to an endpoint index.
-fn route_key(state: &TaskSharedState, key: &[u8]) -> usize {
+pub(crate) fn route_key(state: &TaskSharedState, key: &[u8]) -> usize {
     let slot_table = state.slot_table.read().unwrap();
     route_partition(&slot_table, &state.ring, state.endpoints.len(), key)
 }

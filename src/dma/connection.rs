@@ -10,15 +10,16 @@ use super::client::{DmaClient, Error};
 use crate::dma::{
     Dialect, DmaBuffer, DmaFabric, FabricConfig, Provider, RegionWindow, discover_domains,
 };
-use rand::{RngCore, SeedableRng};
+use rand::{Rng, RngCore, SeedableRng};
 use rand_xoshiro::Xoshiro256PlusPlus;
 
 use crate::client::{RequestResult, RequestType};
 use crate::config::{DmaModule, DmaProvider};
+use crate::keydist::KeyDist;
 use crate::metrics;
 use crate::worker::{
     DisconnectReason, Phase, SharedWorkerState, confirm_prefill_key, establish_connection,
-    record_counters, value_offset, write_key,
+    max_routing_attempts, record_counters, route_key, value_offset, write_key,
 };
 
 thread_local! {
@@ -206,7 +207,8 @@ async fn run_transfers(
     backfill_queue: &mut Vec<usize>,
 ) -> Result<(), DisconnectReason> {
     let config = &state.task_state.config;
-    let key_count = config.workload.keyspace.count;
+    let num_endpoints = state.task_state.endpoints.len();
+    let multi_endpoint = num_endpoints > 1;
     let get_ratio = config.workload.commands.get as usize;
     let value_len = config.workload.values.length;
     let pool_len = state.task_state.value_pool.len();
@@ -237,13 +239,47 @@ async fn run_transfers(
         } else if let Some(key_id) = backfill_queue.pop() {
             (key_id, true, false)
         } else {
+            // As the RESP path: a single endpoint samples the distribution directly; several
+            // endpoints draw from this endpoint's bucket under a uniform distribution and
+            // reject-route otherwise, so each endpoint sees its own share of the distribution.
+            // A miss yields without spending a rate-limit token.
+            let key_id = if !multi_endpoint {
+                state.task_state.key_dist.sample(rng)
+            } else if matches!(&*state.task_state.key_dist, KeyDist::Uniform { .. }) {
+                let bucket = &state.task_state.endpoint_keys[endpoint_idx];
+                if bucket.is_empty() {
+                    ringline::sleep(Duration::from_micros(100)).await;
+                    continue;
+                }
+                bucket[rng.random_range(0..bucket.len())] as usize
+            } else {
+                let mut attempts = 0usize;
+                let max_attempts = max_routing_attempts(num_endpoints);
+                let picked = loop {
+                    let candidate = state.task_state.key_dist.sample(rng);
+                    write_key(key_buf, candidate);
+                    if route_key(&state.task_state, key_buf) == endpoint_idx {
+                        break Some(candidate);
+                    }
+                    attempts += 1;
+                    if attempts >= max_attempts {
+                        break None;
+                    }
+                };
+                match picked {
+                    Some(key_id) => key_id,
+                    None => {
+                        ringline::sleep(Duration::from_micros(100)).await;
+                        continue;
+                    }
+                }
+            };
             if let Some(limiter) = state.task_state.ratelimiter.as_ref()
                 && limiter.try_wait().is_err()
             {
                 ringline::sleep(Duration::from_micros(100)).await;
                 continue;
             }
-            let key_id = (rng.next_u64() % key_count.max(1) as u64) as usize;
             let is_set = (rng.next_u64() % 100) as usize >= get_ratio;
             (key_id, is_set, false)
         };
