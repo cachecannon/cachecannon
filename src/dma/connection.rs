@@ -10,7 +10,7 @@ use super::client::{DmaClient, Error};
 use crate::dma::{
     Dialect, DmaBuffer, DmaFabric, FabricConfig, Provider, RegionWindow, discover_domains,
 };
-use rand::{Rng, RngCore, SeedableRng};
+use rand::{Rng, SeedableRng};
 use rand_xoshiro::Xoshiro256PlusPlus;
 
 use crate::client::{RequestResult, RequestType};
@@ -30,6 +30,24 @@ thread_local! {
     /// The value pool, registered read-only on this worker's fabric. Every worker registers the
     /// same allocation, so the pages are pinned once.
     static SOURCE: RefCell<Option<DmaBuffer>> = const { RefCell::new(None) };
+}
+
+/// Narrower than [`RequestType`], this path has limited verbs
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Op {
+    Get,
+    Set,
+    Delete,
+}
+
+impl Op {
+    fn request_type(self) -> RequestType {
+        match self {
+            Op::Get => RequestType::Get,
+            Op::Set => RequestType::Set,
+            Op::Delete => RequestType::Delete,
+        }
+    }
 }
 
 /// A window of this worker's registered value pool, or `None` if the pool never registered.
@@ -210,6 +228,7 @@ async fn run_transfers(
     let num_endpoints = state.task_state.endpoints.len();
     let multi_endpoint = num_endpoints > 1;
     let get_ratio = config.workload.commands.get as usize;
+    let delete_ratio = config.workload.commands.delete as usize;
     let value_len = config.workload.values.length;
     let pool_len = state.task_state.value_pool.len();
     let backfill_on_miss = state.task_state.backfill_on_miss;
@@ -228,16 +247,16 @@ async fn run_transfers(
 
         // Prefill drains the shared queue; every other phase picks from the keyspace.
         let prefill = phase == Phase::Prefill && !state.is_prefill_done();
-        let (key_id, is_set, is_prefill) = if prefill {
+        let (key_id, op, is_prefill) = if prefill {
             match state.task_state.prefill_queues.pop_front(endpoint_idx) {
-                Some(key_id) => (key_id, true, true),
+                Some(key_id) => (key_id, Op::Set, true),
                 None => {
                     ringline::sleep(Duration::from_micros(100)).await;
                     continue;
                 }
             }
         } else if let Some(key_id) = backfill_queue.pop() {
-            (key_id, true, false)
+            (key_id, Op::Set, false)
         } else {
             // As the RESP path: a single endpoint samples the distribution directly; several
             // endpoints draw from this endpoint's bucket under a uniform distribution and
@@ -274,44 +293,56 @@ async fn run_transfers(
                     }
                 }
             };
-            if let Some(limiter) = state.task_state.ratelimiter.as_ref()
-                && limiter.try_wait().is_err()
-            {
-                ringline::sleep(Duration::from_micros(100)).await;
-                continue;
+            if let Some(limiter) = state.task_state.ratelimiter.as_ref() {
+                if limiter.try_wait().is_err() {
+                    // Refreshed even when nothing is sent, so perceived latency reflects a
+                    // still-growing backlog.
+                    metrics::CURRENT_SLIP_NS.set(limiter.slip_ns() as i64);
+                    ringline::sleep(Duration::from_micros(100)).await;
+                    continue;
+                }
+                // Read after the claim, as does RESP.
+                let slip_ns = limiter.slip_ns();
+                metrics::CURRENT_SLIP_NS.set(slip_ns as i64);
+                let _ = metrics::SCHEDULE_SLIP.increment(slip_ns);
             }
-            let is_set = (rng.next_u64() % 100) as usize >= get_ratio;
-            (key_id, is_set, false)
+            let roll = rng.random_range(0..100);
+            let op = if roll < get_ratio {
+                Op::Get
+            } else if roll < get_ratio + delete_ratio {
+                Op::Delete
+            } else {
+                Op::Set
+            };
+            (key_id, op, false)
         };
 
         write_key(key_buf, key_id);
         metrics::REQUESTS_SENT.increment();
         let start = Instant::now();
 
-        let (outcome, request_type, hit) = if is_set {
-            // No staging copy: the value is already in the registered pool, so the transfer
-            // advertises the window where it lives and the server reads it from there.
-            let at = value_offset(rng, value_len, pool_len);
-            let checksum =
-                state.task_state.config.dma.checksum.then(|| {
+        let (outcome, hit) = match op {
+            Op::Set => {
+                // No staging copy: the value is already in the registered pool, so the transfer
+                // advertises the window where it lives and the server reads it from there.
+                let at = value_offset(rng, value_len, pool_len);
+                let checksum = state.task_state.config.dma.checksum.then(|| {
                     crate::dma::checksum(&state.task_state.value_pool[at..at + value_len])
                 });
-            let outcome = match source_window(at, value_len) {
-                Some(window) => dma.set_registered(key_buf, &window, checksum).await,
-                None => Err(Error::Dma(crate::dma::DmaError::Fabric(
-                    "the value pool is not registered on this worker".into(),
-                ))),
-            };
-            match outcome {
-                Ok(receipt) => (Ok(receipt.bytes_written), RequestType::Set, None),
-                Err(error) => (Err(error), RequestType::Set, None),
+                let outcome = match source_window(at, value_len) {
+                    Some(window) => dma.set_registered(key_buf, &window, checksum).await,
+                    None => Err(Error::Dma(crate::dma::DmaError::Fabric(
+                        "the value pool is not registered on this worker".into(),
+                    ))),
+                };
+                (outcome.map(|receipt| receipt.bytes_written), None)
             }
-        } else {
-            match dma.get(key_buf).await {
-                Ok(Some(receipt)) => (Ok(receipt.bytes_written), RequestType::Get, Some(true)),
-                Ok(None) => (Ok(0), RequestType::Get, Some(false)),
-                Err(error) => (Err(error), RequestType::Get, None),
-            }
+            Op::Get => match dma.get(key_buf).await {
+                Ok(Some(receipt)) => (Ok(receipt.bytes_written), Some(true)),
+                Ok(None) => (Ok(0), Some(false)),
+                Err(error) => (Err(error), None),
+            },
+            Op::Delete => (dma.delete(key_buf).await.map(|_| 0), None),
         };
         let latency_ns = start.elapsed().as_nanos() as u64;
 
@@ -321,12 +352,18 @@ async fn run_transfers(
         };
         // The payload moved over the fabric, so the socket counters would report a few hundred
         // bytes for a multi-megabyte transfer. Count what actually moved.
-        if is_set {
-            metrics::BYTES_TX.add(bytes as u64);
-            let _ = metrics::SET_LATENCY.increment(latency_ns);
-        } else {
-            metrics::BYTES_RX.add(bytes as u64);
-            let _ = metrics::GET_LATENCY.increment(latency_ns);
+        match op {
+            Op::Set => {
+                metrics::BYTES_TX.add(bytes as u64);
+                let _ = metrics::SET_LATENCY.increment(latency_ns);
+            }
+            Op::Get => {
+                metrics::BYTES_RX.add(bytes as u64);
+                let _ = metrics::GET_LATENCY.increment(latency_ns);
+            }
+            Op::Delete => {
+                let _ = metrics::DELETE_LATENCY.increment(latency_ns);
+            }
         }
         let _ = metrics::RESPONSE_LATENCY.increment(latency_ns);
         let _ = metrics::PERCEIVED_LATENCY
@@ -343,10 +380,10 @@ async fn run_transfers(
             latency_ns,
             // The payload never crosses the socket, so there is no first byte to timestamp.
             ttfb_ns: None,
-            request_type,
+            request_type: op.request_type(),
             hit,
             key_id: Some(key_id),
-            backfill: is_set && !is_prefill && !prefill,
+            backfill: op == Op::Set && !is_prefill && !prefill,
             prefill: is_prefill,
             append: false,
             redirect: None,
