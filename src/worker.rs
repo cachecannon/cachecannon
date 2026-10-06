@@ -1077,7 +1077,10 @@ pub(crate) async fn establish_connection(
 
 /// Resolve the TLS server name for an endpoint from task shared state.
 /// Returns None if TLS is disabled, otherwise the explicit hostname or the IP string.
-fn resolve_tls_server_name(state: &TaskSharedState, endpoint: SocketAddr) -> Option<String> {
+pub(crate) fn resolve_tls_server_name(
+    state: &TaskSharedState,
+    endpoint: SocketAddr,
+) -> Option<String> {
     if !state.tls_enabled {
         return None;
     }
@@ -3141,14 +3144,14 @@ async fn drive_memcache_append(
 /// Also owns the connection's deadline timer. The timer outlives individual
 /// recvs: it is armed for the oldest request's deadline and left running when
 /// that request's reply arrives. See `recv_with_timeout` for why.
-struct InFlight {
+pub(crate) struct InFlight {
     fired: VecDeque<Instant>,
     timeout: Duration,
     timer: Option<ringline::SleepFuture>,
 }
 
 impl InFlight {
-    fn new(timeout: Duration, capacity: usize) -> Self {
+    pub(crate) fn new(timeout: Duration, capacity: usize) -> Self {
         Self {
             fired: VecDeque::with_capacity(capacity),
             timeout,
@@ -3157,12 +3160,12 @@ impl InFlight {
     }
 
     #[inline]
-    fn push(&mut self, fired_at: Instant) {
+    pub(crate) fn push(&mut self, fired_at: Instant) {
         self.fired.push_back(fired_at);
     }
 
     #[inline]
-    fn pop(&mut self) {
+    pub(crate) fn pop(&mut self) {
         self.fired.pop_front();
     }
 
@@ -3217,7 +3220,7 @@ impl InFlight {
 /// against the current oldest request: expired means timeout, otherwise the
 /// timer is re-armed for what remains. A healthy connection re-arms about once
 /// per `timeout` and never cancels.
-async fn recv_with_timeout<F, T>(
+pub(crate) async fn recv_with_timeout<F, T>(
     recv: F,
     inflight: &mut InFlight,
     conn: ConnCtx,
