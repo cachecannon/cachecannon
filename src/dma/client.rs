@@ -78,6 +78,14 @@ impl DmaClient {
         )?;
         let receipt = self.transfer(&command).await?.receipt()?;
         if let Some(receipt) = receipt.as_ref() {
+            // verify count from the server
+            if self.buffer.capacity() < receipt.bytes_written {
+                return Err(Error::Dma(DmaError::Integrity(format!(
+                    "server reports {} bytes into a {}-byte buffer",
+                    receipt.bytes_written,
+                    self.buffer.capacity()
+                ))));
+            }
             self.verify(receipt)?;
         }
         Ok(receipt)
