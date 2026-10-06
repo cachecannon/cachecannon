@@ -103,6 +103,11 @@ impl DmaClient {
         self.commit(&command, window.length()).await
     }
 
+    /// Plain `DEL` on the control connection. Returns true if the key existed.
+    pub(crate) async fn delete(&mut self, key: &[u8]) -> Result<bool, Error> {
+        Ok(self.client.del(key).await? == 1)
+    }
+
     /// Run a write and confirm the server took all `length` bytes.
     async fn commit(
         &mut self,
