@@ -50,6 +50,17 @@ impl Op {
     }
 }
 
+/// Where a step's key came from, which decides how its result is counted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Source {
+    /// The shared prefill queue. A SET that must be confirmed or requeued.
+    Prefill,
+    /// This connection's backfill queue. A SET repairing an earlier miss.
+    Backfill,
+    /// The configured key distribution and command mix.
+    Workload,
+}
+
 /// A window of this worker's registered value pool, or `None` if the pool never registered.
 fn source_window(at: usize, length: usize) -> Option<RegionWindow> {
     SOURCE.with(|slot| slot.borrow().as_ref()?.slice(at, length))
@@ -247,16 +258,16 @@ async fn run_transfers(
 
         // Prefill drains the shared queue; every other phase picks from the keyspace.
         let prefill = phase == Phase::Prefill && !state.is_prefill_done();
-        let (key_id, op, is_prefill) = if prefill {
+        let (key_id, op, source) = if prefill {
             match state.task_state.prefill_queues.pop_front(endpoint_idx) {
-                Some(key_id) => (key_id, Op::Set, true),
+                Some(key_id) => (key_id, Op::Set, Source::Prefill),
                 None => {
                     ringline::sleep(Duration::from_micros(100)).await;
                     continue;
                 }
             }
         } else if let Some(key_id) = backfill_queue.pop() {
-            (key_id, Op::Set, false)
+            (key_id, Op::Set, Source::Backfill)
         } else {
             // As the RESP path: a single endpoint samples the distribution directly; several
             // endpoints draw from this endpoint's bucket under a uniform distribution and
@@ -314,7 +325,7 @@ async fn run_transfers(
             } else {
                 Op::Set
             };
-            (key_id, op, false)
+            (key_id, op, Source::Workload)
         };
 
         write_key(key_buf, key_id);
@@ -383,8 +394,8 @@ async fn run_transfers(
             request_type: op.request_type(),
             hit,
             key_id: Some(key_id),
-            backfill: op == Op::Set && !is_prefill && !prefill,
-            prefill: is_prefill,
+            backfill: source == Source::Backfill,
+            prefill: source == Source::Prefill,
             append: false,
             redirect: None,
         });
@@ -394,7 +405,7 @@ async fn run_transfers(
         }
         // A prefill key is confirmed only once its SET actually succeeded; a failed one goes back on
         // the queue so the phase cannot finish having silently skipped keys.
-        if is_prefill {
+        if source == Source::Prefill {
             if failed {
                 state
                     .task_state
