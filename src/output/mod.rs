@@ -137,6 +137,12 @@ pub struct Results {
     /// `connection.request_timeout`. Included in `errors`; never in
     /// `responses` or any latency histogram.
     pub timeouts: u64,
+    /// Connections closed with requests in flight by
+    /// `connection.disconnect_rate`.
+    pub disconnects_injected: u64,
+    /// Requests in flight on those connections. Not included in `errors` or
+    /// `timeouts`, and never in `responses` or any latency histogram.
+    pub requests_abandoned: u64,
     pub hits: u64,
     pub misses: u64,
     pub bytes_tx: u64,
@@ -240,6 +246,8 @@ mod overload_tests {
             responses: requests,
             errors: 0,
             timeouts: 0,
+            disconnects_injected: 0,
+            requests_abandoned: 0,
             hits: 0,
             misses: 0,
             bytes_tx: 0,

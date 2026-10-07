@@ -91,6 +91,9 @@ pub enum DisconnectReason {
     /// A request outlived `connection.request_timeout`; the connection was
     /// closed because replies are ordered and a stalled head blocks them all.
     Timeout,
+    /// Closed on purpose by `connection.disconnect_rate`, with requests in
+    /// flight.
+    Injected,
 }
 
 /// Shared state between workers and main thread.
@@ -550,6 +553,114 @@ async fn run_dispatcher(
     }
 }
 
+// ── Injected disconnects ─────────────────────────────────────────────────
+//
+// `connection.disconnect_rate` closes connections mid-request, to exercise a
+// server's cleanup of work for a connection that goes away. Pacing piggybacks
+// on `on_tick`, which the event loop already calls every iteration (at least
+// once per millisecond, ringline's tick timeout) and which already reads the
+// clock for its diagnostic heartbeat. It adds whole disconnects to a per-worker
+// count; a connection task takes one right after it sends new requests, before
+// it waits for their replies. No timer and no task are added, so the ringline
+// pools sized in `runner.rs` are unaffected.
+//
+// Taking a disconnect only with requests in flight is the point of the
+// feature: closing an idle connection exercises nothing on the server. When
+// no connection on a worker is sending, the count waits for one to send.
+// The first connection on the worker to send after a disconnect falls due
+// takes it. A connection that just took one is out for the reconnect delay,
+// so the next ones go to others.
+
+thread_local! {
+    /// Disconnects due on this worker and not yet taken by a connection.
+    static DISCONNECTS_OWED: Cell<u32> = const { Cell::new(0) };
+}
+
+/// Take one owed disconnect, if any. Called only when the feature is on.
+fn take_owed_disconnect() -> bool {
+    DISCONNECTS_OWED.with(|owed| {
+        let n = owed.get();
+        if n == 0 {
+            return false;
+        }
+        owed.set(n - 1);
+        true
+    })
+}
+
+/// Per-worker accrual of injected disconnects at a fixed rate.
+#[derive(Debug)]
+struct DisconnectSchedule {
+    /// This worker's share of `connection.disconnect_rate`, per second.
+    per_sec: f64,
+    /// Fractional disconnect carried between ticks.
+    credit: f64,
+    /// Most owed disconnects held at once: one second's worth, at least one.
+    /// While no connection is busy, disconnects that fall due past this are
+    /// dropped rather than released as a burst once one is.
+    cap: u32,
+    /// Time of the previous accrual; `None` while accrual is paused.
+    last: Option<Instant>,
+}
+
+impl DisconnectSchedule {
+    /// `None` when this worker injects nothing: the feature is off, or the
+    /// worker has no connections.
+    fn new(rate: f64, my_connections: usize, total_connections: usize) -> Option<Self> {
+        if rate <= 0.0 || my_connections == 0 || total_connections == 0 {
+            return None;
+        }
+        let per_sec = rate * my_connections as f64 / total_connections as f64;
+        Some(Self {
+            per_sec,
+            credit: 0.0,
+            cap: (per_sec.ceil() as u32).max(1),
+            last: None,
+        })
+    }
+
+    /// Accrue disconnects up to `now` and return the new owed count, given
+    /// the current one. While `active` is false nothing accrues, and the next
+    /// active call starts from its own `now`, so time spent in other phases
+    /// is not paid out afterwards.
+    fn advance(&mut self, now: Instant, active: bool, owed: u32) -> u32 {
+        if !active {
+            self.last = None;
+            self.credit = 0.0;
+            return owed;
+        }
+        let Some(last) = self.last.replace(now) else {
+            return owed;
+        };
+        self.credit += now.saturating_duration_since(last).as_secs_f64() * self.per_sec;
+        if self.credit < 1.0 {
+            return owed;
+        }
+        let whole = self.credit.floor();
+        self.credit -= whole;
+        let owed = owed.saturating_add(whole.min(u32::MAX as f64) as u32);
+        if owed >= self.cap {
+            self.credit = 0.0;
+            return self.cap;
+        }
+        owed
+    }
+}
+
+/// Close `conn` with `pending` requests in flight and count it. The caller
+/// flushes the client first, so requests buffered by `fire_*` reach the wire
+/// and are in flight on the server when the close arrives.
+///
+/// ringline does not expose the socket, so `SO_LINGER {on, 0}` cannot be set
+/// and the close is a normal one: queued sends drain, then FIN (TLS sends
+/// close_notify first). Replies to the abandoned requests are never read.
+/// They produce no latency sample and are not counted as errors or timeouts.
+fn inject_disconnect(pending: usize, conn: ConnCtx) -> DisconnectReason {
+    metrics::REQUESTS_ABANDONED.add(pending as u64);
+    conn.close();
+    DisconnectReason::Injected
+}
+
 /// Borrow a random `value_len`-byte slice of the value pool, for the
 /// copy-based `fire_set` path (the bytes are copied into the send pool
 /// synchronously, so the borrow only needs to outlive the fire call).
@@ -702,6 +813,10 @@ pub struct BenchHandler {
 
     /// Number of connections this worker manages
     my_connections: usize,
+
+    /// Injected-disconnect pacing; `None` when `connection.disconnect_rate`
+    /// is off or this worker has no connections.
+    disconnects: Option<DisconnectSchedule>,
 }
 
 impl AsyncEventHandler for BenchHandler {
@@ -774,9 +889,17 @@ impl AsyncEventHandler for BenchHandler {
             return;
         }
 
+        let now = Instant::now();
+
+        // Injected disconnects accrue only while workload traffic runs.
+        if let Some(ref mut sched) = self.disconnects {
+            let active = matches!(phase, Phase::Warmup | Phase::Running);
+            DISCONNECTS_OWED.with(|owed| owed.set(sched.advance(now, active, owed.get())));
+        }
+
         // Periodic diagnostic heartbeat (every 2 seconds)
         self.tick_count += 1;
-        if self.last_diag.elapsed() >= Duration::from_secs(2) {
+        if now.saturating_duration_since(self.last_diag) >= Duration::from_secs(2) {
             tracing::trace!(
                 worker = self.id,
                 phase = ?phase,
@@ -786,7 +909,7 @@ impl AsyncEventHandler for BenchHandler {
                 "diagnostic heartbeat"
             );
             self.tick_count = 0;
-            self.last_diag = Instant::now();
+            self.last_diag = now;
         }
     }
 
@@ -899,6 +1022,11 @@ impl AsyncEventHandler for BenchHandler {
             tick_count: 0,
             last_diag: Instant::now(),
             my_connections,
+            disconnects: DisconnectSchedule::new(
+                cfg.config.connection.disconnect_rate,
+                my_connections,
+                total_connections,
+            ),
         };
         tracing::debug!(
             worker_id = result.id,
@@ -1308,6 +1436,9 @@ async fn drive_resp_workload(
     let mut carried_tokens: u64 = 0;
     let mut prefill_in_flight: VecDeque<usize> = VecDeque::new();
     let mut inflight = InFlight::new(config.connection.request_timeout, pipeline_depth);
+    // Read once so a run without injected disconnects pays a branch on a
+    // local per loop iteration, not a thread-local access.
+    let inject_disconnects = config.connection.disconnect_rate > 0.0;
 
     loop {
         let phase = state.task_state.shared.phase();
@@ -1321,6 +1452,13 @@ async fn drive_resp_workload(
         // Set when the limiter could not fund a batch in Warmup/Running. Only
         // then does an idle connection park on the dispatcher; see below.
         let mut starved = false;
+        // Requests in flight before this iteration fires; only read when
+        // injected disconnects are on.
+        let pending_before = if inject_disconnects {
+            client.pending_count()
+        } else {
+            0
+        };
 
         // Only refill when there's room for a full batch, so fire_* calls
         // accumulate into a single coalesced send rather than one-per-response.
@@ -1548,6 +1686,17 @@ async fn drive_resp_workload(
                 _ => ringline::sleep(IDLE_SLEEP_MIN).await,
             }
             continue;
+        }
+
+        // Take an owed injected disconnect only right after this connection
+        // sent new requests. A request that was in flight before this
+        // iteration may already be answered and its reply on the way, in
+        // which case the server holds nothing for the close to interrupt;
+        // the requests just sent cannot have been.
+        if inject_disconnects && client.pending_count() > pending_before && take_owed_disconnect() {
+            let _ = client.flush();
+            requeue_drained_prefill(&state.task_state, key_buf, prefill_in_flight.drain(..));
+            return Err(inject_disconnect(client.pending_count(), conn));
         }
 
         // Zero-copy recv, every reply, every op kind and phase (prefill SETs
@@ -1816,6 +1965,15 @@ impl McClient {
         }
     }
 
+    /// Send any requests `fire_*` buffered but did not yet send. Errors are
+    /// ignored: the only caller closes the connection next.
+    fn flush(&mut self) {
+        let _ = match self {
+            McClient::Ascii(c, _) => c.flush(),
+            McClient::Binary(c, _) => c.flush(),
+        };
+    }
+
     #[inline]
     fn conn(&self) -> ConnCtx {
         match self {
@@ -1983,6 +2141,9 @@ async fn drive_memcache_workload(
     let mut carried_tokens: u64 = 0;
     let mut prefill_in_flight: VecDeque<usize> = VecDeque::new();
     let mut inflight = InFlight::new(config.connection.request_timeout, pipeline_depth);
+    // Read once so a run without injected disconnects pays a branch on a
+    // local per loop iteration, not a thread-local access.
+    let inject_disconnects = config.connection.disconnect_rate > 0.0;
 
     loop {
         let phase = state.task_state.shared.phase();
@@ -1996,6 +2157,13 @@ async fn drive_memcache_workload(
         // Set when the limiter could not fund a batch in Warmup/Running. Only
         // then does an idle connection park on the dispatcher; see below.
         let mut starved = false;
+        // Requests in flight before this iteration fires; only read when
+        // injected disconnects are on.
+        let pending_before = if inject_disconnects {
+            client.pending_count()
+        } else {
+            0
+        };
 
         // Only refill when there's room for a full batch, so fire_* calls
         // accumulate into a single coalesced send rather than one-per-response.
@@ -2171,6 +2339,18 @@ async fn drive_memcache_workload(
         }
 
         let conn = client.conn();
+
+        // Take an owed injected disconnect only right after this connection
+        // sent new requests. A request that was in flight before this
+        // iteration may already be answered and its reply on the way, in
+        // which case the server holds nothing for the close to interrupt;
+        // the requests just sent cannot have been.
+        if inject_disconnects && client.pending_count() > pending_before && take_owed_disconnect() {
+            client.flush();
+            requeue_drained_prefill(&state.task_state, key_buf, prefill_in_flight.drain(..));
+            return Err(inject_disconnect(client.pending_count(), conn));
+        }
+
         let op = match recv_with_timeout(client.recv(), &mut inflight, conn).await {
             Ok(Ok(op)) => op,
             Ok(Err(ringline_memcache::Error::ConnectionClosed)) => {
@@ -3356,6 +3536,84 @@ mod inflight_tests {
     }
 }
 
+#[cfg(test)]
+mod disconnect_schedule_tests {
+    use super::DisconnectSchedule;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn off_when_rate_is_zero_or_worker_has_no_connections() {
+        assert!(DisconnectSchedule::new(0.0, 4, 8).is_none());
+        assert!(DisconnectSchedule::new(10.0, 0, 8).is_none());
+        assert!(DisconnectSchedule::new(10.0, 4, 8).is_some());
+    }
+
+    /// Ticks every millisecond for `secs`, with every owed disconnect taken
+    /// before the next tick, as a busy worker would. Returns the total taken.
+    fn taken_over(sched: &mut DisconnectSchedule, t0: Instant, secs: u64) -> u64 {
+        let mut taken = 0u64;
+        for ms in 0..=secs * 1000 {
+            taken += sched.advance(t0 + Duration::from_millis(ms), true, 0) as u64;
+        }
+        taken
+    }
+
+    #[test]
+    fn worker_share_follows_its_connections_and_holds_the_rate() {
+        // 50/s across 8 connections; this worker has 2, so 12.5/s.
+        let mut sched = DisconnectSchedule::new(50.0, 2, 8).unwrap();
+        let taken = taken_over(&mut sched, Instant::now(), 60);
+        assert!(
+            (749..=750).contains(&taken),
+            "expected ~750 in 60 s, got {taken}"
+        );
+    }
+
+    #[test]
+    fn fractional_rate_accrues_across_ticks() {
+        let mut sched = DisconnectSchedule::new(0.5, 1, 1).unwrap();
+        let taken = taken_over(&mut sched, Instant::now(), 60);
+        assert!(
+            (29..=30).contains(&taken),
+            "expected ~30 in 60 s, got {taken}"
+        );
+    }
+
+    #[test]
+    fn nothing_accrues_while_inactive() {
+        let mut sched = DisconnectSchedule::new(100.0, 1, 1).unwrap();
+        let t0 = Instant::now();
+        assert_eq!(sched.advance(t0, false, 0), 0);
+        assert_eq!(sched.advance(t0 + Duration::from_secs(30), false, 0), 0);
+        // The first active tick starts the clock; it does not pay out the
+        // 30 s spent inactive.
+        assert_eq!(sched.advance(t0 + Duration::from_secs(30), true, 0), 0);
+        assert_eq!(
+            sched.advance(t0 + Duration::from_millis(30_100), true, 0),
+            10
+        );
+    }
+
+    #[test]
+    fn owed_is_capped_when_no_connection_takes_one() {
+        // 10/s on one worker, and nothing is busy for 5 s.
+        let mut sched = DisconnectSchedule::new(10.0, 1, 1).unwrap();
+        let t0 = Instant::now();
+        let mut owed = 0;
+        for ms in 0..=5000 {
+            owed = sched.advance(t0 + Duration::from_millis(ms), true, owed);
+        }
+        assert_eq!(owed, 10, "at most one second's worth is held");
+        // A rate under 1/s still holds one.
+        let mut slow = DisconnectSchedule::new(0.2, 1, 1).unwrap();
+        let mut owed = 0;
+        for s in 0..=60 {
+            owed = slow.advance(t0 + Duration::from_secs(s), true, owed);
+        }
+        assert_eq!(owed, 1);
+    }
+}
+
 // ── Utility functions ────────────────────────────────────────────────────
 
 /// Record disconnect reason metrics.
@@ -3368,6 +3626,7 @@ fn record_disconnect_reason(reason: DisconnectReason) {
         DisconnectReason::ErrorEvent => metrics::DISCONNECTS_ERROR_EVENT.increment(),
         DisconnectReason::ConnectFailed => metrics::DISCONNECTS_CONNECT_FAILED.increment(),
         DisconnectReason::Timeout => metrics::DISCONNECTS_TIMEOUT.increment(),
+        DisconnectReason::Injected => metrics::DISCONNECTS_INJECTED.increment(),
     }
 }
 

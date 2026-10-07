@@ -379,6 +379,8 @@ pub fn run_benchmark_full(
     let mut baseline_responses = 0u64;
     let mut baseline_errors = 0u64;
     let mut baseline_timeouts = 0u64;
+    let mut baseline_disconnects_injected = 0u64;
+    let mut baseline_requests_abandoned = 0u64;
     let mut baseline_conn_failures = 0u64;
     let mut baseline_hits = 0u64;
     let mut baseline_misses = 0u64;
@@ -670,6 +672,8 @@ pub fn run_benchmark_full(
             baseline_responses = metrics::RESPONSES_RECEIVED.value();
             baseline_errors = metrics::REQUEST_ERRORS.value();
             baseline_timeouts = metrics::REQUEST_TIMEOUTS.value();
+            baseline_disconnects_injected = metrics::DISCONNECTS_INJECTED.value();
+            baseline_requests_abandoned = metrics::REQUESTS_ABANDONED.value();
             baseline_conn_failures = metrics::CONNECTIONS_FAILED.value();
             baseline_hits = metrics::CACHE_HITS.value();
             baseline_misses = metrics::CACHE_MISSES.value();
@@ -933,6 +937,9 @@ pub fn run_benchmark_full(
     let conn_failures = metrics::CONNECTIONS_FAILED.value() - baseline_conn_failures;
     let errors = (metrics::REQUEST_ERRORS.value() - baseline_errors) + conn_failures;
     let timeouts = metrics::REQUEST_TIMEOUTS.value() - baseline_timeouts;
+    let disconnects_injected =
+        metrics::DISCONNECTS_INJECTED.value() - baseline_disconnects_injected;
+    let requests_abandoned = metrics::REQUESTS_ABANDONED.value() - baseline_requests_abandoned;
     let hits = metrics::CACHE_HITS.value() - baseline_hits;
     let misses = metrics::CACHE_MISSES.value() - baseline_misses;
     let bytes_tx = metrics::BYTES_TX.value() - baseline_bytes_tx;
@@ -968,6 +975,8 @@ pub fn run_benchmark_full(
         responses,
         errors,
         timeouts,
+        disconnects_injected,
+        requests_abandoned,
         hits,
         misses,
         bytes_tx,

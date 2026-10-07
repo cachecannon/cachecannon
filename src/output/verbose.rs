@@ -101,6 +101,13 @@ impl OutputFormatter for VerboseFormatter {
         tracing::info!("requests: {}", results.requests);
         tracing::info!("responses: {}", results.responses);
         tracing::info!("errors: {} ({}%)", results.errors, format_pct(err_pct));
+        if results.disconnects_injected > 0 {
+            tracing::info!(
+                "disconnects injected: {} ({} requests abandoned)",
+                results.disconnects_injected,
+                results.requests_abandoned
+            );
+        }
         tracing::info!("throughput: {:.2} req/s", throughput);
         tracing::info!(
             "bandwidth: {} RX, {} TX",

@@ -100,6 +100,10 @@ struct ResultsOutput {
     conns_failed: u64,
     /// Requests abandoned at `connection.request_timeout` (included in errors).
     timeouts: u64,
+    /// Connections closed with requests in flight by `connection.disconnect_rate`.
+    disconnects_injected: u64,
+    /// Requests in flight on those connections (not included in errors or timeouts).
+    requests_abandoned: u64,
     requests_dropped: u64,
     offered: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -338,6 +342,8 @@ impl OutputFormatter for JsonFormatter {
             conns_active: results.conns_active,
             conns_failed: results.conns_failed,
             timeouts: results.timeouts,
+            disconnects_injected: results.disconnects_injected,
+            requests_abandoned: results.requests_abandoned,
             requests_dropped: results.requests_dropped,
             offered: results.offered(),
             schedule_slip: if results.schedule_slip.p99_us > 0.0 || results.requests_dropped > 0 {
