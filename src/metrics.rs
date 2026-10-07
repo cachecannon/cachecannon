@@ -17,6 +17,7 @@ pub mod request {
     pub const RECEIVED: usize = 1;
     pub const ERRORS: usize = 2;
     pub const TIMEOUTS: usize = 3;
+    pub const ABANDONED: usize = 4;
 }
 
 /// Counter slot indices for cache metrics.
@@ -35,6 +36,7 @@ pub mod connection {
     pub const DISCONNECT_ERROR_EVENT: usize = 6;
     pub const DISCONNECT_CONNECT_FAILED: usize = 7;
     pub const DISCONNECT_TIMEOUT: usize = 8;
+    pub const DISCONNECT_INJECTED: usize = 9;
 }
 
 /// Counter slot indices for bytes metrics.
@@ -66,6 +68,12 @@ pub static REQUEST_ERRORS: Counter = Counter::new(&REQUEST, request::ERRORS);
     description = "Requests abandoned because no reply arrived within connection.request_timeout (also counted in request_errors)"
 )]
 pub static REQUEST_TIMEOUTS: Counter = Counter::new(&REQUEST, request::TIMEOUTS);
+
+#[metric(
+    name = "requests_abandoned",
+    description = "Requests in flight on a connection closed by connection.disconnect_rate (not counted in request_errors or request_timeouts)"
+)]
+pub static REQUESTS_ABANDONED: Counter = Counter::new(&REQUEST, request::ABANDONED);
 
 // Cache counters
 #[metric(name = "cache_hits", description = "Total cache hits")]
@@ -149,6 +157,13 @@ pub static DISCONNECTS_CONNECT_FAILED: Counter =
     description = "Connections torn down because a request exceeded connection.request_timeout"
 )]
 pub static DISCONNECTS_TIMEOUT: Counter = Counter::new(&CONNECTION, connection::DISCONNECT_TIMEOUT);
+
+#[metric(
+    name = "disconnects_injected",
+    description = "Connections closed with requests in flight by connection.disconnect_rate"
+)]
+pub static DISCONNECTS_INJECTED: Counter =
+    Counter::new(&CONNECTION, connection::DISCONNECT_INJECTED);
 
 // Target rate gauge (for saturation search)
 #[metric(

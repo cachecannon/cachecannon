@@ -120,6 +120,20 @@ connect_timeout = "5s"
 # be reported as tail latency, however long it took).
 request_timeout = "1s"
 
+# Injected disconnects per second across the whole run, to exercise a server's
+# cleanup of work for a connection that goes away mid-request. Each worker gets
+# a share proportional to its connections. A disconnect is taken by a
+# connection right after it sends new requests, so the server holds unanswered
+# requests when the close arrives; if no connection is sending, it waits (at
+# most one second's worth is held). The connection closes without reading the
+# replies (FIN, with close_notify first on TLS; not a reset) and reconnects
+# through the normal reconnect path, which waits 100 ms first, so on average
+# about disconnect_rate / 10 connections are reconnecting at any moment.
+# Reported as `disconnects_injected` and `requests_abandoned`; abandoned
+# requests are not errors or timeouts and produce no latency sample. Not
+# supported with protocol = "ping". 0 = off.
+disconnect_rate = 0
+
 # Request distribution strategy
 # "roundrobin" - Distribute requests evenly across connections
 # "greedy" - Fill one connection's pipeline before moving to next
@@ -505,6 +519,8 @@ Each snapshot contains the full set of metrics. The file uses the metriken expos
 | `disconnects_closed_event` | Disconnects from close events |
 | `disconnects_error_event` | Disconnects from error events |
 | `disconnects_connect_failed` | Disconnects from failed connect attempts |
+| `disconnects_injected` | Connections closed with requests in flight by `connection.disconnect_rate` |
+| `requests_abandoned` | Requests in flight on those connections (not counted in `request_errors`) |
 | `cluster_redirects` | Total MOVED/ASK redirects (cluster mode) |
 
 **Gauges** (point-in-time values):

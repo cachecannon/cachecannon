@@ -189,6 +189,14 @@ pub struct Connection {
     /// How to distribute requests across connections.
     #[serde(default)]
     pub request_distribution: RequestDistribution,
+    /// Injected disconnects per second across the whole run, spread over the
+    /// workers in proportion to their connections. Each injected disconnect
+    /// closes a connection that has requests in flight without waiting for
+    /// the replies, then reconnects it, to exercise a server's cleanup of work
+    /// for a connection that goes away mid-request. `0` (the default)
+    /// disables it.
+    #[serde(default)]
+    pub disconnect_rate: f64,
 }
 
 /// How requests are distributed across connections.
@@ -227,6 +235,7 @@ impl Default for Connection {
             connect_timeout: default_connect_timeout(),
             request_timeout: default_request_timeout(),
             request_distribution: RequestDistribution::default(),
+            disconnect_rate: 0.0,
         }
     }
 }
@@ -816,6 +825,21 @@ impl Config {
             ));
         }
 
+        let disconnect_rate = self.connection.disconnect_rate;
+        if !disconnect_rate.is_finite() || disconnect_rate < 0.0 {
+            return Err(ConfigError::Validation(format!(
+                "connection.disconnect_rate must be a finite number >= 0 (got {disconnect_rate})"
+            )));
+        }
+        // The ping client sends and awaits each request in one call, so there
+        // is no point at which a request is in flight and the task could close
+        // the connection.
+        if disconnect_rate > 0.0 && self.target.protocol == Protocol::Ping {
+            return Err(ConfigError::Validation(
+                "connection.disconnect_rate is not supported with protocol = \"ping\"".to_string(),
+            ));
+        }
+
         if self.workload.values.length == 0 {
             return Err(ConfigError::Validation(
                 "workload.values.length must be >= 1".to_string(),
@@ -1102,6 +1126,49 @@ mod validation_tests {
             parse_config("[general]\nseed = 12345\n[target]\nendpoints = [\"127.0.0.1:6379\"]\n")
                 .unwrap();
         assert_eq!(config.general.seed, Some(12345));
+    }
+
+    #[test]
+    fn disconnect_rate_defaults_off_and_parses() {
+        let config = parse_config("[target]\nendpoints = [\"127.0.0.1:6379\"]\n").unwrap();
+        assert_eq!(config.connection.disconnect_rate, 0.0, "unset means off");
+        // An integer is accepted, as a user would write it.
+        let config = parse_config(
+            "[target]\nendpoints = [\"127.0.0.1:6379\"]\n[connection]\ndisconnect_rate = 50\n",
+        )
+        .unwrap();
+        assert_eq!(config.connection.disconnect_rate, 50.0);
+        let config = parse_config(
+            "[target]\nendpoints = [\"127.0.0.1:6379\"]\n[connection]\ndisconnect_rate = 0.5\n",
+        )
+        .unwrap();
+        assert_eq!(config.connection.disconnect_rate, 0.5);
+    }
+
+    #[test]
+    fn disconnect_rate_rejects_negative_nan_and_inf() {
+        for bad in ["-1", "nan", "inf"] {
+            let err = parse_config(&format!(
+                "[target]\nendpoints = [\"127.0.0.1:6379\"]\n[connection]\ndisconnect_rate = {bad}\n"
+            ))
+            .err()
+            .unwrap_or_else(|| panic!("disconnect_rate = {bad} should be rejected"));
+            assert!(
+                err.to_string().contains("disconnect_rate"),
+                "{bad}: error should name the key, got {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn disconnect_rate_rejected_for_ping() {
+        let err = parse_config(
+            "[target]\nendpoints = [\"127.0.0.1:6379\"]\nprotocol = \"ping\"\n[connection]\ndisconnect_rate = 1\n",
+        )
+        .expect_err("ping cannot inject disconnects");
+        assert!(err.to_string().contains("ping"), "got {err}");
+        // Off is fine with ping.
+        parse_config("[target]\nendpoints = [\"127.0.0.1:6379\"]\nprotocol = \"ping\"\n").unwrap();
     }
 
     #[test]

@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- `connection.disconnect_rate`: injected disconnects per second across the
+  run, to exercise a server's cleanup of work for a connection that goes away
+  mid-request. Each worker's share is proportional to its connections. A
+  disconnect is taken by a connection right after it sends new requests, so
+  the server always holds requests it has not answered when the close
+  arrives; while no connection on a worker is sending, the disconnect waits,
+  holding at most one second's worth. The connection flushes any buffered
+  requests, closes without reading the replies, and reconnects through the
+  normal reconnect path. The close is a FIN (close_notify first on TLS), not
+  a reset: ringline does not expose the socket, so `SO_LINGER` cannot be set.
+  Counted as `disconnects_injected` and `requests_abandoned`; abandoned
+  requests are not errors or timeouts and record no latency. Both appear on
+  a `disconnects` line in the clean results (when non-zero), in verbose
+  output, in JSON results, on `/metrics` and in parquet. Pacing runs in
+  `on_tick`, which already reads the clock every event-loop iteration, so the
+  feature adds no timer and no task. Off by default; when off, the cost is
+  one branch per event-loop iteration and two per connection loop iteration. Rejected for
+  `protocol = "ping"`, whose client has no point at which a request is in
+  flight between send and receive. Covered end to end over plain TCP and TLS
+  by stub servers that delay replies and count closes made while they held
+  unanswered requests.
+
 ### Changed
 - Built against unreleased ringline main (ringline-rs/ringline `1be7049`:
   ringline 0.7.0-alpha.0, ringline-redis 0.7.0, ringline-memcache 0.7.2,

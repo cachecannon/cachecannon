@@ -343,6 +343,18 @@ impl OutputFormatter for CleanFormatter {
             );
         }
 
+        // Injected disconnects (connection.disconnect_rate). Abandoned requests
+        // are not errors, so they are reported here rather than on the
+        // throughput line.
+        if results.disconnects_injected > 0 {
+            println!(
+                "{}  {} injected, {} requests abandoned",
+                self.cyan("disconnects"),
+                format_count(results.disconnects_injected),
+                format_count(results.requests_abandoned)
+            );
+        }
+
         println!();
 
         // Hit rate line
