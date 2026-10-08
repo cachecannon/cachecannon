@@ -50,17 +50,17 @@ quantile gauges, which the viewer cannot read as distributions, until step 3.
 1. **Guide.** Change the guide's example to the Prometheus form above, or keep
    `-o run.rez`, and say why. Remove the workaround when rezolus's detection
    fix ships.
-2. **metriken 0.9 → 0.11**, `metriken-exposition` 0.16 → 0.21,
+2. **metriken 0.9 → 0.11**, `metriken-exposition` 0.16 → 0.21 (then the
+   release carrying the stream route),
    `metriken-query` 0.9 → 0.34. `metriken-core` declares `links`, so a build
    holds one metriken-core version: metriken 0.9 is on core 0.2, and
    metriken-archive 0.3 needs metriken 0.11, on core 0.3.
-3. **Serve `/metrics/stream`** through the stream route for a registry
-   (metriken entry, piece 1; a `stream` feature of `metriken-exposition` is
-   recommended, a `metriken-streaming` crate is the alternative). Once rezolus
-   detects a source by its stream (rezolus entry, "Endpoint detection"),
-   `rezolus record` records cachecannon as it records an agent: rows stamped
-   by cachecannon at read time, native histograms, into the same `.dendro` as
-   the hosts. `/metrics/binary` stays for `.rez` output and older recorders.
+3. **Serve `/metrics/stream`** through `metriken-exposition`'s stream route
+   for a registry (metriken entry, piece 1). Once rezolus detects a source by
+   its stream (rezolus entry, "Endpoint detection"), `rezolus record` records
+   cachecannon as it records an agent: rows stamped by cachecannon at read
+   time, native histograms, into the same `.dendro` as the hosts.
+   `/metrics/binary` stays for `.rez` output and older recorders.
 4. **Record in process with `metriken-recorder`**, recording cachecannon's own
    registry, for runs without a rezolus recorder (metriken entry, piece 2).
    This is #176's route 1 with a published crate in place of rezolus's
@@ -69,8 +69,9 @@ quantile gauges, which the viewer cannot read as distributions, until step 3.
    after a crash, and the snapshot timer can be fixed-rate. Acquisition windows
    also need cachecannon's metrics to report one (metriken entry, piece 1).
    `--parquet` stays as an option for one release.
-5. **`cachecannon view` reads `.dendro`**: open archives through the storage
-   crate's `ArchiveReader` (a `metriken_query::MetricsSource`) beside parquet.
+5. **`cachecannon view` reads `.dendro`**: open archives through
+   `metriken-archive` 0.3's `ArchiveReader` (a `metriken_query::MetricsSource`),
+   and later through `metriken-query` over `metriken-storage`, beside parquet.
    Later, `cachecannon view` mounts `metriken-viewer` in place of its own
    dashboards (metriken entry, piece 5), after rezolus 6.0.0.
 6. **The template moves here.** cachecannon's dashboard template
@@ -80,15 +81,19 @@ quantile gauges, which the viewer cannot read as distributions, until step 3.
    loads it from the archive (metriken entry, piece 3).
 
 Steps 3 to 6 need step 2 (metriken-query 0.34's default features pull in
-metriken 0.11). Step 3 comes first: it is the piece every
-producer shares, and it puts cachecannon in the same archive as the hosts.
+metriken 0.11). Step 3 also waits for the metriken entry's path step 3 (the
+stream route), step 4 for path step 4 (`metriken-recorder`), and step 6 for
+path step 5 (templates); step 5's `.dendro` reading needs only step 2. Step 3
+comes first among them: it is the piece every producer shares, and it puts
+cachecannon in the same archive as the hosts.
 
 ## GO criteria
 
 - A `rezolus record` run with an agent and cachecannon as endpoints, and no
-  `-o`, writes one `.dendro` in which cachecannon's latency is a histogram, and
-  `rezolus view run.dendro` shows the cachecannon dashboard for the
-  cachecannon recording.
+  `-o`, writes one `.dendro` (`rezolus.dendro`) in which cachecannon's latency
+  is a histogram, and `rezolus view rezolus.dendro` shows the cachecannon
+  dashboard for the cachecannon recording, with no cachecannon template in the
+  viewer.
 - `cachecannon --dendro run.dendro` (or the chosen flag) leaves a readable
   archive after `kill -9` partway through a run.
 - `cachecannon view run.dendro` shows the same dashboards as for the
