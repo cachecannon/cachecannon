@@ -83,9 +83,9 @@ quantile gauges, which the viewer cannot read as distributions, until step 3.
 Steps 3 to 6 need step 2 (metriken-query 0.34's default features pull in
 metriken 0.11). Step 3 also waits for the metriken entry's path step 3 (the
 stream route), step 4 for path step 4 (`metriken-recorder`), and step 6 for
-path step 5 (templates); step 5's `.dendro` reading needs only step 2. Step 3
-comes first among them: it is the piece every producer shares, and it puts
-cachecannon in the same archive as the hosts.
+path step 5 (templates); step 5's `.dendro` reading needs only this entry's
+step 2. Step 3 comes first among them: it is the piece every producer shares,
+and it puts cachecannon in the same archive as the hosts.
 
 ## GO criteria
 
