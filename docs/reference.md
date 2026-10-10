@@ -490,6 +490,7 @@ Each snapshot contains the full set of metrics. The file uses the metriken expos
 | `requests_sent` | Total requests sent |
 | `responses_received` | Total responses received |
 | `request_errors` | Total request errors |
+| `requests_send_failed` | RESP and memcache main-workload requests not sent because a send failed (usually a full send pool or zero-copy slab); not counted in `requests_sent` |
 | `cache_hits` | Total cache hits (GET responses with data) |
 | `cache_misses` | Total cache misses (GET responses without data) |
 | `get_count` | Total GET operations |

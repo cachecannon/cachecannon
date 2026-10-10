@@ -298,6 +298,11 @@ pub fn run_benchmark_full(
     let total_conns = config.connection.total_connections();
     let standalone_task_capacity = standalone_task_capacity(total_conns, num_threads);
     let timer_slots = timer_slots(total_conns, num_threads);
+    let send_loads: Vec<SendLoad> = std::iter::once(SendLoad::main(&config))
+        .chain(SendLoad::append(&config))
+        .collect();
+    let send_slab_slots = send_slab_slots(&send_loads, num_threads);
+    let send_pool_slots = send_pool_slots(&send_loads, num_threads);
 
     let (recv_ring_size, recv_buffer_size) = resolved_recv_geometry(&config);
 
@@ -305,6 +310,8 @@ pub fn run_benchmark_full(
         .workers(num_threads)
         .standalone_task_capacity(standalone_task_capacity)
         .timer_slots(timer_slots)
+        .send_pool(send_pool_slots, RINGLINE_SEND_SLOT_SIZE)
+        .send_slab_slots(send_slab_slots)
         .pin_to_core(false) // We pin in create_for_worker instead
         .core_offset(0)
         .tcp_nodelay(true)
@@ -395,6 +402,7 @@ pub fn run_benchmark_full(
     let mut baseline_schedule_slip: Option<Histogram> = None;
     let mut baseline_perceived: Option<Histogram> = None;
     let mut baseline_requests_dropped = 0u64;
+    let mut baseline_requests_send_failed = 0u64;
     let mut current_phase = Phase::Precheck;
 
     let mut actual_duration = duration;
@@ -688,6 +696,7 @@ pub fn run_benchmark_full(
             baseline_schedule_slip = metrics::SCHEDULE_SLIP.load();
             baseline_perceived = metrics::PERCEIVED_LATENCY.load();
             baseline_requests_dropped = ratelimiter.as_ref().map(|rl| rl.dropped()).unwrap_or(0);
+            baseline_requests_send_failed = metrics::REQUESTS_SEND_FAILED.value();
 
             last_responses = baseline_responses;
             last_errors = baseline_errors;
@@ -950,6 +959,9 @@ pub fn run_benchmark_full(
         .map(|rl| rl.dropped().saturating_sub(baseline_requests_dropped))
         .unwrap_or(0);
 
+    let requests_send_failed =
+        metrics::REQUESTS_SEND_FAILED.value() - baseline_requests_send_failed;
+
     let get_latencies = delta_latency_stats(&metrics::GET_LATENCY, &baseline_get_latency);
     let get_ttfb = delta_latency_stats(&metrics::GET_TTFB, &baseline_get_ttfb);
     let set_latencies = delta_latency_stats(&metrics::SET_LATENCY, &baseline_set_latency);
@@ -986,6 +998,7 @@ pub fn run_benchmark_full(
         conns_failed: failed,
         conns_total: total_connections as u64,
         requests_dropped,
+        requests_send_failed,
         schedule_slip,
         perceived_latency,
     };
@@ -1289,11 +1302,164 @@ pub(crate) fn resolved_recv_geometry(config: &Config) -> (u16, u32) {
     )
 }
 
+/// ringline's default send-pool slot size, kept so a slot still holds one
+/// 16 KiB TLS record.
+const RINGLINE_SEND_SLOT_SIZE: u32 = 16448;
+/// Plaintext bytes in one TLS record, which takes one send-pool slot.
+const TLS_RECORD_PLAINTEXT: usize = 16384;
+/// ringline's defaults for the send copy pool and the zero-copy send slab, per
+/// worker; the floors for small runs.
+const RINGLINE_SEND_POOL_DEFAULT: usize = 1024;
+const RINGLINE_SEND_SLAB_DEFAULT: usize = 512;
+/// RESP and memcache framing around one request's key and value, rounded up.
+const REQUEST_FRAMING: usize = 64;
+/// Guarded (zero-copy) values one send can carry: `MAX_FLUSH_GUARDS` in
+/// ringline-redis and ringline-memcache. A batch with more is sent as several
+/// sends.
+const MAX_GUARDS_PER_SEND: usize = 8;
+
+/// The shape of one group of connections, for sizing send capacity.
+#[derive(Clone, Copy)]
+struct SendLoad {
+    /// Connections in the group across all workers.
+    connections: usize,
+    /// Requests a connection keeps outstanding.
+    pipeline_depth: usize,
+    /// Requests coalesced into one batch.
+    batch_size: usize,
+    key_len: usize,
+    value_len: usize,
+    tls: bool,
+}
+
+impl SendLoad {
+    /// The main workload's connections.
+    fn main(config: &Config) -> Self {
+        Self {
+            connections: config.connection.total_connections(),
+            pipeline_depth: config.connection.pipeline_depth,
+            batch_size: config.connection.effective_batch_size(),
+            key_len: config.workload.keyspace.length,
+            value_len: config.workload.values.length,
+            tls: config.target.tls,
+        }
+    }
+
+    /// The append writers. They fire as few as one request per reply, so
+    /// size for one send per request.
+    fn append(config: &Config) -> Option<Self> {
+        let append = config.workload.append.as_ref()?;
+        Some(Self {
+            connections: append.connections,
+            pipeline_depth: append.pipeline_depth,
+            batch_size: 1,
+            ..Self::main(config)
+        })
+    }
+
+    /// Requests in one batch: never more than the pipeline holds.
+    fn batch(&self) -> usize {
+        self.batch_size.clamp(1, self.pipeline_depth.max(1))
+    }
+
+    /// Sends one connection can have outstanding. The fire loop starts a
+    /// batch whenever the pipeline has room for one, so a connection holds
+    /// up to `pipeline_depth / batch` batches, and a batch with more guarded
+    /// values than one send carries is split.
+    fn sends_per_connection(&self) -> usize {
+        let batches = self.pipeline_depth.max(1).div_ceil(self.batch());
+        batches.saturating_mul(self.sends_per_batch())
+    }
+
+    fn zero_copy_values(&self) -> bool {
+        !self.tls && self.value_len >= crate::worker::ZC_VALUE_THRESHOLD
+    }
+
+    fn sends_per_batch(&self) -> usize {
+        if self.zero_copy_values() {
+            self.batch().div_ceil(MAX_GUARDS_PER_SEND)
+        } else {
+            1
+        }
+    }
+
+    /// Send-pool slots one batch's copied bytes take: keys and framing, and
+    /// the values too when they are copied (below the zero-copy threshold,
+    /// or under TLS, which encrypts every byte into pool slots, one record
+    /// per slot). At least one slot per send.
+    fn slots_per_batch(&self) -> usize {
+        let value = if self.zero_copy_values() {
+            0
+        } else {
+            self.value_len
+        };
+        let bytes = self
+            .batch()
+            .saturating_mul(self.key_len + value + REQUEST_FRAMING);
+        let per_slot = if self.tls {
+            TLS_RECORD_PLAINTEXT
+        } else {
+            RINGLINE_SEND_SLOT_SIZE as usize
+        };
+        bytes.div_ceil(per_slot).max(self.sends_per_batch())
+    }
+}
+
+/// Sum `per_connection(load)` over the busiest worker's share of each group,
+/// plus headroom, within `floor..=u16::MAX`.
+fn per_worker(
+    loads: &[SendLoad],
+    num_threads: usize,
+    floor: usize,
+    per_connection: impl Fn(&SendLoad) -> usize,
+) -> u16 {
+    loads
+        .iter()
+        .map(|l| {
+            connections_per_worker(l.connections, num_threads).saturating_mul(per_connection(l))
+        })
+        .fold(POOL_HEADROOM, usize::saturating_add)
+        .clamp(floor, u16::MAX as usize) as u16
+}
+
+/// Zero-copy send slab entries to request from ringline, per worker.
+///
+/// A zero-copy send holds one slab entry until the kernel's notification
+/// arrives, which can be after the response. When the slab is full, `fire_*`
+/// or `flush` returns an error and the client discards the batch; nothing
+/// queues the connection for capacity. Two entries per outstanding
+/// send cover a send in flight and one whose notification is still pending.
+/// A load with copied values uses the slab only to coalesce copies, which
+/// ringline skips when the slab is full, so it adds nothing. ringline writes
+/// every entry (about 1.3 KB) when it builds the slab.
+fn send_slab_slots(loads: &[SendLoad], num_threads: usize) -> u16 {
+    per_worker(loads, num_threads, RINGLINE_SEND_SLAB_DEFAULT, |l| {
+        if l.zero_copy_values() {
+            2 * l.sends_per_connection()
+        } else {
+            0
+        }
+    })
+}
+
+/// Send copy-pool slots to request from ringline, per worker.
+///
+/// Copied bytes stay in pool slots until their send completes; two batches'
+/// worth per outstanding batch, as for the slab. Each slot is
+/// `RINGLINE_SEND_SLOT_SIZE` bytes of virtual memory, committed as slots are
+/// first used.
+fn send_pool_slots(loads: &[SendLoad], num_threads: usize) -> u16 {
+    per_worker(loads, num_threads, RINGLINE_SEND_POOL_DEFAULT, |l| {
+        let batches = l.pipeline_depth.max(1).div_ceil(l.batch());
+        2 * batches * l.slots_per_batch()
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        RECV_BUFFER_SIZE_DEFAULT, RECV_RING_SIZE_DEFAULT, resolved_recv_geometry,
-        standalone_task_capacity, timer_slots,
+        RECV_BUFFER_SIZE_DEFAULT, RECV_RING_SIZE_DEFAULT, SendLoad, resolved_recv_geometry,
+        send_pool_slots, send_slab_slots, standalone_task_capacity, timer_slots,
     };
     use crate::config::Config;
 
@@ -1304,6 +1470,117 @@ mod tests {
         config.general.recv_ring_size = ring;
         config.general.recv_buffer_size = buffer;
         config
+    }
+
+    fn load(connections: usize, depth: usize, batch: usize, value_len: usize) -> SendLoad {
+        SendLoad {
+            connections,
+            pipeline_depth: depth,
+            batch_size: batch,
+            key_len: 16,
+            value_len,
+            tls: false,
+        }
+    }
+
+    #[test]
+    fn send_slab_covers_two_sends_per_connection() {
+        // 2048 connections over 4 threads, depth 16, batch 16, 64 KiB values:
+        // a batch of 16 guarded values is two sends (8 guards each).
+        let slab = send_slab_slots(&[load(2048, 16, 16, 65536)], 4) as usize;
+        assert!(slab >= 512 * 2 * 2, "{slab}");
+    }
+
+    #[test]
+    fn a_batch_smaller_than_the_pipeline_holds_more_sends() {
+        // Depth 16, batch 1: sixteen sends per connection can be outstanding.
+        let slab = send_slab_slots(&[load(256, 16, 1, 65536)], 4) as usize;
+        assert!(slab >= 64 * 2 * 16, "{slab}");
+        let pool = send_pool_slots(&[load(256, 16, 1, 64)], 4) as usize;
+        assert!(pool >= 64 * 2 * 16, "{pool}");
+    }
+
+    #[test]
+    fn send_pools_keep_the_ringline_defaults_as_floors() {
+        assert_eq!(send_slab_slots(&[load(8, 1, 1, 64)], 8), 512);
+        assert_eq!(send_pool_slots(&[load(8, 1, 1, 64)], 8), 1024);
+    }
+
+    #[test]
+    fn send_pool_counts_copied_values_but_not_zero_copy_ones() {
+        // 4 KiB values go zero-copy, so a batch of 16 needs two slots (one per
+        // send of 8 guards); 2 KiB values are copied, so a batch of 16 (about
+        // 33 KiB) needs three.
+        let zc = send_pool_slots(&[load(4096, 16, 16, 4096)], 4) as usize;
+        let copied = send_pool_slots(&[load(4096, 16, 16, 2048)], 4) as usize;
+        assert!(zc >= 1024 * 2 * 2, "{zc}");
+        assert!(copied >= 1024 * 2 * 3, "{copied}");
+        assert!(copied > zc);
+    }
+
+    #[test]
+    fn tls_copies_every_value_into_the_pool() {
+        let plain = send_pool_slots(&[load(256, 16, 16, 65536)], 4) as usize;
+        let tls = send_pool_slots(
+            &[SendLoad {
+                tls: true,
+                ..load(256, 16, 16, 65536)
+            }],
+            4,
+        ) as usize;
+        // 16 × 64 KiB of plaintext is 65 records per batch.
+        assert!(tls >= 64 * 2 * 65, "{tls}");
+        assert!(tls > plain);
+    }
+
+    #[test]
+    fn append_connections_add_to_the_main_ones() {
+        let main = load(512, 16, 16, 65536);
+        let append = load(64, 32, 1, 65536);
+        let both = send_slab_slots(&[main, append], 1) as usize;
+        let alone = send_slab_slots(&[main], 1) as usize;
+        assert!(both >= alone + 64 * 2 * 32, "{both} vs {alone}");
+    }
+
+    #[test]
+    fn send_pools_saturate_at_u16() {
+        assert_eq!(
+            send_slab_slots(&[load(1 << 20, 16, 16, 65536)], 1),
+            u16::MAX
+        );
+        assert_eq!(send_pool_slots(&[load(1 << 20, 16, 16, 64)], 1), u16::MAX);
+    }
+
+    #[test]
+    fn sizes_follow_the_parsed_config() {
+        // 2048 connections, depth 16, batch 16, 64 KiB values over 4 threads.
+        let mut config = test_config(None, None);
+        config.connection.connections = 2048;
+        config.connection.pipeline_depth = 16;
+        config.workload.values.length = 65536;
+        let loads = [SendLoad::main(&config)];
+        assert!(send_slab_slots(&loads, 4) as usize >= 512 * 2 * 2);
+
+        config.target.tls = true;
+        let tls = [SendLoad::main(&config)];
+        assert!(send_pool_slots(&tls, 4) > send_pool_slots(&loads, 4));
+    }
+
+    #[test]
+    fn append_writers_send_one_request_at_a_time() {
+        let mut config = test_config(None, None);
+        config.workload.values.length = 65536;
+        config.workload.append =
+            toml::from_str("batch = 1\nevery = \"1s\"\nconnections = 64\npipeline_depth = 32\n")
+                .ok();
+        let append = SendLoad::append(&config).expect("append configured");
+        // 32 single-request zero-copy sends, two entries each.
+        assert!(send_slab_slots(&[append], 1) as usize >= 64 * 2 * 32);
+    }
+
+    #[test]
+    fn copied_values_leave_the_slab_at_its_default() {
+        assert_eq!(send_slab_slots(&[load(4096, 64, 1, 64)], 4), 512);
     }
 
     #[test]
