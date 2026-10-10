@@ -329,7 +329,7 @@ fn make_value_guard(
 /// caps pipelined SET throughput, so below this threshold we use the
 /// copy-based `fire_set` path (one CQE, no pinning) instead. ZC only pays off
 /// once the value is large enough to amortize the per-send cost.
-const ZC_VALUE_THRESHOLD: usize = 4096;
+pub(crate) const ZC_VALUE_THRESHOLD: usize = 4096;
 
 // ── Rate-limit dispatch ─────────────────────────────────────────────────
 
@@ -1314,10 +1314,20 @@ async fn drive_resp_workload(
         if phase.should_stop() {
             return Ok(());
         }
+        // A connection closed while nothing is in flight fails every send
+        // and never reaches `recv`, where a close is otherwise noticed.
+        // Reported as Eof; a reset while idle is not told apart.
+        if client.pending_count() == 0 && !client.is_alive() {
+            requeue_drained_prefill(&state.task_state, key_buf, prefill_in_flight.drain(..));
+            return Err(DisconnectReason::Eof);
+        }
         // One clock read per iteration stamps every request fired in this
         // batch; the batch is one coalesced send, so the error is bounded by
         // the fire loop, not the network.
         let fired_at = Instant::now();
+        // Requests fired this iteration and still sent; added to
+        // `REQUESTS_SENT` once the batch is flushed.
+        let mut fired_count: u64 = 0;
         // Set when the limiter could not fund a batch in Warmup/Running. Only
         // then does an idle connection park on the dispatcher; see below.
         let mut starved = false;
@@ -1349,6 +1359,7 @@ async fn drive_resp_workload(
                 }
 
                 let user_data = key_id as u64 | PREFILL_MARKER;
+                let before = client.pending_count();
                 let res = if value_len >= ZC_VALUE_THRESHOLD {
                     let guard =
                         make_value_guard(rng, &state.task_state.value_pool, value_len, pool_len);
@@ -1359,7 +1370,7 @@ async fn drive_resp_workload(
                 };
                 match res {
                     Ok(_) => {
-                        metrics::REQUESTS_SENT.increment();
+                        fired_count += 1;
                         prefill_in_flight.push_back(key_id);
                         inflight.push(fired_at);
                     }
@@ -1368,6 +1379,15 @@ async fn drive_resp_workload(
                             .task_state
                             .prefill_queues
                             .push_front(endpoint_idx, key_id);
+                        let discarded =
+                            note_failed_fire(before, client.pending_count(), &mut inflight, true);
+                        fired_count -= discarded as u64;
+                        requeue_newest(
+                            &state.task_state.prefill_queues,
+                            endpoint_idx,
+                            &mut prefill_in_flight,
+                            discarded,
+                        );
                         break;
                     }
                 }
@@ -1414,6 +1434,7 @@ async fn drive_resp_workload(
 
                     // user_data encodes key_id with backfill marker (high bit set)
                     let user_data = key_id as u64 | BACKFILL_MARKER;
+                    let before = client.pending_count();
                     let res = if value_len >= ZC_VALUE_THRESHOLD {
                         let guard = make_value_guard(
                             rng,
@@ -1429,11 +1450,17 @@ async fn drive_resp_workload(
                     };
                     match res {
                         Ok(_) => {
-                            metrics::REQUESTS_SENT.increment();
+                            fired_count += 1;
                             let _ = metrics::SCHEDULE_SLIP.increment(slip_ns);
                             inflight.push(fired_at);
                         }
                         Err(_) => {
+                            fired_count -= note_failed_fire(
+                                before,
+                                client.pending_count(),
+                                &mut inflight,
+                                true,
+                            ) as u64;
                             backfill_queue.push(key_id);
                             break;
                         }
@@ -1497,6 +1524,7 @@ async fn drive_resp_workload(
 
                 // Choose command
                 let roll = rng.random_range(0..100);
+                let before = client.pending_count();
                 let sent = if roll < get_ratio {
                     // Pass key_id as user_data for backfill-on-miss tracking
                     client.fire_get(key_buf, key_id as u64).is_ok()
@@ -1512,14 +1540,35 @@ async fn drive_resp_workload(
                 };
 
                 if sent {
-                    metrics::REQUESTS_SENT.increment();
+                    fired_count += 1;
                     let _ = metrics::SCHEDULE_SLIP.increment(slip_ns);
                     inflight.push(fired_at);
                 } else {
+                    fired_count -=
+                        note_failed_fire(before, client.pending_count(), &mut inflight, true)
+                            as u64;
                     break;
                 }
             }
         }
+
+        // Send what this iteration buffered. `recv` would flush it too, but a
+        // failure there is reported as a receive error and its requests would
+        // stay counted as sent.
+        let before = client.pending_count();
+        if client.flush().is_err() {
+            let discarded = note_discarded(before, client.pending_count(), &mut inflight, true);
+            fired_count -= discarded as u64;
+            if phase == Phase::Prefill {
+                requeue_newest(
+                    &state.task_state.prefill_queues,
+                    endpoint_idx,
+                    &mut prefill_in_flight,
+                    discarded,
+                );
+            }
+        }
+        metrics::REQUESTS_SENT.add(fired_count);
 
         // Refresh the slip gauge every iteration (including when the pipeline
         // is full and we did not fire) so perceived latency reflects a still-
@@ -1769,6 +1818,20 @@ enum McClient {
 }
 
 impl McClient {
+    fn is_alive(&self) -> bool {
+        match self {
+            McClient::Ascii(c, _) => c.is_alive(),
+            McClient::Binary(c, _) => c.is_alive(),
+        }
+    }
+
+    fn flush(&mut self) -> Result<(), ringline_memcache::Error> {
+        match self {
+            McClient::Ascii(c, _) => c.flush(),
+            McClient::Binary(c, _) => c.flush(),
+        }
+    }
+
     #[inline]
     fn pending_count(&self) -> usize {
         match self {
@@ -1989,10 +2052,20 @@ async fn drive_memcache_workload(
         if phase.should_stop() {
             return Ok(());
         }
+        // A connection closed while nothing is in flight fails every send
+        // and never reaches `recv`, where a close is otherwise noticed.
+        // Reported as Eof; a reset while idle is not told apart.
+        if client.pending_count() == 0 && !client.is_alive() {
+            requeue_drained_prefill(&state.task_state, key_buf, prefill_in_flight.drain(..));
+            return Err(DisconnectReason::Eof);
+        }
         // One clock read per iteration stamps every request fired in this
         // batch; the batch is one coalesced send, so the error is bounded by
         // the fire loop, not the network.
         let fired_at = Instant::now();
+        // Requests fired this iteration and still sent; added to
+        // `REQUESTS_SENT` once the batch is flushed.
+        let mut fired_count: u64 = 0;
         // Set when the limiter could not fund a batch in Warmup/Running. Only
         // then does an idle connection park on the dispatcher; see below.
         let mut starved = false;
@@ -2025,9 +2098,10 @@ async fn drive_memcache_workload(
                     make_value_guard(rng, &state.task_state.value_pool, value_len, pool_len);
 
                 let user_data = key_id as u64 | PREFILL_MARKER;
+                let before = client.pending_count();
                 match client.fire_set_with_guard(key_buf, guard, 0, 0, user_data) {
                     Ok(_) => {
-                        metrics::REQUESTS_SENT.increment();
+                        fired_count += 1;
                         prefill_in_flight.push_back(key_id);
                         inflight.push(fired_at);
                     }
@@ -2036,6 +2110,15 @@ async fn drive_memcache_workload(
                             .task_state
                             .prefill_queues
                             .push_front(endpoint_idx, key_id);
+                        let discarded =
+                            note_failed_fire(before, client.pending_count(), &mut inflight, true);
+                        fired_count -= discarded as u64;
+                        requeue_newest(
+                            &state.task_state.prefill_queues,
+                            endpoint_idx,
+                            &mut prefill_in_flight,
+                            discarded,
+                        );
                         break;
                     }
                 }
@@ -2080,13 +2163,20 @@ async fn drive_memcache_workload(
                     token_budget -= 1;
 
                     let user_data = key_id as u64 | BACKFILL_MARKER;
+                    let before = client.pending_count();
                     match client.fire_set_with_guard(key_buf, guard, 0, 0, user_data) {
                         Ok(_) => {
-                            metrics::REQUESTS_SENT.increment();
+                            fired_count += 1;
                             let _ = metrics::SCHEDULE_SLIP.increment(slip_ns);
                             inflight.push(fired_at);
                         }
                         Err(_) => {
+                            fired_count -= note_failed_fire(
+                                before,
+                                client.pending_count(),
+                                &mut inflight,
+                                true,
+                            ) as u64;
                             backfill_queue.push(key_id);
                             break;
                         }
@@ -2124,6 +2214,7 @@ async fn drive_memcache_workload(
 
                 // Choose command
                 let roll = rng.random_range(0..100);
+                let before = client.pending_count();
                 let sent = if roll < get_ratio {
                     client.fire_get(key_buf, key_id as u64).is_ok()
                 } else if roll < get_ratio + delete_ratio {
@@ -2135,14 +2226,35 @@ async fn drive_memcache_workload(
                 };
 
                 if sent {
-                    metrics::REQUESTS_SENT.increment();
+                    fired_count += 1;
                     let _ = metrics::SCHEDULE_SLIP.increment(slip_ns);
                     inflight.push(fired_at);
                 } else {
+                    fired_count -=
+                        note_failed_fire(before, client.pending_count(), &mut inflight, true)
+                            as u64;
                     break;
                 }
             }
         }
+
+        // Send what this iteration buffered. `recv` would flush it too, but a
+        // failure there is reported as a receive error and its requests would
+        // stay counted as sent.
+        let before = client.pending_count();
+        if client.flush().is_err() {
+            let discarded = note_discarded(before, client.pending_count(), &mut inflight, true);
+            fired_count -= discarded as u64;
+            if phase == Phase::Prefill {
+                requeue_newest(
+                    &state.task_state.prefill_queues,
+                    endpoint_idx,
+                    &mut prefill_in_flight,
+                    discarded,
+                );
+            }
+        }
+        metrics::REQUESTS_SENT.add(fired_count);
 
         if let Some(ref rl) = state.task_state.ratelimiter {
             crate::metrics::CURRENT_SLIP_NS.set(rl.slip_ns() as i64);
@@ -2864,6 +2976,12 @@ async fn drive_resp_append(
         if state.task_state.shared.phase().should_stop() {
             return Ok(());
         }
+        // See the main loop: a connection closed while idle never reaches
+        // `recv`.
+        if client.pending_count() == 0 && !client.is_alive() {
+            requeue_drained_append(&state.task_state, key_buf, in_flight.drain(..));
+            return Err(DisconnectReason::Eof);
+        }
         let fired_at = Instant::now();
 
         let free = pipeline_depth.saturating_sub(client.pending_count());
@@ -2884,6 +3002,7 @@ async fn drive_resp_append(
                 }
                 budget -= 1;
                 let user_data = key_id as u64 | APPEND_MARKER;
+                let before = client.pending_count();
                 let res = if value_len >= ZC_VALUE_THRESHOLD {
                     let guard =
                         make_value_guard(rng, &state.task_state.value_pool, value_len, pool_len);
@@ -2899,10 +3018,20 @@ async fn drive_resp_append(
                     }
                     Err(_) => {
                         queues.push_front(endpoint_idx, key_id);
+                        let discarded =
+                            note_failed_fire(before, client.pending_count(), &mut inflight, false);
+                        requeue_newest(queues, endpoint_idx, &mut in_flight, discarded);
                         break;
                     }
                 }
             }
+        }
+
+        // Send what this iteration buffered; see the main fire loop.
+        let before = client.pending_count();
+        if client.flush().is_err() {
+            let discarded = note_discarded(before, client.pending_count(), &mut inflight, false);
+            requeue_newest(queues, endpoint_idx, &mut in_flight, discarded);
         }
 
         if client.pending_count() == 0 {
@@ -3057,6 +3186,12 @@ async fn drive_memcache_append(
         if state.task_state.shared.phase().should_stop() {
             return Ok(());
         }
+        // See the main loop: a connection closed while idle never reaches
+        // `recv`.
+        if client.pending_count() == 0 && !client.is_alive() {
+            requeue_drained_append(&state.task_state, key_buf, in_flight.drain(..));
+            return Err(DisconnectReason::Eof);
+        }
         let fired_at = Instant::now();
 
         let free = pipeline_depth.saturating_sub(client.pending_count());
@@ -3078,6 +3213,7 @@ async fn drive_memcache_append(
                 let guard =
                     make_value_guard(rng, &state.task_state.value_pool, value_len, pool_len);
                 let user_data = key_id as u64 | APPEND_MARKER;
+                let before = client.pending_count();
                 match client.fire_set_with_guard(key_buf, guard, 0, 0, user_data) {
                     Ok(_) => {
                         in_flight.push_back(key_id);
@@ -3085,10 +3221,20 @@ async fn drive_memcache_append(
                     }
                     Err(_) => {
                         queues.push_front(endpoint_idx, key_id);
+                        let discarded =
+                            note_failed_fire(before, client.pending_count(), &mut inflight, false);
+                        requeue_newest(queues, endpoint_idx, &mut in_flight, discarded);
                         break;
                     }
                 }
             }
+        }
+
+        // Send what this iteration buffered; see the main fire loop.
+        let before = client.pending_count();
+        if client.flush().is_err() {
+            let discarded = note_discarded(before, client.pending_count(), &mut inflight, false);
+            requeue_newest(queues, endpoint_idx, &mut in_flight, discarded);
         }
 
         if client.pending_count() == 0 {
@@ -3139,6 +3285,55 @@ async fn drive_memcache_append(
 // every request behind it, and the only recovery is to abandon the connection:
 // count everything in flight as timed out, close, reconnect.
 
+/// Account for a send the client could not make. The client discards every
+/// request buffered since its last flush; `before` and `after` are
+/// `pending_count()` around the failed call. Those requests are dropped from
+/// `inflight` and, when `count_failed`, counted in `REQUESTS_SEND_FAILED`.
+/// Returns how many were discarded, which are the newest entries of any
+/// per-request queue the caller keeps.
+fn note_discarded(
+    before: usize,
+    after: usize,
+    inflight: &mut InFlight,
+    count_failed: bool,
+) -> usize {
+    let discarded = before.saturating_sub(after);
+    if count_failed {
+        metrics::REQUESTS_SEND_FAILED.add(discarded as u64);
+    }
+    inflight.forget_newest(discarded);
+    discarded
+}
+
+/// [`note_discarded`] for a `fire_*` call that returned an error, which also
+/// did not send the request it was given.
+fn note_failed_fire(
+    before: usize,
+    after: usize,
+    inflight: &mut InFlight,
+    count_failed: bool,
+) -> usize {
+    if count_failed {
+        metrics::REQUESTS_SEND_FAILED.increment();
+    }
+    note_discarded(before, after, inflight, count_failed)
+}
+
+/// Put the `n` newest keys of `in_flight` back at the front of `endpoint`'s
+/// queue, in their original order.
+fn requeue_newest(
+    queues: &PrefillQueues,
+    endpoint: usize,
+    in_flight: &mut VecDeque<usize>,
+    n: usize,
+) {
+    for _ in 0..n {
+        if let Some(key_id) = in_flight.pop_back() {
+            queues.push_front(endpoint, key_id);
+        }
+    }
+}
+
 /// Fire times of the requests in flight on one connection, oldest first.
 /// Replies are FIFO, so the front entry is always the request the next reply
 /// answers, and its age is the age of the oldest outstanding request.
@@ -3169,6 +3364,13 @@ impl InFlight {
     #[inline]
     fn pop(&mut self) {
         self.fired.pop_front();
+    }
+
+    /// Drop the `n` most recently pushed requests: ones the client discarded
+    /// before they were sent.
+    fn forget_newest(&mut self, n: usize) {
+        let keep = self.fired.len().saturating_sub(n);
+        self.fired.truncate(keep);
     }
 
     fn len(&self) -> usize {
@@ -3575,6 +3777,27 @@ fn pin_to_cpu(_cpu_id: usize) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_failed_fire_requeues_the_discarded_keys_in_order() {
+        let queues = build_prefill_queues(0, 16, &[], &None);
+        let mut inflight = InFlight::new(std::time::Duration::ZERO, 8);
+        let mut keys: VecDeque<usize> = VecDeque::new();
+        let now = std::time::Instant::now();
+        // Key 1 was answered earlier; 2 and 3 are buffered when the fire of 4
+        // fails, so the client discards 2, 3 and 4.
+        for key in [1, 2, 3] {
+            keys.push_back(key);
+            inflight.push(now);
+        }
+        queues.push_front(0, 4);
+        requeue_newest(&queues, 0, &mut keys, 2);
+        inflight.forget_newest(2);
+        assert_eq!(keys, [1]);
+        assert_eq!(inflight.len(), 1);
+        let order: Vec<usize> = std::iter::from_fn(|| queues.pop_front(0)).collect();
+        assert_eq!(order, [2, 3, 4]);
+    }
 
     /// A dispatcher with a slot already queued, without needing an executor:
     /// `dispatch` and `drain` are synchronous, and they are where every bug in

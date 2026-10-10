@@ -84,13 +84,15 @@ the highest connection count, before trusting the counters it drives.
 
 ## ringline
 
-**Per-worker pools default to 256 and are sized independently of the workload.**
-Three matter: `standalone_task_capacity` and `timer_slots` are scaled by
+**Per-worker pools default to fixed sizes, independent of the workload.**
+Five matter: `standalone_task_capacity` and `timer_slots` are scaled by
 connections-per-worker in `src/runner.rs` (one was silently capping runs at 2040
-connections, the other panicking workers at 4096); `recv_buffer.ring_size` is
-deliberately left at ringline's default and exposed as `general.recv_ring_size`
-instead. Adding a fourth pool user means checking whether it needs the same
-treatment.
+connections, the other panicking workers at 4096); the send pool and zero-copy
+send slab are sized from connections, pipeline depth, batch size, value length
+and TLS (`SendLoad`; at ringline's defaults some connections sent almost nothing
+and went unmeasured); `recv_buffer.ring_size` is deliberately left at ringline's
+default and exposed as `general.recv_ring_size` instead. Adding another pool
+user means checking whether it needs the same treatment.
 
 **Recv buffers are not held per connection.** A buffer is held only between a
 completion and the client draining it, so ring depth divided by connection count

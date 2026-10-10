@@ -160,6 +160,14 @@ pub struct Results {
     pub conns_total: u64,
     /// Requests shed by the rate limiter under overload (bucket overflow).
     pub requests_dropped: u64,
+    /// RESP and memcache main-workload requests not sent because a send
+    /// failed, usually for a full send pool or zero-copy slab: the request
+    /// whose `fire_*` call failed, and every request buffered since the
+    /// client's last flush, which the client drops with the failed batch.
+    /// None of them is counted in `requests`. A nonzero count means some
+    /// connections sent less than their pipeline depth allows, and the latency
+    /// percentiles cover only the requests that were sent.
+    pub requests_send_failed: u64,
     /// Schedule slip percentiles (microseconds). Zero when no rate limit.
     pub schedule_slip: LatencyStats,
     /// Perceived (arrival-relative, CO-honest) response latency percentiles (µs).
@@ -213,9 +221,10 @@ impl Results {
         }
     }
 
-    /// Total requests offered = sent + dropped.
+    /// Total requests offered = sent + dropped by the limiter + discarded by
+    /// a failed send.
     pub fn offered(&self) -> u64 {
-        self.requests + self.requests_dropped
+        self.requests + self.requests_dropped + self.requests_send_failed
     }
 
     /// Percentage of offered requests shed under overload (0.0-100.0).
@@ -258,16 +267,22 @@ mod overload_tests {
             conns_failed: 0,
             conns_total: 0,
             requests_dropped: dropped,
+            requests_send_failed: 0,
             schedule_slip: Default::default(),
             perceived_latency: Default::default(),
         }
     }
 
     #[test]
-    fn offered_is_sent_plus_dropped() {
+    fn offered_is_sent_plus_dropped_plus_send_failed() {
         let r = results_with(900, 100);
         assert_eq!(r.offered(), 1000);
         assert!((r.overload_pct() - 10.0).abs() < 1e-9);
+        let r = Results {
+            requests_send_failed: 50,
+            ..results_with(900, 100)
+        };
+        assert_eq!(r.offered(), 1050);
     }
 
     #[test]

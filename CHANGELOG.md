@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- `requests_send_failed` counts RESP and memcache main-workload requests not
+  sent because a send failed, and is included in `offered`. It is in the
+  JSON result, and the clean and verbose outputs print it when it is
+  nonzero.
+
 ### Changed
 - Built against unreleased ringline main (ringline-rs/ringline `1be7049`:
   ringline 0.7.0-alpha.0, ringline-redis 0.7.0, ringline-memcache 0.7.2,
@@ -22,6 +28,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   logging.
 
 ### Fixed
+- A connection the server closed while it had no requests in flight now
+  reconnects. Its sends failed without reaching `recv`, where a close is
+  noticed, so it retried for the rest of the run: a rate-limited run (64
+  connections, 2000 req/s) whose server restarted after 10 s of a 30 s run
+  finished at 499 req/s with batch 16 and 588 with batch 1, and now at 1932.
+- The ringline send copy pool and zero-copy send slab are sized from the
+  workload, per worker: two of each outstanding send's slots and entries for
+  every connection, counting `pipeline_depth / batch_size` batches per
+  connection, a send for every 8 zero-copy values in a batch, values copied
+  under TLS, and the append writers (one request per send). The slab is
+  sized only for zero-copy values. Both used ringline's fixed defaults (1024
+  slots and 512 entries). When either ran out, the client discarded the batch
+  and the connection slept and retried with nothing queuing it for capacity,
+  so some connections sent almost nothing and the latency percentiles covered
+  only the others. At 2048 connections, depth 16, 64 KiB values and 4
+  threads, with `RLIMIT_MEMLOCK` raised so zero-copy sends could not fail
+  with `ENOMEM` (ringline-rs/ringline#642), 101 connections served no request
+  in a 10 s window at the defaults, and none with two slab entries per
+  connection (this change sizes four for that run).
+- A failed send discards every request the client had buffered since its
+  last flush. Those requests stayed in `requests_sent` and in the
+  request-timeout queue, and prefill and append keys among them were not
+  requeued. Each fire loop now flushes what it buffered itself, rather than
+  leaving the batch tail to `recv`, where a failure was reported as a receive
+  error, and withdraws and requeues the discarded requests.
 - Each process now draws a fresh RNG seed, so separate cachecannon processes no
   longer send the same key sequence. Every connection's RNG was seeded from its
   position alone (`42 + worker_id * 10000 + i`), so with the same `threads` and

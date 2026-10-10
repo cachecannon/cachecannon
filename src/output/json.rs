@@ -101,6 +101,7 @@ struct ResultsOutput {
     /// Requests abandoned at `connection.request_timeout` (included in errors).
     timeouts: u64,
     requests_dropped: u64,
+    requests_send_failed: u64,
     offered: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     schedule_slip: Option<LatencyOutput>,
@@ -339,6 +340,7 @@ impl OutputFormatter for JsonFormatter {
             conns_failed: results.conns_failed,
             timeouts: results.timeouts,
             requests_dropped: results.requests_dropped,
+            requests_send_failed: results.requests_send_failed,
             offered: results.offered(),
             schedule_slip: if results.schedule_slip.p99_us > 0.0 || results.requests_dropped > 0 {
                 Some(LatencyOutput {

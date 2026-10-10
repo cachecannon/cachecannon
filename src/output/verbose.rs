@@ -171,6 +171,14 @@ impl OutputFormatter for VerboseFormatter {
                 );
             }
         }
+        if results.requests_send_failed > 0 {
+            tracing::warn!(
+                "{} requests not sent because a send failed (usually a full send pool \
+                 or zero-copy slab): some connections sent less than the pipeline depth, \
+                 and latency covers only sent requests",
+                results.requests_send_failed
+            );
+        }
         tracing::info!(
             "connections: {} active, {} failed",
             results.conns_active,

@@ -453,6 +453,16 @@ impl OutputFormatter for CleanFormatter {
             }
         }
 
+        if results.requests_send_failed > 0 {
+            println!(
+                "{}",
+                self.red(&format!(
+                    "Send failures: {} requests not sent (usually a full send pool or zero-copy slab)",
+                    results.requests_send_failed
+                ))
+            );
+        }
+
         println!();
 
         // Connections line

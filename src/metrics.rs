@@ -17,6 +17,7 @@ pub mod request {
     pub const RECEIVED: usize = 1;
     pub const ERRORS: usize = 2;
     pub const TIMEOUTS: usize = 3;
+    pub const SEND_FAILED: usize = 4;
 }
 
 /// Counter slot indices for cache metrics.
@@ -54,6 +55,12 @@ pub mod ops {
 // Request counters
 #[metric(name = "requests_sent", description = "Total requests sent")]
 pub static REQUESTS_SENT: Counter = Counter::new(&REQUEST, request::SENT);
+
+#[metric(
+    name = "requests_send_failed",
+    description = "RESP and memcache main-workload requests not sent because a send failed (usually a full send pool or zero-copy slab)"
+)]
+pub static REQUESTS_SEND_FAILED: Counter = Counter::new(&REQUEST, request::SEND_FAILED);
 
 #[metric(name = "responses_received", description = "Total responses received")]
 pub static RESPONSES_RECEIVED: Counter = Counter::new(&REQUEST, request::RECEIVED);
