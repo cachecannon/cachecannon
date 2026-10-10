@@ -391,6 +391,7 @@ fn load_base_config(args: &BenchArgs) -> Result<Config, Box<dyn std::error::Erro
             workload: Workload::default(),
             timestamps: Default::default(),
             admin: Default::default(),
+            dma: Default::default(),
         })
     }
 }

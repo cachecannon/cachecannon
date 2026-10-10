@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- `protocol = "dma"` (`--features dma`): RESP carries the commands and the
+  values transmit over libfabric, server-initiated. `[dma] module` picks the
+  server module dialect, `largeobj` (`BLOB.*`, the default) or `vdma`
+  (`DMA.*`). The fabric, buffers, and connection task are the same for both.
+
 ### Changed
 - Built against unreleased ringline main (ringline-rs/ringline `1be7049`:
   ringline 0.7.0-alpha.0, ringline-redis 0.7.0, ringline-memcache 0.7.2,
