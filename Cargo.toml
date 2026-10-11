@@ -8,8 +8,11 @@ repository = "https://github.com/cachecannon/cachecannon"
 description = "High-performance cache protocol benchmark tool"
 
 [dependencies]
-# Metrics query engine (used by viewer)
-metriken-query = { version = "0.9", features = ["http"] }
+# Metrics query engine (used by viewer). `archive` (a default) reads dendro
+# archives and compiles SQLite; the viewer reads parquet only, so it is off
+# until the viewer opens `.dendro`. `lz4` reads lz4-compressed parquet, which
+# rezolus recordings may be.
+metriken-query = { version = "0.36", default-features = false, features = ["lz4"] }
 
 # Configuration
 toml = "0.8"
@@ -48,16 +51,22 @@ http = "1"
 ctrlc = { version = "3", features = ["termination"] }
 
 # I/O event loop (io_uring on Linux, mio on other platforms)
-# 0.6.8 minimum: the 0.6.4-0.6.8 io_uring fixes (a SendMsgZc notification
-# expected on every IORING_CQE_F_MORE, send-pool and SQ-full send handling,
-# recv completions checked against the connection generation). 0.6.2 added
+# 0.6.10 minimum: metriken 0.11 (metriken-core 0.3), which every metriken crate
+# here must share; 0.6.9 and earlier are on metriken 0.9 (core 0.2). 0.6.10 also
+# makes a stale `ConnCtx` (its slot reused) do nothing on `close`,
+# `set_recv_sink`, `take_recv_sink`, `recv_timestamp` and `forward_recv_buf`
+# (ringline #535, #544); 0.6.9 holds the `Close` of a connection slot
+# until its `Shutdown` completes (ringline #518). Carries forward the
+# 0.6.4-0.6.8 io_uring fixes (a SendMsgZc notification expected on every
+# IORING_CQE_F_MORE, send-pool and SQ-full send handling, recv completions
+# checked against the connection generation). 0.6.2 added
 # `ConfigBuilder::loop_diag` (gates the per-worker
 # `[ringline diag]` shutdown lines behind `general.ringline_diag`). Carries
 # forward the 0.6.1 io_uring liveness fix where a worker reaped zero
 # completions for as long as any task stayed runnable (under DEFER_TASKRUN
 # neither the non-blocking submit nor the skipped flush set GETEVENTS), so no
 # send-pool slots were recycled and a wait-for-capacity loop never woke.
-ringline = "0.6.8"
+ringline = "0.6.10"
 
 # Consistent hashing
 ketama = "0.0.1"
@@ -87,8 +96,15 @@ ndarray = { version = "0.17", optional = true }
 
 # Metrics
 histogram = "1.1"
-metriken = "0.9"
-metriken-exposition = { version = "0.16", features = ["parquet", "msgpack"] }
+# metriken-core declares `links`, so the graph holds one metriken-core: every
+# metriken crate moves together (core 0.3 here).
+metriken = "0.11.3"
+# `stream`: the `/metrics/stream` route (`src/admin/mod.rs`); dendro's wire
+# without its `archive` feature, so no SQLite. `msgpack`: the
+# `/metrics/binary` snapshot.
+metriken-exposition = { version = "0.22", default-features = false, features = ["msgpack", "stream"] }
+# `MsgpackToParquet` for `--parquet`; `convert` alone compiles no SQLite.
+metriken-storage = { version = "0.2", default-features = false, features = ["convert"] }
 
 # TLS
 rustls = { version = "0.23", default-features = false, features = ["std", "ring"] }
@@ -109,7 +125,7 @@ rand_distr = "0.5"
 
 # Kernel SO_TIMESTAMPING support is Linux-only.
 [target.'cfg(target_os = "linux")'.dependencies]
-ringline = { version = "0.6.8", features = ["timestamps"] }
+ringline = { version = "0.6.10", features = ["timestamps"] }
 ringline-redis = { version = "0.7.0", features = ["timestamps"] }
 ringline-memcache = { version = "0.7.1", features = ["timestamps"] }
 ringline-ping = { version = "0.6.0", features = ["timestamps"] }
@@ -182,3 +198,6 @@ debug = true
 # two versions cannot coexist), so `dump_msgpack_fixture` writes the bytes for
 # an out-of-tree decode and this dep covers the in-graph half.
 rmp-serde = "1"
+# Decodes what `/metrics/stream` serves: the preamble, the handshake and the
+# rows frames. The wire alone, without the `archive` feature.
+dendro = { version = "0.4", default-features = false }

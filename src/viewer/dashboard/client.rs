@@ -2,9 +2,9 @@ use super::*;
 
 /// Generate client metrics dashboard using rezolus data
 pub fn generate(
-    _benchmark: &Arc<Tsdb>,
-    _server: Option<&Arc<Tsdb>>,
-    client: Option<&Arc<Tsdb>>,
+    _benchmark: &Arc<ParquetReader>,
+    _server: Option<&Arc<ParquetReader>>,
+    client: Option<&Arc<ParquetReader>>,
     sections: Vec<Section>,
 ) -> View {
     // Use client data

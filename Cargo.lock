@@ -47,6 +47,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "allocator-api2"
+version = "0.2.21"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "683d7910e743518b0e34f1186f92494becacb047c7b6bf616c96772180fef923"
+
+[[package]]
 name = "android_system_properties"
 version = "0.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -158,7 +164,7 @@ dependencies = [
  "arrow-schema",
  "chrono",
  "half",
- "hashbrown",
+ "hashbrown 0.17.1",
  "num-complex",
  "num-integer",
  "num-traits",
@@ -498,6 +504,7 @@ dependencies = [
  "clap",
  "crossbeam-channel",
  "ctrlc",
+ "dendro",
  "hdf5-metno",
  "histogram 1.4.1",
  "http",
@@ -507,6 +514,7 @@ dependencies = [
  "metriken",
  "metriken-exposition",
  "metriken-query",
+ "metriken-storage",
  "ndarray",
  "open",
  "parquet",
@@ -757,6 +765,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "dendro"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4c7ee00a1be36806c9d2198457f6da4023710209f3d79cd246fcbd3ea4eb0e86"
+
+[[package]]
 name = "deranged"
 version = "0.5.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -828,6 +842,18 @@ name = "fnv"
 version = "1.0.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3f9eec918d3f24069decb9af1554cad7c880e2da24a9afd88aca000531ab82c1"
+
+[[package]]
+name = "foldhash"
+version = "0.1.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d9c4f5dac5e15c24eb999c26181a6ca40b39fe946cbe4c263c7209467bc83af2"
+
+[[package]]
+name = "foldhash"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "77ce24cb58228fbb8aa041425bb1050850ac19177686ea6e0f41a70416f56fdb"
 
 [[package]]
 name = "form_urlencoded"
@@ -925,6 +951,17 @@ dependencies = [
  "crunchy",
  "num-traits",
  "zerocopy",
+]
+
+[[package]]
+name = "hashbrown"
+version = "0.15.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9229cfe53dfd69f0609a49f65461bd93001ea1ef889cd5529dd176593f5338a1"
+dependencies = [
+ "allocator-api2",
+ "equivalent",
+ "foldhash 0.1.5",
 ]
 
 [[package]]
@@ -1070,6 +1107,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "df3b46402a9d5adb4c86a0cf463f42e19994e3ee891101b1841f30a545cb49a9"
 
 [[package]]
+name = "humantime"
+version = "2.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "15cdd26707701c53297e2fa6afb323d55fbc1d0810c3aec078ae3ef0424c3c15"
+
+[[package]]
 name = "hyper"
 version = "1.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1154,7 +1197,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d466e9454f08e4a911e14806c24e16fba1b4c121d1ea474396f396069cf949d9"
 dependencies = [
  "equivalent",
- "hashbrown",
+ "hashbrown 0.17.1",
 ]
 
 [[package]]
@@ -1413,6 +1456,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "lru"
+version = "0.12.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "234cf4f4a04dc1f57e24b96cc0cd600cf2af460d4161ac5ecdd0af8e1f3b2a38"
+dependencies = [
+ "hashbrown 0.15.5",
+]
+
+[[package]]
 name = "lz4_flex"
 version = "0.13.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1466,34 +1518,37 @@ checksum = "88904434abc2901f197fe8cc55f0445e7ded921dba5911dad2e2b39b48e663c4"
 
 [[package]]
 name = "metriken"
-version = "0.9.2"
+version = "0.11.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d34d88b3f3ec8c532945831eeea8170f9410a37f444feb1322b8e124f3a4a3b9"
+checksum = "6b775d1c8fa624fbf8e3a553a09cd2b48311e076301a48f2c968b6a52d7a52e1"
 dependencies = [
+ "getrandom 0.3.4",
  "histogram 1.4.1",
  "metriken-core",
  "metriken-derive",
+ "metriken-types",
  "once_cell",
  "parking_lot",
 ]
 
 [[package]]
 name = "metriken-core"
-version = "0.2.1"
+version = "0.3.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bab27bd3058a12219267acc9a86c68c9a55ab456825582758f5c0376a1267e31"
+checksum = "475f9a727147e3b088eadebda0572fb49f81aae39993d9dd1e6bac4556a18da0"
 dependencies = [
  "histogram 1.4.1",
  "linkme",
+ "metriken-types",
  "parking_lot",
  "phf",
 ]
 
 [[package]]
 name = "metriken-derive"
-version = "0.5.1"
+version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3643374c9873e69a27e50404db6006ad09f0c1ee944e8ce928d586df077b71db"
+checksum = "ba9466276652f7134a720d6d7e004bb5277dfa85a349e63030bb80b9aacf3db5"
 dependencies = [
  "proc-macro-crate",
  "proc-macro2",
@@ -1503,35 +1558,86 @@ dependencies = [
 
 [[package]]
 name = "metriken-exposition"
-version = "0.16.1"
+version = "0.22.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "01819b48e04904d3116bda74c380de43c3593d8c38fb870361b4d219ba61440d"
+checksum = "4490aadf5922e994e5ffeb6ae31b9b9f72d46cf761ec64da60fa0e327365e801"
 dependencies = [
- "arrow",
+ "bytes",
  "chrono",
+ "dendro",
+ "foldhash 0.2.0",
  "histogram 1.4.1",
+ "humantime",
  "metriken",
- "parquet",
+ "metriken-model",
+ "metriken-types",
+ "rmp-serde",
+ "serde",
+ "tracing",
+]
+
+[[package]]
+name = "metriken-model"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "76482d52c12b2d4096f225a7dfcc4091c162e570e6696c3252e313251014d971"
+dependencies = [
+ "histogram 1.4.1",
+ "metriken-types",
+ "rmp",
  "rmp-serde",
  "serde",
 ]
 
 [[package]]
 name = "metriken-query"
-version = "0.9.6"
+version = "0.36.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b58ff6bfd2e576b4b9b3a5bb0f72d2d51508c9a9006d975a0832accbb650f7ee"
+checksum = "e543a028fbc58be0aa48c5fd8ac20ca9858bc6dc9a6f3b6d7beae2416f41c17e"
 dependencies = [
  "arrow",
- "axum",
  "bytes",
+ "foldhash 0.2.0",
  "histogram 1.4.1",
- "metriken-exposition",
+ "lru",
+ "metriken-storage",
  "parquet",
  "promql-parser",
  "serde",
  "serde_json",
  "thiserror",
+ "tracing",
+ "twox-hash",
+]
+
+[[package]]
+name = "metriken-storage"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f9098faa6546d34d27aad587f307110f61fc773d610d2a73663a75311fde2b2f"
+dependencies = [
+ "arrow",
+ "bytes",
+ "foldhash 0.2.0",
+ "histogram 1.4.1",
+ "lru",
+ "metriken-model",
+ "metriken-types",
+ "parquet",
+ "rmp",
+ "rmp-serde",
+ "serde",
+ "tracing",
+ "twox-hash",
+]
+
+[[package]]
+name = "metriken-types"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9bd7377cbafbe5e1852bff7714e7056598f419cfc42130c35955bb2c13a26c76"
+dependencies = [
+ "serde",
 ]
 
 [[package]]
@@ -1750,7 +1856,7 @@ dependencies = [
  "chrono",
  "flate2",
  "half",
- "hashbrown",
+ "hashbrown 0.17.1",
  "lz4_flex",
  "num-bigint",
  "num-integer",
@@ -2059,9 +2165,9 @@ dependencies = [
 
 [[package]]
 name = "ringline"
-version = "0.6.8"
+version = "0.6.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5d52343294647ab27868c42363ab477dd89a60be52448a898df8c24b3d14eade"
+checksum = "41ebf1a37b03d59e4c4ba333d218502753732aac52643d5f8c8a3c8837522dc2"
 dependencies = [
  "bytes",
  "crossbeam-channel",

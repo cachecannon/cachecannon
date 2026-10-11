@@ -1,9 +1,9 @@
 use super::*;
 
 pub fn generate(
-    data: &Arc<Tsdb>,
-    _server: Option<&Arc<Tsdb>>,
-    _client: Option<&Arc<Tsdb>>,
+    data: &Arc<ParquetReader>,
+    _server: Option<&Arc<ParquetReader>>,
+    _client: Option<&Arc<ParquetReader>>,
     sections: Vec<Section>,
 ) -> View {
     let mut view = View::new(data, sections);

@@ -2,9 +2,9 @@ use super::*;
 
 /// Generate server metrics dashboard using rezolus data
 pub fn generate(
-    _benchmark: &Arc<Tsdb>,
-    server: Option<&Arc<Tsdb>>,
-    _client: Option<&Arc<Tsdb>>,
+    _benchmark: &Arc<ParquetReader>,
+    server: Option<&Arc<ParquetReader>>,
+    _client: Option<&Arc<ParquetReader>>,
     sections: Vec<Section>,
 ) -> View {
     // Use server data if available, otherwise use benchmark data for structure

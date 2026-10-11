@@ -96,6 +96,16 @@ rezolus record \
 ./target/release/cachecannon config/valkey.toml
 ```
 
+A `.dendro` archive is recorded from `/metrics/stream` instead, which the
+benchmark also serves: rows stamped by the benchmark when it read them, with the
+latency histograms as histograms. Name `-o run.dendro` (or no `-o`; `.dendro`
+is rezolus 6.0's default) with the same endpoints. This needs a rezolus recorder
+that accepts the `application/vnd.metriken.replication.v1+dendro` content type,
+which no rezolus release does as of 2026-10-11; an older 6.0 recorder refuses
+the stream and the whole run at startup. Keep the `source=cachecannon` label: a
+recorder that reached the benchmark through `/metrics/binary` names the
+recording `rezolus` otherwise.
+
 Every recording shares one timeline, so benchmark and system metrics line up
 without matching timestamps across files by hand. Analysis happens in Rezolus
 (`rezolus view run.rez`); `cachecannon view` reads Parquet, so keep

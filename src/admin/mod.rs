@@ -1,7 +1,7 @@
 use metriken_exposition::{
-    Counter as SnapCounter, Gauge as SnapGauge, Histogram as SnapHistogram, MsgpackToParquet,
-    ParquetOptions, Snapshot, SnapshotV2,
+    Counter as SnapCounter, Gauge as SnapGauge, Histogram as SnapHistogram, Snapshot, SnapshotV2,
 };
+use metriken_storage::convert::{MsgpackToParquet, ParquetOptions};
 use std::collections::HashMap;
 use std::fs::OpenOptions;
 use std::io::{self, BufWriter, Write};
@@ -14,6 +14,8 @@ use tokio::net::TcpListener;
 use tokio::sync::Notify;
 
 use crate::SharedState;
+
+mod stream;
 
 /// Admin server that exposes Prometheus metrics and optionally records Parquet.
 pub struct AdminServer {
@@ -121,12 +123,21 @@ impl Drop for AdminHandle {
 async fn run_prometheus_server(addr: SocketAddr, stop_notify: Arc<Notify>) -> io::Result<()> {
     let listener = TcpListener::bind(addr).await?;
     tracing::info!("prometheus server listening on {}", addr);
+    serve_admin(listener, stop_notify).await
+}
+
+/// Accept connections on `listener` until `stop_notify` fires. One request per
+/// connection.
+async fn serve_admin(listener: TcpListener, stop_notify: Arc<Notify>) -> io::Result<()> {
+    // Shared by every stream subscription on this server.
+    let passes = Arc::new(stream::passes());
 
     loop {
         tokio::select! {
             result = listener.accept() => {
                 match result {
                     Ok((mut socket, _peer)) => {
+                        let passes = Arc::clone(&passes);
                         tokio::spawn(async move {
                             let mut buf = [0u8; 1024];
                             let read = match socket.read(&mut buf).await {
@@ -137,10 +148,22 @@ async fn run_prometheus_server(addr: SocketAddr, stop_notify: Arc<Notify>) -> io
                                 }
                             };
 
+                            let target = request_target(&buf[..read]);
+
+                            // The stream is the one response that is not a
+                            // whole body: it writes until the client goes away,
+                            // which ends it with a write error.
+                            if let Some(("/metrics/stream", query)) = target {
+                                if let Err(e) = stream::serve(&mut socket, query, &passes).await {
+                                    tracing::debug!("metrics stream ended: {}", e);
+                                }
+                                return;
+                            }
+
                             // An unparseable request names no target, so there
                             // is nothing to serve it from.
-                            let body = match request_target(&buf[..read]) {
-                                Some(target) => respond(target),
+                            let body = match target {
+                                Some((path, _)) => respond(path),
                                 None => AdminBody::NotFound,
                             };
 
@@ -172,14 +195,15 @@ enum AdminBody {
 }
 
 /// The request target from an HTTP request line (`GET /metrics HTTP/1.1`),
-/// with any query string stripped. `None` when the bytes are not a request
-/// line naming an absolute path.
-fn request_target(request: &[u8]) -> Option<&str> {
+/// split into its path and its query string without the `?` (empty when there
+/// is none). Only `/metrics/stream` reads the query. `None` when the bytes
+/// are not a request line naming an absolute path.
+fn request_target(request: &[u8]) -> Option<(&str, &str)> {
     let line = request.split(|b| *b == b'\n').next()?;
     let line = std::str::from_utf8(line).ok()?;
     let target = line.split_whitespace().nth(1)?;
-    let target = target.split('?').next().unwrap_or(target);
-    target.starts_with('/').then_some(target)
+    let (path, query) = target.split_once('?').unwrap_or((target, ""));
+    path.starts_with('/').then_some((path, query))
 }
 
 /// Serve one path.
@@ -456,18 +480,10 @@ fn create_snapshot() -> Snapshot {
 
         match value {
             Some(metriken::Value::Counter(v)) => {
-                counters.push(SnapCounter {
-                    name: name.to_string(),
-                    value: v,
-                    metadata,
-                });
+                counters.push(SnapCounter::new(name.to_string(), v, metadata));
             }
             Some(metriken::Value::Gauge(v)) => {
-                gauges.push(SnapGauge {
-                    name: name.to_string(),
-                    value: v,
-                    metadata,
-                });
+                gauges.push(SnapGauge::new(name.to_string(), v, metadata));
             }
             // metriken-core 0.2 carries histograms in a dedicated `Histogram`
             // variant. Without this arm every latency histogram fell through to
@@ -484,11 +500,7 @@ fn create_snapshot() -> Snapshot {
                         "max_value_power".to_string(),
                         h.config().max_value_power().to_string(),
                     );
-                    histograms.push(SnapHistogram {
-                        name: name.to_string(),
-                        value: hist,
-                        metadata,
-                    });
+                    histograms.push(SnapHistogram::new(name.to_string(), hist, metadata));
                 }
             }
             // The recording half of the counter-group fix; see the matching arm
@@ -512,11 +524,11 @@ fn create_snapshot() -> Snapshot {
                     };
                     let mut slot_metadata = metadata.clone();
                     slot_metadata.extend(slot);
-                    counters.push(SnapCounter {
-                        name: format!("{name}x{idx}"),
+                    counters.push(SnapCounter::new(
+                        format!("{name}x{idx}"),
                         value,
-                        metadata: slot_metadata,
-                    });
+                        slot_metadata,
+                    ));
                 }
             }
             // Retained for metrics that still surface as `Other`.
@@ -540,11 +552,7 @@ fn create_snapshot() -> Snapshot {
                         h.config().max_value_power().to_string(),
                     );
 
-                    histograms.push(SnapHistogram {
-                        name: name.to_string(),
-                        value: h,
-                        metadata,
-                    });
+                    histograms.push(SnapHistogram::new(name.to_string(), h, metadata));
                 }
             }
             _ => {}
@@ -686,11 +694,15 @@ mod tests {
     fn request_target_reads_the_path_from_the_request_line() {
         assert_eq!(
             request_target(b"GET /metrics/binary HTTP/1.1\r\nHost: x\r\n\r\n"),
-            Some("/metrics/binary")
+            Some(("/metrics/binary", ""))
         );
         assert_eq!(
             request_target(b"GET /metrics?collect=all HTTP/1.1\r\n\r\n"),
-            Some("/metrics")
+            Some(("/metrics", "collect=all"))
+        );
+        assert_eq!(
+            request_target(b"GET /metrics/stream?interval=100ms&layout=long HTTP/1.1\r\n\r\n"),
+            Some(("/metrics/stream", "interval=100ms&layout=long"))
         );
         assert_eq!(request_target(b"garbage"), None);
     }
@@ -735,7 +747,8 @@ mod tests {
 
     #[test]
     fn msgpack_response_is_framed_as_binary() {
-        let target = request_target(b"GET /metrics/binary HTTP/1.1\r\nHost: x\r\n\r\n").unwrap();
+        let (target, _) =
+            request_target(b"GET /metrics/binary HTTP/1.1\r\nHost: x\r\n\r\n").unwrap();
         let response = http_response(respond(target));
 
         let split = response
@@ -925,6 +938,274 @@ mod tests {
             "{id=\"a\\\"b\",op=\"recv_parked\"}"
         );
         assert_eq!(format_labels(&HashMap::new()), "");
+    }
+
+    /// `--parquet`'s path end to end with the crates it now uses: snapshots
+    /// staged as msgpack, converted by metriken-storage, and read back by the
+    /// metriken-query reader `cachecannon view` opens.
+    #[test]
+    fn parquet_recording_reads_back_through_the_viewer_reader() {
+        use metriken_query::{MetricsSource, QueryResult};
+
+        let dir = std::env::temp_dir().join(format!(
+            "cachecannon-parquet-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let staged = dir.join("run.msgpack");
+        let parquet = dir.join("run.parquet");
+
+        let mut writer = BufWriter::new(std::fs::File::create(&staged).unwrap());
+        for _ in 0..3 {
+            // A quantile reads the change between rows, so each row adds one.
+            let _ = crate::metrics::RESPONSE_LATENCY.increment(12_345);
+            append_snapshot(&mut writer, &create_snapshot()).unwrap();
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        drop(writer);
+        let rows = MsgpackToParquet::with_options(ParquetOptions::new())
+            .metadata("sampling_interval_ms".to_string(), "5".to_string())
+            .metadata("source".to_string(), "cachecannon".to_string())
+            .convert_file_path(&staged, &parquet)
+            .unwrap();
+        assert_eq!(rows, 3);
+
+        let reader = metriken_query::ParquetReader::open(&parquet).unwrap();
+        assert_eq!(reader.source(), "cachecannon");
+        assert!(reader.has_histogram("response_latency"));
+        let (start, end) = reader.time_range().unwrap();
+        let result = reader
+            .query_range(
+                "histogram_quantile(0.5, response_latency)",
+                start,
+                end,
+                0.001,
+            )
+            .unwrap();
+        let QueryResult::Matrix { result } = result else {
+            panic!("not a matrix: {result:?}");
+        };
+        assert!(
+            result.iter().any(|s| !s.values.is_empty()),
+            "no response_latency quantile read back"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// An admin server on an ephemeral port, on its own current-thread runtime
+    /// as `AdminServer::run` builds one. Dropping the guard stops it.
+    struct TestServer {
+        addr: SocketAddr,
+        stop: Arc<Notify>,
+        thread: Option<std::thread::JoinHandle<()>>,
+    }
+
+    impl TestServer {
+        fn start() -> Self {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            listener.set_nonblocking(true).unwrap();
+            let addr = listener.local_addr().unwrap();
+            let stop = Arc::new(Notify::new());
+            let stop_server = Arc::clone(&stop);
+            let thread = std::thread::spawn(move || {
+                let rt = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap();
+                rt.block_on(async move {
+                    let listener = TcpListener::from_std(listener).unwrap();
+                    serve_admin(listener, stop_server).await.unwrap();
+                });
+            });
+            Self {
+                addr,
+                stop,
+                thread: Some(thread),
+            }
+        }
+
+        /// Send `GET {target}` and return the connection after the response
+        /// head, with the status line and the headers (names lowercased).
+        fn get(&self, target: &str) -> (std::net::TcpStream, String, HashMap<String, String>) {
+            use std::io::Read;
+
+            let mut conn = std::net::TcpStream::connect(self.addr).unwrap();
+            conn.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+            // One write: the server reads the request with a single `read`, and
+            // `write!` on a TcpStream sends each format piece as its own
+            // write, so the server could read `GET ` alone and answer 404.
+            let request = format!("GET {target} HTTP/1.1\r\nHost: x\r\n\r\n");
+            conn.write_all(request.as_bytes()).unwrap();
+
+            // Byte at a time, so nothing after the head is consumed.
+            let mut head = Vec::new();
+            let mut byte = [0u8; 1];
+            while !head.ends_with(b"\r\n\r\n") {
+                conn.read_exact(&mut byte)
+                    .expect("connection closed inside the head");
+                head.push(byte[0]);
+            }
+            let head = String::from_utf8(head).unwrap();
+            let mut lines = head.split("\r\n");
+            let status = lines.next().unwrap().to_string();
+            let headers = lines
+                .filter_map(|l| l.split_once(": "))
+                .map(|(k, v)| (k.to_ascii_lowercase(), v.to_string()))
+                .collect();
+            (conn, status, headers)
+        }
+    }
+
+    impl Drop for TestServer {
+        fn drop(&mut self) {
+            // Notify until the accept loop has seen it: `notify_waiters` wakes
+            // only a task already waiting.
+            if let Some(thread) = self.thread.take() {
+                while !thread.is_finished() {
+                    self.stop.notify_waiters();
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                let _ = thread.join();
+            }
+        }
+    }
+
+    /// The route end to end over a socket: headers, then dendro's preamble,
+    /// the handshake naming cachecannon, and rows frames carrying the
+    /// registry's group with the latency histogram in it.
+    #[test]
+    fn metrics_stream_serves_handshake_and_rows() {
+        use dendro::replicate::Frame;
+        use dendro::replicate::wire::FrameReader;
+
+        let _ = crate::metrics::RESPONSE_LATENCY.increment(12_345);
+        let server = TestServer::start();
+
+        let (conn, status, headers) = server.get("/metrics/stream?interval=100ms");
+        assert_eq!(status, "HTTP/1.1 200 OK");
+        assert_eq!(
+            headers.get("content-type").map(String::as_str),
+            Some("application/vnd.metriken.replication.v1+dendro")
+        );
+        assert_eq!(
+            headers.get("x-metriken-frame-interval").map(String::as_str),
+            Some("100ms")
+        );
+        assert_eq!(
+            headers.get("x-metriken-update-floor").map(String::as_str),
+            Some("10ms")
+        );
+        assert_eq!(
+            headers.get("x-metriken-layout").map(String::as_str),
+            Some("wide")
+        );
+        // The body runs until the connection closes.
+        assert!(!headers.contains_key("content-length"), "{headers:?}");
+
+        let mut reader = FrameReader::new(conn).expect("no dendro preamble");
+        match reader.next_frame().unwrap() {
+            Some(Frame::Handshake {
+                labels, metadata, ..
+            }) => {
+                assert_eq!(
+                    labels.get("source").map(String::as_str),
+                    Some("cachecannon")
+                );
+                assert_eq!(
+                    metadata.get("version").map(String::as_str),
+                    Some(env!("CARGO_PKG_VERSION"))
+                );
+            }
+            other => panic!("first frame is not a handshake: {other:?}"),
+        }
+
+        // The first rows frame carries every group with its schema; later
+        // ones every windowless group again (DefaultRouter's are all
+        // windowless). Three frames, so the stream is shown to keep going.
+        let group = format!("{}/main", stream::NAMESPACE);
+        let mut seqs = Vec::new();
+        for i in 0..3 {
+            match reader.next_frame().unwrap() {
+                Some(Frame::Rows { seq, rows, .. }) => {
+                    seqs.push(seq);
+                    let row = rows
+                        .iter()
+                        .find(|r| r.stream == group)
+                        .unwrap_or_else(|| panic!("frame {i} has no {group} row"));
+                    if i == 0 {
+                        // The schema travels in the first row of a stream,
+                        // with each member's `metric` label.
+                        assert!(
+                            row.row
+                                .windows(b"response_latency".len())
+                                .any(|w| w == b"response_latency"),
+                            "first {group} row does not name response_latency"
+                        );
+                    }
+                }
+                other => panic!("frame {i} is not a rows frame: {other:?}"),
+            }
+        }
+        assert!(
+            seqs.windows(2).all(|w| w[1] > w[0]),
+            "seq does not advance: {seqs:?}"
+        );
+    }
+
+    #[test]
+    fn metrics_stream_refuses_a_zero_interval() {
+        use std::io::Read;
+
+        let server = TestServer::start();
+        let (mut conn, status, _) = server.get("/metrics/stream?interval=0s");
+        assert!(status.starts_with("HTTP/1.1 400 "), "{status}");
+        let mut body = String::new();
+        conn.read_to_string(&mut body).unwrap();
+        assert!(!body.is_empty(), "a refusal carries its reason");
+    }
+
+    /// An interval equal to the floor is accepted.
+    #[test]
+    fn metrics_stream_accepts_an_interval_at_the_floor() {
+        use dendro::replicate::Frame;
+        use dendro::replicate::wire::FrameReader;
+
+        let server = TestServer::start();
+        let (conn, status, _) = server.get("/metrics/stream?interval=10ms");
+        assert_eq!(status, "HTTP/1.1 200 OK");
+        let mut reader = FrameReader::new(conn).expect("no dendro preamble");
+        assert!(matches!(
+            reader.next_frame().unwrap(),
+            Some(Frame::Handshake { .. })
+        ));
+    }
+
+    #[test]
+    fn metrics_stream_refuses_an_interval_below_the_floor() {
+        use std::io::Read;
+
+        let server = TestServer::start();
+        let (mut conn, status, _) = server.get("/metrics/stream?interval=1ms");
+        assert!(status.starts_with("HTTP/1.1 400 "), "{status}");
+        let mut body = String::new();
+        conn.read_to_string(&mut body).unwrap();
+        assert!(body.contains("update floor"), "{body}");
+    }
+
+    /// The whole-body routes are unchanged by the stream route beside them.
+    #[test]
+    fn metrics_binary_still_serves_over_a_socket() {
+        use std::io::Read;
+
+        let server = TestServer::start();
+        let (mut conn, status, headers) = server.get("/metrics/binary");
+        assert_eq!(status, "HTTP/1.1 200 OK");
+        let mut body = Vec::new();
+        conn.read_to_end(&mut body).unwrap();
+        assert_eq!(headers.get("content-length"), Some(&body.len().to_string()));
+        rmp_serde::from_slice::<Snapshot>(&body).expect("body is not a snapshot");
     }
 
     /// Writes what `/metrics/binary` serves to `$CACHECANNON_MSGPACK_FIXTURE`,

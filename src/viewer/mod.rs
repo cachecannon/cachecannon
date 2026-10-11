@@ -18,10 +18,11 @@ use tracing::{error, info};
 
 static ASSETS: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/src/viewer/assets");
 
+mod api;
 mod dashboard;
 mod plot;
 
-use metriken_query::{QueryEngine, Tsdb};
+use metriken_query::ParquetReader;
 
 #[derive(Parser, Debug)]
 #[command(name = "view")]
@@ -100,7 +101,7 @@ pub fn run(config: Config) {
     .expect("failed to set ctrl-c handler");
 
     info!("Loading benchmark data from parquet file...");
-    let benchmark_data = Tsdb::load(&config.input)
+    let benchmark_data = ParquetReader::open(&config.input)
         .map_err(|e| {
             eprintln!("failed to load benchmark data from parquet: {e}");
             std::process::exit(1);
@@ -110,7 +111,7 @@ pub fn run(config: Config) {
     // Load optional server rezolus data
     let server_data = if let Some(ref path) = config.server {
         info!("Loading server rezolus data from parquet file...");
-        match Tsdb::load(path) {
+        match ParquetReader::open(path) {
             Ok(data) => Some(Arc::new(data)),
             Err(e) => {
                 eprintln!("warning: failed to load server rezolus data: {e}");
@@ -124,7 +125,7 @@ pub fn run(config: Config) {
     // Load optional client rezolus data
     let client_data = if let Some(ref path) = config.client {
         info!("Loading client rezolus data from parquet file...");
-        match Tsdb::load(path) {
+        match ParquetReader::open(path) {
             Ok(data) => Some(Arc::new(data)),
             Err(e) => {
                 eprintln!("warning: failed to load client rezolus data: {e}");
@@ -178,14 +179,14 @@ async fn serve(listener: std::net::TcpListener, state: AppState) {
 
 pub struct AppState {
     pub sections: HashMap<String, String>,
-    query_engine: Arc<QueryEngine>,
+    source: Arc<ParquetReader>,
 }
 
 impl AppState {
-    pub fn new(tsdb: Arc<Tsdb>) -> Self {
+    pub fn new(source: Arc<ParquetReader>) -> Self {
         Self {
             sections: Default::default(),
-            query_engine: Arc::new(QueryEngine::new(tsdb)),
+            source,
         }
     }
 }
@@ -197,7 +198,7 @@ fn app(livereload: LiveReloadLayer, state: AppState) -> Router {
         .route("/about", get(about))
         .route("/data/{path}", get(data))
         .with_state(state.clone())
-        .merge(metriken_query::promql::routes(state.query_engine.clone()));
+        .merge(api::routes(state.source.clone()));
 
     let router = router
         .route("/", get(index))

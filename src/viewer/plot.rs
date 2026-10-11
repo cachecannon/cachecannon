@@ -1,4 +1,4 @@
-use metriken_query::tsdb::*;
+use metriken_query::ParquetReader;
 use serde::Serialize;
 use std::sync::Arc;
 
@@ -17,11 +17,11 @@ pub struct View {
 }
 
 impl View {
-    pub fn new(data: &Arc<Tsdb>, sections: Vec<Section>) -> Self {
+    pub fn new(data: &Arc<ParquetReader>, sections: Vec<Section>) -> Self {
         let interval = data.interval();
-        let source = data.source().to_string();
-        let version = data.version().to_string();
-        let filename = data.filename().to_string();
+        let source = data.source();
+        let version = data.version();
+        let filename = data.filename().unwrap_or_default().to_string();
 
         Self {
             interval,

@@ -1,6 +1,6 @@
 use super::AppState;
 use super::plot::*;
-use metriken_query::tsdb::*;
+use metriken_query::ParquetReader;
 use std::sync::Arc;
 
 mod cache;
@@ -11,13 +11,18 @@ mod overview;
 mod server;
 mod throughput;
 
-type Generator = fn(&Arc<Tsdb>, Option<&Arc<Tsdb>>, Option<&Arc<Tsdb>>, Vec<Section>) -> View;
+type Generator = fn(
+    &Arc<ParquetReader>,
+    Option<&Arc<ParquetReader>>,
+    Option<&Arc<ParquetReader>>,
+    Vec<Section>,
+) -> View;
 
 /// Generate dashboards based on available data sources
 pub fn generate(
-    benchmark: Arc<Tsdb>,
-    server: Option<Arc<Tsdb>>,
-    client: Option<Arc<Tsdb>>,
+    benchmark: Arc<ParquetReader>,
+    server: Option<Arc<ParquetReader>>,
+    client: Option<Arc<ParquetReader>>,
 ) -> AppState {
     let mut state = AppState::new(benchmark.clone());
 

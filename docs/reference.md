@@ -276,9 +276,10 @@ timestamp — so under `software` it equals `response_latency`, and under
 
 ```toml
 [admin]
-# Metrics endpoint (optional). Serves two paths:
+# Metrics endpoint (optional). Serves three paths:
 #   /metrics         Prometheus exposition text
-#   /metrics/binary  msgpack snapshot, for `rezolus record`
+#   /metrics/binary  msgpack snapshot, for `rezolus record` to `.rez`/parquet
+#   /metrics/stream  dendro replication stream, for `rezolus record` to `.dendro`
 listen = "127.0.0.1:9090"
 
 # Write metrics to Parquet file (optional)
@@ -296,19 +297,32 @@ color = "auto"
 
 ### Metrics Endpoint
 
-With `[admin] listen` set, the benchmark serves its live metrics on two paths:
+With `[admin] listen` set, the benchmark serves its live metrics on three paths:
 
 | Path | Content type | Consumer |
 |---|---|---|
 | `/metrics` (and `/`) | `text/plain; version=0.0.4` | Prometheus scrapers |
-| `/metrics/binary` | `application/msgpack` | `rezolus record` |
+| `/metrics/binary` | `application/msgpack` | `rezolus record` to `.rez` or parquet |
+| `/metrics/stream` | `application/vnd.metriken.replication.v1+dendro` | `rezolus record` to `.dendro` |
 
-Both carry the same metrics, including the latency histograms. The msgpack path
-is the one [Rezolus](https://github.com/brayniac/rezolus) probes for a
+All three carry the same metrics, including the latency histograms. The msgpack
+path is the one [Rezolus](https://github.com/brayniac/rezolus) probes for a
 non-Prometheus source, so a run can be recorded alongside system telemetry into
 a single `.rez` archive — see
 [Correlating with Rezolus](guide.md#correlating-with-rezolus). Any other path
 returns 404.
+
+`/metrics/stream` is metriken-exposition's stream route. A request names its
+frame interval and layout, `/metrics/stream?interval=500ms&layout=long`
+(defaults `1s` and `wide`); a zero or malformed interval, an interval below
+the 10 ms update floor, or an unknown layout is refused with 400. The response
+has no `Content-Length`: it is dendro's preamble and a handshake
+(`source=cachecannon`, the version in its metadata), then one frame per
+interval, aligned to the Unix epoch, until the client disconnects. The
+`x-metriken-frame-interval`, `x-metriken-update-floor` (10 ms) and
+`x-metriken-layout` headers describe it. Every metric is in one group,
+`cachecannon/main`, stamped when it is read, with no acquisition window;
+histograms are sent as histograms, not as summaries.
 
 ## Output Formats
 

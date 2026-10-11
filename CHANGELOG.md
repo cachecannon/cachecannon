@@ -7,6 +7,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- `[admin] listen` serves `GET /metrics/stream[?interval=..&layout=wide|long]`,
+  metriken-exposition's stream route: dendro replication frames
+  (`application/vnd.metriken.replication.v1+dendro`), a handshake with
+  `source=cachecannon`, then one frame per interval until the client
+  disconnects. A rezolus recorder that reads this content type records the
+  benchmark into a `.dendro` archive beside agents, with the latency histograms
+  as histograms. Every metric is in one windowless group, `cachecannon/main`.
+  An interval below the 10 ms update floor is refused with 400. `/metrics` and
+  `/metrics/binary` are unchanged.
+
+### Changed
+- metriken 0.9 → 0.11.3 (metriken-core 0.3), metriken-exposition 0.16 → 0.22,
+  metriken-query 0.9 → 0.36, and metriken-storage 0.2 for `--parquet`'s
+  msgpack-to-parquet conversion, which left metriken-exposition. No SQLite is
+  compiled: metriken-query is built without its `archive` feature until
+  `cachecannon view` reads `.dendro`. metriken-query 0.36 has no HTTP layer,
+  so the viewer serves `/api/v1/query`, `query_range`, `labels`,
+  `label/{name}/values` and `metadata` itself, with 0.9's request parameters
+  and response bodies. Query results differ where the engine changed: points
+  are at the recording's own timestamps rather than rounded to a one-second
+  grid, `irate` divides by the measured spacing (2000 req/s reads 1997–2001
+  where 0.9 read 2003–2007), a range ends at the last sample rather than one
+  grid step past it, `/api/v1/metadata` gives the first and last sample times
+  exactly rather than in whole seconds, and matrix results carry `intervals`
+  and `bands`, which the frontend ignores. The dashboards' section JSON is
+  byte-identical.
+- Requires ringline 0.6.10 (was 0.6.8). metriken-core declares `links`, so the
+  graph can hold one metriken-core, and ringline 0.6.9 and earlier depend on
+  metriken 0.9 (core 0.2). 0.6.10 is 0.6.9 with metriken 0.11.3 and two
+  stale-handle fixes: `ConnCtx::close` through a handle whose slot was reused
+  by a new connection used to close that connection and now does nothing (the
+  same for `set_recv_sink`, `take_recv_sink` and `recv_timestamp`;
+  ringline-rs/ringline#535), and `forward_recv_buf` refuses a stale handle
+  before taking the pending buffer (ringline-rs/ringline#544). cachecannon
+  calls `close` on a `ConnCtx` on a request timeout, an exhausted timer pool
+  and a receive error. 0.6.9 fixes
+  one io_uring bug: a deferred `shutdown(SHUT_WR)` names its socket by
+  registered-file slot, and the `Close` that frees the slot could complete
+  first, so the FIN could land on the next connection accepted into that slot
+  (ringline-rs/ringline#518). The `Close` now waits for the `Shutdown` to
+  complete. ringline-redis 0.7.0, ringline-memcache 0.7.1 and ringline-ping
+  0.6.0 are unchanged.
+
 ## [0.0.30] - 2026-10-01
 
 ### Fixed
