@@ -177,7 +177,7 @@ pub(crate) async fn dma_connection_task(
 
         // TLS wraps the control channel only
         let tls_name = resolve_tls_server_name(&state.task_state, endpoint);
-        let conn = match establish_connection(
+        let connection = match establish_connection(
             endpoint,
             worker_id,
             tls_name.as_deref(),
@@ -185,25 +185,16 @@ pub(crate) async fn dma_connection_task(
         )
         .await
         {
-            Ok(conn) => conn,
+            Ok(connection) => connection,
             Err(_) => {
                 ringline::sleep(Duration::from_millis(100)).await;
                 continue;
             }
         };
 
+        let conn = connection.as_conn();
         metrics::CONNECTIONS_ACTIVE.increment();
-        let client = match ringline_redis::Client::new(conn) {
-            Ok(client) => client,
-            Err(error) => {
-                tracing::debug!(worker = worker_id, %endpoint, "RESP client setup failed: {error}");
-                conn.close();
-                metrics::CONNECTIONS_ACTIVE.decrement();
-                metrics::CONNECTIONS_FAILED.increment();
-                ringline::sleep(Duration::from_millis(100)).await;
-                continue;
-            }
-        };
+        let client = ringline_redis::Client::new(connection);
         // Registration happens here, not on first use: `fi_mr_reg` pins pages and is slow, and
         // paying it inside the measured phase would land in the latency histogram.
         let dma = match DmaClient::connect(client, fabric.clone(), capacity, dialect).await {
