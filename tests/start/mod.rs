@@ -23,7 +23,7 @@ fn read_line(reader: &mut impl BufRead) -> Option<Vec<u8>> {
 }
 
 /// Answer SET `+OK`, GET a miss, PING `+PONG`, anything else `+OK`, and record
-/// when each `record` command arrived after `armed` is set.
+/// when each `record` command arrived.
 fn serve(stream: TcpStream, record: &'static [u8], times: &Mutex<Vec<Instant>>) {
     let mut writer = stream.try_clone().unwrap();
     let mut reader = BufReader::new(stream);
@@ -71,14 +71,19 @@ fn spawn(record: &'static [u8]) -> (SocketAddr, Arc<Mutex<Vec<Instant>>>) {
     (addr, times)
 }
 
-/// Run one second at [`RATE`] with no warmup, after a prefill when `prefill`
-/// is set, and return how many measured requests (GETs after a prefill, SETs
-/// without one) arrived in the first 100 ms of the run's traffic.
-pub fn first_100ms(prefill: bool) -> usize {
-    let (record, commands): (&'static [u8], &str) = if prefill {
-        (b"GET", "get = 100\n        set = 0")
+/// Run one second at [`RATE`] with no warmup, after a prefill of 1,000 keys
+/// paced at 1,000 per second when `prefill` is set, and return the arrival
+/// times of the measured requests (GETs after a prefill, SETs without one),
+/// relative to the first.
+pub fn arrivals(prefill: bool) -> Vec<Duration> {
+    let (record, commands, pace): (&'static [u8], &str, &str) = if prefill {
+        (
+            b"GET",
+            "get = 100\n        set = 0",
+            "prefill_rate_limit = 1000",
+        )
     } else {
-        (b"SET", "get = 0\n        set = 100")
+        (b"SET", "get = 0\n        set = 100", "")
     };
     let (addr, times) = spawn(record);
     let toml = format!(
@@ -100,6 +105,7 @@ pub fn first_100ms(prefill: bool) -> usize {
         rate_limit = {RATE}
         prefill = {prefill}
         prefill_settle = "0s"
+        {pace}
 
         [workload.keyspace]
         count = 1000
@@ -133,8 +139,13 @@ pub fn first_100ms(prefill: bool) -> usize {
         times.len()
     );
     let first = times[0];
-    times
+    times.iter().map(|t| t.duration_since(first)).collect()
+}
+
+/// How many of `arrivals` came in the first `ms` milliseconds.
+pub fn within(arrivals: &[Duration], ms: u64) -> usize {
+    arrivals
         .iter()
-        .filter(|t| t.duration_since(first) < Duration::from_millis(100))
+        .filter(|t| **t < Duration::from_millis(ms))
         .count()
 }
