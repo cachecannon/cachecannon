@@ -63,6 +63,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   complete. ringline-redis 0.7.0, ringline-memcache 0.7.1 and ringline-ping
   0.6.0 are unchanged.
 
+### Fixed
+- Every connection task (RESP, RESP append, memcache, memcache append, ping
+  and DMA) closes its connection before reconnecting and when it returns.
+  After a failed `HELLO 3`, a failed DMA hello, a failed precheck or a failed
+  DMA transfer, the task reconnected without closing the old connection, and
+  dropping a ringline connection does not close it. A server that refused
+  every hello gained one open connection per task every 100 ms. Request
+  timeouts, an exhausted timer pool and protocol errors (closed by the
+  ringline client) already closed the connection.
+
 ## [0.0.30] - 2026-10-01
 
 ### Fixed
