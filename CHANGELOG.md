@@ -19,6 +19,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `/metrics/binary` are unchanged.
 
 ### Changed
+- rustls 0.23.45 → 0.23.46 for RUSTSEC-2026-0346, -0347, -0348 and -0349,
+  published 2026-10-14, which failed `cargo audit` in CI.
 - metriken 0.9 → 0.11.3 (metriken-core 0.3), metriken-exposition 0.16 → 0.22,
   metriken-query 0.9 → 0.36, and metriken-storage 0.2 for `--parquet`'s
   msgpack-to-parquet conversion, which left metriken-exposition. No SQLite is
