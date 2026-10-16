@@ -13,6 +13,22 @@ pub enum Dialect {
     /// and `BLOB.GET` answers `[bytes, crc32c]`. The client sends no checksum.
     #[default]
     LargeObj,
+    /// `BLOB.RDMA_HELLO`, `BLOB.RDMA_GET` and `BLOB.RDMA_SET`, sent with the same arguments as
+    /// [`Dialect::LargeObj`]. Newer module builds register these in place of `BLOB.HELLO`,
+    /// `BLOB.GET` and `BLOB.SET`. A connection configured for [`Dialect::LargeObj`] speaks this
+    /// when the server accepts `BLOB.RDMA_HELLO`.
+    LargeObjRdma,
+}
+
+impl Dialect {
+    /// The hello, get and set command names.
+    fn names(self) -> [&'static str; 3] {
+        match self {
+            Self::Vdma => ["DMA.HELLO", "DMA.GET", "DMA.SET"],
+            Self::LargeObj => ["BLOB.HELLO", "BLOB.GET", "BLOB.SET"],
+            Self::LargeObjRdma => ["BLOB.RDMA_HELLO", "BLOB.RDMA_GET", "BLOB.RDMA_SET"],
+        }
+    }
 }
 
 /// Description of a transfer's result.
@@ -89,7 +105,8 @@ impl TransferReply {
     }
 }
 
-/// Options for `DMA.SET`. vdma only; [`set`] refuses them under [`Dialect::LargeObj`].
+/// Options for `DMA.SET`. vdma only; [`set`] refuses them under [`Dialect::LargeObj`] and
+/// [`Dialect::LargeObjRdma`].
 #[derive(Debug, Clone, Copy, Default)]
 pub struct DmaSetOptions {
     checksum: Option<u32>,
@@ -137,15 +154,17 @@ impl DmaCommand {
     }
 }
 
-/// `DMA.HELLO`, or `BLOB.HELLO <client-address>`. Only largeobj sends `local_address`.
+/// `DMA.HELLO`, or `BLOB.HELLO <client-address>` (`BLOB.RDMA_HELLO` under
+/// [`Dialect::LargeObjRdma`]). Only largeobj sends `local_address`.
 pub fn hello(dialect: Dialect, local_address: &[u8]) -> DmaCommand {
+    let name = dialect.names()[0];
     match dialect {
         Dialect::Vdma => DmaCommand {
-            name: "DMA.HELLO",
+            name,
             arguments: Vec::new(),
         },
-        Dialect::LargeObj => DmaCommand {
-            name: "BLOB.HELLO",
+        Dialect::LargeObj | Dialect::LargeObjRdma => DmaCommand {
+            name,
             arguments: vec![crate::dma::advertisement::encode_hex(local_address).into_bytes()],
         },
     }
@@ -160,7 +179,8 @@ pub fn info() -> DmaCommand {
 }
 
 /// `DMA.SET <address> <rkey> <remote-address> <length> <key> [<crc>]`, or
-/// `BLOB.SET <key> <length> <rkey> <remote-address> <length>`.
+/// `BLOB.SET <key> <length> <rkey> <remote-address> <length>` (`BLOB.RDMA_SET` under
+/// [`Dialect::LargeObjRdma`]).
 pub fn set(
     dialect: Dialect,
     advertisement: &Advertisement,
@@ -170,13 +190,13 @@ pub fn set(
 ) -> Result<DmaCommand, DmaError> {
     match dialect {
         Dialect::Vdma => {
-            let mut command = transfer("DMA.SET", advertisement, key, length);
+            let mut command = transfer(dialect.names()[2], advertisement, key, length);
             if let Some(checksum) = options.checksum {
                 command.arguments.push(number(u64::from(checksum)));
             }
             Ok(command)
         }
-        Dialect::LargeObj => {
+        Dialect::LargeObj | Dialect::LargeObjRdma => {
             if options.checksum.is_some() {
                 return Err(DmaError::Configuration(
                     "largeobj takes no checksum on a write".into(),
@@ -185,7 +205,7 @@ pub fn set(
             let mut arguments = vec![key.to_vec(), number(length as u64)];
             arguments.extend(address_triple(advertisement, length));
             Ok(DmaCommand {
-                name: "BLOB.SET",
+                name: dialect.names()[2],
                 arguments,
             })
         }
@@ -193,7 +213,8 @@ pub fn set(
 }
 
 /// `DMA.GET <address> <rkey> <remote-address> <capacity> <key> [<crc-flag>]`, or
-/// `BLOB.GET <key> <rkey> <remote-address> <capacity>`. largeobj returns a CRC-32c unconditionally.
+/// `BLOB.GET <key> <rkey> <remote-address> <capacity>` (`BLOB.RDMA_GET` under
+/// [`Dialect::LargeObjRdma`]). largeobj returns a CRC-32c unconditionally.
 pub fn get(
     dialect: Dialect,
     advertisement: &Advertisement,
@@ -203,18 +224,18 @@ pub fn get(
 ) -> Result<DmaCommand, DmaError> {
     match dialect {
         Dialect::Vdma => {
-            let mut command = transfer("DMA.GET", advertisement, key, capacity);
+            let mut command = transfer(dialect.names()[1], advertisement, key, capacity);
             if options.checksum {
                 // The flag's presence is what asks for a checksum; the value is unread.
                 command.arguments.push(number(0));
             }
             Ok(command)
         }
-        Dialect::LargeObj => {
+        Dialect::LargeObj | Dialect::LargeObjRdma => {
             let mut arguments = vec![key.to_vec()];
             arguments.extend(address_triple(advertisement, capacity));
             Ok(DmaCommand {
-                name: "BLOB.GET",
+                name: dialect.names()[1],
                 arguments,
             })
         }
@@ -385,6 +406,31 @@ mod tests {
         .unwrap();
         assert_eq!(command.name(), "BLOB.GET");
         assert_eq!(arguments(&command), ["key", "7", "4096", "64"]);
+    }
+
+    /// The renamed commands differ from the originals in name only.
+    #[test]
+    fn rdma_names_take_the_same_arguments() {
+        let address = [0xde, 0xad, 0xbe, 0xef];
+        let (old, new) = (Dialect::LargeObj, Dialect::LargeObjRdma);
+        let pairs = [
+            (hello(old, &address), hello(new, &address)),
+            (
+                set(old, &advertisement(), b"key", 64, &DmaSetOptions::default()).unwrap(),
+                set(new, &advertisement(), b"key", 64, &DmaSetOptions::default()).unwrap(),
+            ),
+            (
+                get(old, &advertisement(), b"key", 64, &DmaGetOptions::default()).unwrap(),
+                get(new, &advertisement(), b"key", 64, &DmaGetOptions::default()).unwrap(),
+            ),
+        ];
+        let names: Vec<_> = pairs.iter().map(|(_, n)| n.name()).collect();
+        assert_eq!(names, ["BLOB.RDMA_HELLO", "BLOB.RDMA_SET", "BLOB.RDMA_GET"]);
+        for (o, n) in &pairs {
+            assert_eq!(o.arguments(), n.arguments());
+        }
+        let checksum = DmaSetOptions::default().with_checksum(0xabcd);
+        assert!(set(new, &advertisement(), b"key", 64, &checksum).is_err());
     }
 
     #[test]

@@ -8,6 +8,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- With `[dma] module = "largeobj"`, each connection sends `BLOB.RDMA_HELLO`
+  and, if the server accepts it, uses `BLOB.RDMA_GET` and `BLOB.RDMA_SET`. If
+  the server answers `BLOB.RDMA_HELLO` with an error, the connection sends
+  `BLOB.HELLO` and uses `BLOB.GET` and `BLOB.SET`, as before. If both are
+  refused, the error carries both replies. cachecannon sends the same
+  arguments under both names, so one build works against module builds from
+  before and after the rename.
 - `[workload.kv_replay]` replays a request-level KV-cache trace (the kvtrace
   request format from pelikan-io/cachesim) against a RESP server used as an
   LLM serving engine's KV-cache prefix store, and reports prompt tokens
