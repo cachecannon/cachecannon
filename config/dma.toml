@@ -1,0 +1,44 @@
+# Server-initiated RMA against a vdma server.
+#
+#   cargo build --release --features dma
+#   ./target/release/cachecannon config/dma.toml
+#
+# Needs libfabric on the load host (on EFA instances: /opt/amazon/efa/lib64, plus its pkgconfig
+# directory on PKG_CONFIG_PATH) and a valkey server running the valkey-dma module.
+
+[general]
+duration = "60s"
+warmup = "10s"
+threads = 8
+
+[target]
+endpoints = ["172.31.17.61:6379"]
+protocol = "dma"
+
+[connection]
+connections = 32
+pipeline_depth = 1
+
+[workload]
+prefill = true
+
+[workload.keyspace]
+count = 16
+
+[workload.values]
+length = 1048576
+
+[workload.commands]
+get = 80
+set = 20
+
+[dma]
+module = "vdma"
+provider = "efa-direct"
+# Empty list discovers all fabric domains
+interfaces = []
+# Registered memory multiplies with connection count. It consumes RLIMIT_MEMLOCK.
+# Defaults to the workload's value length.
+# buffer_capacity = 1048576
+# End-to-end CRC-32c.
+checksum = false

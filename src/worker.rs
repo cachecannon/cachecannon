@@ -390,7 +390,7 @@ impl TokenSlot {
 /// token rate rather than the connection count, and the cadence that governs
 /// smoothness is set by the dispatcher alone. The two quantities come apart.
 #[derive(Default)]
-struct TokenDispatcher {
+pub(crate) struct TokenDispatcher {
     queue: RefCell<VecDeque<Rc<TokenSlot>>>,
     /// Set once the dispatcher has stopped servicing. Sticky, because `drain`
     /// can only release the waiters queued at that instant -- a connection
@@ -512,8 +512,31 @@ thread_local! {
     static DISPATCHER: RefCell<Option<Rc<TokenDispatcher>>> = const { RefCell::new(None) };
 }
 
-fn dispatcher() -> Option<Rc<TokenDispatcher>> {
+pub(crate) fn dispatcher() -> Option<Rc<TokenDispatcher>> {
     DISPATCHER.with(|d| d.borrow().clone())
+}
+
+/// One request's rate-limit token, for a connection that sends one request at
+/// a time: a token the dispatcher already granted it, else one from the
+/// limiter. The carried token is spent first because `acquire` has already
+/// debited the limiter for it; polling the limiter instead would charge the
+/// request twice and lower the achieved rate.
+#[cfg(any(feature = "dma", test))]
+pub(crate) fn take_token(carried: &mut u64, rl: &WorkerLimiter) -> bool {
+    if *carried > 0 {
+        *carried -= 1;
+        true
+    } else {
+        rl.try_wait().is_ok()
+    }
+}
+
+/// Park on the dispatcher until it grants one token, and carry the grant to
+/// the next `take_token`. Returns with nothing carried when the dispatcher
+/// drains at shutdown.
+#[cfg(any(feature = "dma", test))]
+pub(crate) async fn wait_for_token(dispatch: &Rc<TokenDispatcher>, carried: &mut u64) {
+    *carried += dispatch.acquire(1).await;
 }
 
 /// Run this worker's dispatcher until the run stops.
@@ -553,19 +576,30 @@ async fn run_dispatcher(
 /// Borrow a random `value_len`-byte slice of the value pool, for the
 /// copy-based `fire_set` path (the bytes are copied into the send pool
 /// synchronously, so the borrow only needs to outlive the fire call).
-fn value_slice<'a>(
+pub(crate) fn value_slice<'a>(
     rng: &mut Xoshiro256PlusPlus,
     value_pool: &'a Arc<Vec<u8>>,
     value_len: usize,
     pool_len: usize,
 ) -> &'a [u8] {
+    let offset = value_offset(rng, value_len, pool_len);
+    &value_pool[offset..offset + value_len]
+}
+
+/// Where in the pool the next value starts.
+///
+/// The DMA path needs the offset rather than the bytes: the pool is registered with the fabric, so
+/// a transfer advertises the window in place instead of copying it anywhere.
+pub(crate) fn value_offset(
+    rng: &mut Xoshiro256PlusPlus,
+    value_len: usize,
+    pool_len: usize,
+) -> usize {
     debug_assert!(
         value_len > 0 && value_len <= pool_len,
         "value_len ({value_len}) must be in 1..={pool_len}"
     );
-    let max_offset = pool_len - value_len;
-    let offset = rng.random_range(0..=max_offset);
-    &value_pool[offset..offset + value_len]
+    rng.random_range(0..=(pool_len - value_len))
 }
 
 // ── Shared task state (Arc-wrapped, accessed by all connection tasks) ────
@@ -597,11 +631,11 @@ impl PrefillQueues {
         self.queues[endpoint_idx].lock().unwrap().push_back(key_id);
     }
 
-    fn push_front(&self, endpoint_idx: usize, key_id: usize) {
+    pub(crate) fn push_front(&self, endpoint_idx: usize, key_id: usize) {
         self.queues[endpoint_idx].lock().unwrap().push_front(key_id);
     }
 
-    fn pop_front(&self, endpoint_idx: usize) -> Option<usize> {
+    pub(crate) fn pop_front(&self, endpoint_idx: usize) -> Option<usize> {
         self.queues[endpoint_idx].lock().unwrap().pop_front()
     }
 
@@ -611,12 +645,12 @@ impl PrefillQueues {
 }
 
 /// State shared across all connection tasks spawned by a single worker.
-struct TaskSharedState {
-    config: Config,
-    shared: Arc<SharedState>,
-    ratelimiter: Option<Arc<WorkerLimiter>>,
-    value_pool: Arc<Vec<u8>>,
-    endpoints: Vec<SocketAddr>,
+pub(crate) struct TaskSharedState {
+    pub(crate) config: Config,
+    pub(crate) shared: Arc<SharedState>,
+    pub(crate) ratelimiter: Option<Arc<WorkerLimiter>>,
+    pub(crate) value_pool: Arc<Vec<u8>>,
+    pub(crate) endpoints: Vec<SocketAddr>,
     ring: ketama::Ring,
     slot_table: RwLock<Option<Vec<u16>>>,
     /// Per-endpoint prefill key queues, SHARED across all workers (one queue
@@ -624,7 +658,7 @@ struct TaskSharedState {
     /// the full keyspace so any worker's connection-task can drain the queue
     /// for the endpoint it serves — required when connections-per-worker is
     /// fewer than the number of cluster nodes.
-    prefill_queues: Arc<PrefillQueues>,
+    pub(crate) prefill_queues: Arc<PrefillQueues>,
     /// Per-endpoint append queues, SHARED across all workers. The runner
     /// enqueues each batch; writer connection tasks drain the queue for the
     /// endpoint they serve. Empty queues when no append stream is configured.
@@ -634,23 +668,23 @@ struct TaskSharedState {
     append_ratelimiter: Option<Arc<Ratelimiter>>,
     /// Per-endpoint key-id lists for steady-state key selection (see
     /// `BenchWorkerConfig::endpoint_keys`). Empty for single-endpoint setups.
-    endpoint_keys: Arc<Vec<Vec<u32>>>,
+    pub(crate) endpoint_keys: Arc<Vec<Vec<u32>>>,
     /// Worker ID for logging.
-    worker_id: usize,
+    pub(crate) worker_id: usize,
     /// Whether backfill_on_miss is enabled.
-    backfill_on_miss: bool,
+    pub(crate) backfill_on_miss: bool,
     /// Whether TLS is enabled for connections.
     tls_enabled: bool,
     /// SNI server name for TLS connections.
     tls_server_name: Option<String>,
     /// Steady-state key-id distribution (see `BenchWorkerConfig::key_dist`).
-    key_dist: Arc<KeyDist>,
+    pub(crate) key_dist: Arc<KeyDist>,
 }
 
 /// State shared between the BenchHandler (on_tick) and connection tasks.
 /// Wrapped in Arc so on_tick and spawned tasks can both access it.
-struct SharedWorkerState {
-    task_state: Arc<TaskSharedState>,
+pub(crate) struct SharedWorkerState {
+    pub(crate) task_state: Arc<TaskSharedState>,
     /// Prefill tracking: total keys assigned to this worker.
     prefill_total: usize,
     /// Number of prefill keys confirmed by this worker.
@@ -662,16 +696,16 @@ struct SharedWorkerState {
 }
 
 impl SharedWorkerState {
-    fn is_prefill_done(&self) -> bool {
+    pub(crate) fn is_prefill_done(&self) -> bool {
         self.prefill_done.load(Ordering::Acquire) != 0
     }
 
-    fn is_precheck_done(&self) -> bool {
+    pub(crate) fn is_precheck_done(&self) -> bool {
         self.precheck_done.load(Ordering::Acquire) != 0
     }
 
     /// Mark this worker's precheck as complete (only the first connection to succeed does this).
-    fn mark_precheck_done(&self) {
+    pub(crate) fn mark_precheck_done(&self) {
         if self
             .precheck_done
             .compare_exchange(0, 1, Ordering::AcqRel, Ordering::Acquire)
@@ -726,9 +760,10 @@ impl AsyncEventHandler for BenchHandler {
                 DISPATCHER.with(|slot| *slot.borrow_mut() = Some(Rc::clone(&dispatch)));
                 let shared = Arc::clone(&worker_state.task_state.shared);
                 if let Err(e) = ringline::spawn(run_dispatcher(dispatch, rl, shared)) {
-                    // Without it every connection falls back to the bounded
-                    // wait in `acquire`, which still makes progress -- but it
-                    // is the old per-connection poll, so say so.
+                    // Without it `dispatcher()` returns `None` and every
+                    // connection falls back to polling the limiter on a short
+                    // sleep, which still makes progress -- but it is the old
+                    // per-connection poll, so say so.
                     tracing::error!(
                         worker = worker_id,
                         "failed to spawn rate-limit dispatcher: {e}; \
@@ -749,6 +784,22 @@ impl AsyncEventHandler for BenchHandler {
                 }
                 CacheProtocol::MemcacheBinary => {
                     spawn_protocol_tasks(&worker_state, my_connections, worker_id);
+                }
+                // The fabric endpoint opens before any connection task, so a card that will not
+                // open fails at startup rather than once per connection.
+                #[cfg(feature = "dma")]
+                CacheProtocol::Dma => {
+                    if crate::dma::open_fabric(
+                        worker_id,
+                        &worker_state.task_state.config,
+                        &worker_state.task_state.value_pool,
+                    ) {
+                        spawn_protocol_tasks(&worker_state, my_connections, worker_id);
+                    }
+                }
+                #[cfg(not(feature = "dma"))]
+                CacheProtocol::Dma => {
+                    tracing::error!("dma protocol requires a build with --features dma");
                 }
             }
             spawn_append_tasks(&worker_state, worker_id);
@@ -957,6 +1008,13 @@ fn spawn_protocol_tasks(
                 CacheProtocol::Ping => {
                     ping_connection_task(state, endpoint_idx, session_seed).await;
                 }
+                #[cfg(feature = "dma")]
+                CacheProtocol::Dma => {
+                    crate::dma::dma_connection_task(state, endpoint_idx, session_seed).await;
+                }
+                // Refused in `on_start`, so no task is ever spawned for it.
+                #[cfg(not(feature = "dma"))]
+                CacheProtocol::Dma => {}
             }
         }) {
             tracing::error!(
@@ -978,7 +1036,7 @@ fn spawn_protocol_tasks(
 /// Without it a SYN to a host that never answers hangs the task for the
 /// kernel's own connect timeout, minutes on Linux, and the precheck deadline
 /// in the runner only covers the first attempt of the run, not reconnects.
-async fn establish_connection(
+pub(crate) async fn establish_connection(
     endpoint: SocketAddr,
     worker_id: usize,
     tls_server_name: Option<&str>,
@@ -1044,7 +1102,10 @@ async fn establish_connection(
 
 /// Resolve the TLS server name for an endpoint from task shared state.
 /// Returns None if TLS is disabled, otherwise the explicit hostname or the IP string.
-fn resolve_tls_server_name(state: &TaskSharedState, endpoint: SocketAddr) -> Option<String> {
+pub(crate) fn resolve_tls_server_name(
+    state: &TaskSharedState,
+    endpoint: SocketAddr,
+) -> Option<String> {
     if !state.tls_enabled {
         return None;
     }
@@ -2455,7 +2516,7 @@ async fn drive_ping_workload(
 // ── Prefill helpers ──────────────────────────────────────────────────────
 
 /// Confirm a single prefill key was successfully stored.
-fn confirm_prefill_key(state: &Arc<SharedWorkerState>) {
+pub(crate) fn confirm_prefill_key(state: &Arc<SharedWorkerState>) {
     // Increment global counter (used by runner for progress reporting).
     state
         .task_state
@@ -2579,8 +2640,9 @@ fn spawn_append_tasks(worker_state: &Arc<SharedWorkerState>, worker_id: usize) {
                 CacheProtocol::Memcache | CacheProtocol::MemcacheBinary => {
                     memcache_append_task(state, endpoint_idx, seed).await;
                 }
-                // Rejected by config validation: ping has no SET.
-                CacheProtocol::Ping => {}
+                // Rejected by config validation: ping has no SET, and the
+                // DMA path has no append writer.
+                CacheProtocol::Ping | CacheProtocol::Dma => {}
             }
         }) {
             tracing::error!(
@@ -3058,14 +3120,14 @@ async fn drive_memcache_append(
 /// Also owns the connection's deadline timer. The timer outlives individual
 /// recvs: it is armed for the oldest request's deadline and left running when
 /// that request's reply arrives. See `recv_with_timeout` for why.
-struct InFlight {
+pub(crate) struct InFlight {
     fired: VecDeque<Instant>,
     timeout: Duration,
     timer: Option<ringline::SleepFuture>,
 }
 
 impl InFlight {
-    fn new(timeout: Duration, capacity: usize) -> Self {
+    pub(crate) fn new(timeout: Duration, capacity: usize) -> Self {
         Self {
             fired: VecDeque::with_capacity(capacity),
             timeout,
@@ -3074,12 +3136,12 @@ impl InFlight {
     }
 
     #[inline]
-    fn push(&mut self, fired_at: Instant) {
+    pub(crate) fn push(&mut self, fired_at: Instant) {
         self.fired.push_back(fired_at);
     }
 
     #[inline]
-    fn pop(&mut self) {
+    pub(crate) fn pop(&mut self) {
         self.fired.pop_front();
     }
 
@@ -3134,7 +3196,7 @@ impl InFlight {
 /// against the current oldest request: expired means timeout, otherwise the
 /// timer is re-armed for what remains. A healthy connection re-arms about once
 /// per `timeout` and never cancels.
-async fn recv_with_timeout<F, T>(
+pub(crate) async fn recv_with_timeout<F, T>(
     recv: F,
     inflight: &mut InFlight,
     conn: ConnCtx,
@@ -3284,7 +3346,7 @@ fn record_disconnect_reason(reason: DisconnectReason) {
 }
 
 /// Record counter metrics for a completed request result (always called).
-fn record_counters(result: &RequestResult) {
+pub(crate) fn record_counters(result: &RequestResult) {
     metrics::RESPONSES_RECEIVED.increment();
     if result.redirect.is_some() {
         // Redirects are counted via CLUSTER_REDIRECTS, not as errors
@@ -3311,12 +3373,12 @@ fn record_counters(result: &RequestResult) {
 /// hashing; the multiplier provides enough headroom that hitting the cap is
 /// vanishingly unlikely in a healthy setup, while still bounding CPU if the
 /// hash distribution is degenerate (e.g. a tiny keyspace).
-fn max_routing_attempts(num_endpoints: usize) -> usize {
+pub(crate) fn max_routing_attempts(num_endpoints: usize) -> usize {
     num_endpoints.saturating_mul(64).max(64)
 }
 
 /// Route a key to an endpoint index.
-fn route_key(state: &TaskSharedState, key: &[u8]) -> usize {
+pub(crate) fn route_key(state: &TaskSharedState, key: &[u8]) -> usize {
     let slot_table = state.slot_table.read().unwrap();
     route_partition(&slot_table, &state.ring, state.endpoints.len(), key)
 }
@@ -3427,7 +3489,7 @@ pub(crate) fn build_endpoint_keys(
 /// `run_benchmark_full` before any key is generated. See `config::KeyFormat`.
 pub(crate) static KEY_FORMAT: AtomicU8 = AtomicU8::new(0);
 
-fn write_key(buf: &mut [u8], id: usize) {
+pub(crate) fn write_key(buf: &mut [u8], id: usize) {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     // Canonical UUID form: 8-4-4-4-12 hex with dashes at indices 8/13/18/23.
     // A typical UUID parser accepts any hex in those positions, and the trailing
@@ -3561,6 +3623,46 @@ mod tests {
         };
         let mut cx = Context::from_waker(Waker::noop());
         Pin::new(&mut wait).poll(&mut cx).is_ready()
+    }
+
+    #[test]
+    fn a_carried_token_is_spent_before_the_limiter() {
+        let rl = WorkerLimiter::per_second(1, 1);
+        let mut carried = 1;
+        assert!(take_token(&mut carried, &rl));
+        assert_eq!(carried, 0);
+        assert!(
+            rl.try_wait().is_ok(),
+            "a carried token must not debit the limiter"
+        );
+        assert!(
+            !take_token(&mut carried, &rl),
+            "nothing carried, limiter empty"
+        );
+    }
+
+    #[test]
+    fn a_granted_token_is_carried_to_the_next_request() {
+        let d = Rc::new(TokenDispatcher::default());
+        // Holds two, so a claim for more than one token would be granted it.
+        let rl = limiter(2);
+        let mut carried = 0;
+        {
+            let mut wait = std::pin::pin!(wait_for_token(&d, &mut carried));
+            let mut cx = Context::from_waker(Waker::noop());
+            assert!(wait.as_mut().poll(&mut cx).is_pending());
+            d.dispatch(&rl);
+            assert!(wait.as_mut().poll(&mut cx).is_ready());
+        }
+        assert_eq!(carried, 1, "one token granted and kept, not dropped");
+        assert!(
+            take_token(&mut carried, &rl),
+            "and pays for the next request"
+        );
+        assert_eq!(carried, 0);
+        // The grant debited one of the two; spending it must not debit another.
+        assert!(rl.try_wait().is_ok(), "one token left in the limiter");
+        assert!(rl.try_wait().is_err());
     }
 
     #[test]

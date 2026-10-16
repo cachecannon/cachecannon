@@ -8,6 +8,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `protocol = "dma"` (`--features dma`, needs libfabric): RESP carries the
+  commands and the values transmit over libfabric, initiated by the server.
+  `[dma] module` picks the server module, `largeobj` (`BLOB.*`, the default)
+  or `vdma` (`DMA.*`); the fabric, buffers and connection task are the same
+  for both. Under `largeobj` each connection sends `BLOB.RDMA_HELLO` and, if
+  the server accepts it, uses `BLOB.RDMA_GET` and `BLOB.RDMA_SET`; if the
+  server answers with an error it sends `BLOB.HELLO` and uses `BLOB.GET` and
+  `BLOB.SET`. `[dma] checksum = true` checks the CRC-32c the server returns
+  with a read under both modules; under vdma writes also carry one.
+  Backported from main (#201, #211, #213, #222).
 - `[admin] listen` serves `GET /metrics/stream[?interval=..&layout=wide|long]`,
   metriken-exposition's stream route: dendro replication frames
   (`application/vnd.metriken.replication.v1+dendro`), a handshake with
