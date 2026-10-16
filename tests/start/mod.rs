@@ -24,7 +24,15 @@ fn read_line(reader: &mut impl BufRead) -> Option<Vec<u8>> {
 
 /// Answer SET `+OK`, GET a miss, PING `+PONG`, anything else `+OK`, and record
 /// when each `record` command arrived.
+///
+/// The connection sets `TCP_NODELAY`, as the client's connections do. The client
+/// sends a new batch only when all of a connection's pipeline has been
+/// answered, so no request carries the ACK of the first reply. Without
+/// `TCP_NODELAY`, Nagle holds the remaining replies until that ACK arrives, and
+/// Linux can delay it by 40 ms. 16 connections of 4 requests per 40 ms carry at
+/// most 1,600 per second, below [`RATE`].
 fn serve(stream: TcpStream, record: &'static [u8], times: &Mutex<Vec<Instant>>) {
+    stream.set_nodelay(true).unwrap();
     let mut writer = stream.try_clone().unwrap();
     let mut reader = BufReader::new(stream);
     while let Some(header) = read_line(&mut reader) {
