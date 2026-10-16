@@ -35,7 +35,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   timing, memory and error-handling differences.
 - `protocol = "dma"` (`--features dma`): RESP carries the commands and the
   values transmit over libfabric, server-initiated. `[dma] module` picks the
-  server module dialect, `largeobj` (`BLOB.*`, the default) or `vdma`
+  server module dialect, `largeobj` (`BLOB.RDMA_*`, the default) or `vdma`
   (`DMA.*`). The fabric, buffers, and connection task are the same for both.
 - `[connection] endpoint_allocation = "key_share"` (zipf, several endpoints):
   each endpoint gets connections in proportion to the zipf probability its

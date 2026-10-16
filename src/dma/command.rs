@@ -8,9 +8,10 @@ use crate::dma::error::DmaError;
 pub enum Dialect {
     /// vdma's `DMA.*`: the client address is on every transfer; a transfer answers with a byte count.
     Vdma,
-    /// valkey-large-object's `BLOB.*`: the client address is sent once in `BLOB.HELLO` and bound
-    /// to the connection; a transfer names `<rkey> <addr> <len>` triples; `BLOB.SET` answers `OK`
-    /// and `BLOB.GET` answers `[bytes, crc32c]`. The client sends no checksum.
+    /// valkey-large-object's `BLOB.RDMA_*`: the client address is sent once in `BLOB.RDMA_HELLO`
+    /// and bound to the connection; a transfer names `<rkey> <addr> <len>` triples;
+    /// `BLOB.RDMA_SET` answers `OK` and `BLOB.RDMA_GET` answers `[bytes, crc32c]`. The client
+    /// sends no checksum.
     #[default]
     LargeObj,
 }
@@ -38,7 +39,7 @@ pub enum TransferReply {
         /// CRC-32c the server computed over those bytes.
         checksum: i64,
     },
-    /// `OK`: how `BLOB.SET` reports a write, with no count.
+    /// `OK`: how `BLOB.RDMA_SET` reports a write, with no count.
     Acknowledged,
 }
 
@@ -137,7 +138,7 @@ impl DmaCommand {
     }
 }
 
-/// `DMA.HELLO`, or `BLOB.HELLO <client-address>`. Only largeobj sends `local_address`.
+/// `DMA.HELLO`, or `BLOB.RDMA_HELLO <client-address>`. Only largeobj sends `local_address`.
 pub fn hello(dialect: Dialect, local_address: &[u8]) -> DmaCommand {
     match dialect {
         Dialect::Vdma => DmaCommand {
@@ -145,7 +146,7 @@ pub fn hello(dialect: Dialect, local_address: &[u8]) -> DmaCommand {
             arguments: Vec::new(),
         },
         Dialect::LargeObj => DmaCommand {
-            name: "BLOB.HELLO",
+            name: "BLOB.RDMA_HELLO",
             arguments: vec![crate::dma::advertisement::encode_hex(local_address).into_bytes()],
         },
     }
@@ -160,7 +161,7 @@ pub fn info() -> DmaCommand {
 }
 
 /// `DMA.SET <address> <rkey> <remote-address> <length> <key> [<crc>]`, or
-/// `BLOB.SET <key> <length> <rkey> <remote-address> <length>`.
+/// `BLOB.RDMA_SET <key> <length> <rkey> <remote-address> <length>`.
 pub fn set(
     dialect: Dialect,
     advertisement: &Advertisement,
@@ -185,7 +186,7 @@ pub fn set(
             let mut arguments = vec![key.to_vec(), number(length as u64)];
             arguments.extend(address_triple(advertisement, length));
             Ok(DmaCommand {
-                name: "BLOB.SET",
+                name: "BLOB.RDMA_SET",
                 arguments,
             })
         }
@@ -193,7 +194,8 @@ pub fn set(
 }
 
 /// `DMA.GET <address> <rkey> <remote-address> <capacity> <key> [<crc-flag>]`, or
-/// `BLOB.GET <key> <rkey> <remote-address> <capacity>`. largeobj returns a CRC-32c unconditionally.
+/// `BLOB.RDMA_GET <key> <rkey> <remote-address> <capacity>`. largeobj returns a CRC-32c
+/// unconditionally.
 pub fn get(
     dialect: Dialect,
     advertisement: &Advertisement,
@@ -214,7 +216,7 @@ pub fn get(
             let mut arguments = vec![key.to_vec()];
             arguments.extend(address_triple(advertisement, capacity));
             Ok(DmaCommand {
-                name: "BLOB.GET",
+                name: "BLOB.RDMA_GET",
                 arguments,
             })
         }
@@ -348,7 +350,7 @@ mod tests {
     #[test]
     fn a_largeobj_hello_carries_the_client_address_as_hex() {
         let command = hello(Dialect::LargeObj, &[0xde, 0xad, 0xbe, 0xef]);
-        assert_eq!(command.name(), "BLOB.HELLO");
+        assert_eq!(command.name(), "BLOB.RDMA_HELLO");
         assert_eq!(arguments(&command), ["deadbeef"]);
 
         // vdma learns the address from each transfer instead.
@@ -368,7 +370,7 @@ mod tests {
             &DmaSetOptions::default(),
         )
         .unwrap();
-        assert_eq!(command.name(), "BLOB.SET");
+        assert_eq!(command.name(), "BLOB.RDMA_SET");
         assert_eq!(arguments(&command), ["key", "64", "7", "4096", "64"]);
     }
 
@@ -383,7 +385,7 @@ mod tests {
             &DmaGetOptions::default(),
         )
         .unwrap();
-        assert_eq!(command.name(), "BLOB.GET");
+        assert_eq!(command.name(), "BLOB.RDMA_GET");
         assert_eq!(arguments(&command), ["key", "7", "4096", "64"]);
     }
 

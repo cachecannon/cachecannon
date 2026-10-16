@@ -774,8 +774,8 @@ pub struct Dma {
 pub enum DmaModule {
     /// vdma: `DMA.HELLO`/`DMA.GET`/`DMA.SET`, values in the ordinary keyspace.
     Vdma,
-    /// valkey-large-object: `BLOB.HELLO`/`BLOB.GET`/`BLOB.SET`, a module type of its own. A write takes no
-    /// checksum; a read returns one unasked.
+    /// valkey-large-object: `BLOB.RDMA_HELLO`/`BLOB.RDMA_GET`/`BLOB.RDMA_SET`, a module type of
+    /// its own. A write takes no checksum; a read returns one unasked.
     #[default]
     LargeObj,
 }
