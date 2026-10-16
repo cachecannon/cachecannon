@@ -1,4 +1,4 @@
-//! The `DMA.*` (vdma) and `BLOB.*` (valkey-large-object) command vocabulary.
+//! The `DMA.*` (vdma) and `BLOB.RDMA_*` (valkey-large-object) command vocabulary.
 
 use crate::dma::advertisement::Advertisement;
 use crate::dma::error::DmaError;
@@ -8,16 +8,12 @@ use crate::dma::error::DmaError;
 pub enum Dialect {
     /// vdma's `DMA.*`: the client address is on every transfer; a transfer answers with a byte count.
     Vdma,
-    /// valkey-large-object's `BLOB.*`: the client address is sent once in `BLOB.HELLO` and bound
-    /// to the connection; a transfer names `<rkey> <addr> <len>` triples; `BLOB.SET` answers `OK`
-    /// and `BLOB.GET` answers `[bytes, crc32c]`. The client sends no checksum.
+    /// valkey-large-object's `BLOB.RDMA_*`: the client address is sent once in
+    /// `BLOB.RDMA_HELLO` and bound to the connection; a transfer names `<rkey> <addr> <len>`
+    /// triples; `BLOB.RDMA_SET` answers `OK` and `BLOB.RDMA_GET` answers `[bytes, crc32c]`. The
+    /// client sends no checksum.
     #[default]
     LargeObj,
-    /// `BLOB.RDMA_HELLO`, `BLOB.RDMA_GET` and `BLOB.RDMA_SET`, sent with the same arguments as
-    /// [`Dialect::LargeObj`]. Newer module builds register these in place of `BLOB.HELLO`,
-    /// `BLOB.GET` and `BLOB.SET`. A connection configured for [`Dialect::LargeObj`] speaks this
-    /// when the server accepts `BLOB.RDMA_HELLO`.
-    LargeObjRdma,
 }
 
 impl Dialect {
@@ -25,8 +21,7 @@ impl Dialect {
     fn names(self) -> [&'static str; 3] {
         match self {
             Self::Vdma => ["DMA.HELLO", "DMA.GET", "DMA.SET"],
-            Self::LargeObj => ["BLOB.HELLO", "BLOB.GET", "BLOB.SET"],
-            Self::LargeObjRdma => ["BLOB.RDMA_HELLO", "BLOB.RDMA_GET", "BLOB.RDMA_SET"],
+            Self::LargeObj => ["BLOB.RDMA_HELLO", "BLOB.RDMA_GET", "BLOB.RDMA_SET"],
         }
     }
 }
@@ -54,7 +49,7 @@ pub enum TransferReply {
         /// CRC-32c the server computed over those bytes.
         checksum: i64,
     },
-    /// `OK`: how `BLOB.SET` reports a write, with no count.
+    /// `OK`: how `BLOB.RDMA_SET` reports a write, with no count.
     Acknowledged,
 }
 
@@ -105,8 +100,7 @@ impl TransferReply {
     }
 }
 
-/// Options for `DMA.SET`. vdma only; [`set`] refuses them under [`Dialect::LargeObj`] and
-/// [`Dialect::LargeObjRdma`].
+/// Options for `DMA.SET`. vdma only; [`set`] refuses them under [`Dialect::LargeObj`].
 #[derive(Debug, Clone, Copy, Default)]
 pub struct DmaSetOptions {
     checksum: Option<u32>,
@@ -135,7 +129,7 @@ impl DmaGetOptions {
     }
 }
 
-/// A `DMA.*` or `BLOB.*` command: its name, and its arguments in wire order.
+/// A `DMA.*` or `BLOB.RDMA_*` command: its name, and its arguments in wire order.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DmaCommand {
     name: &'static str,
@@ -154,8 +148,7 @@ impl DmaCommand {
     }
 }
 
-/// `DMA.HELLO`, or `BLOB.HELLO <client-address>` (`BLOB.RDMA_HELLO` under
-/// [`Dialect::LargeObjRdma`]). Only largeobj sends `local_address`.
+/// `DMA.HELLO`, or `BLOB.RDMA_HELLO <client-address>`. Only largeobj sends `local_address`.
 pub fn hello(dialect: Dialect, local_address: &[u8]) -> DmaCommand {
     let name = dialect.names()[0];
     match dialect {
@@ -163,7 +156,7 @@ pub fn hello(dialect: Dialect, local_address: &[u8]) -> DmaCommand {
             name,
             arguments: Vec::new(),
         },
-        Dialect::LargeObj | Dialect::LargeObjRdma => DmaCommand {
+        Dialect::LargeObj => DmaCommand {
             name,
             arguments: vec![crate::dma::advertisement::encode_hex(local_address).into_bytes()],
         },
@@ -179,8 +172,7 @@ pub fn info() -> DmaCommand {
 }
 
 /// `DMA.SET <address> <rkey> <remote-address> <length> <key> [<crc>]`, or
-/// `BLOB.SET <key> <length> <rkey> <remote-address> <length>` (`BLOB.RDMA_SET` under
-/// [`Dialect::LargeObjRdma`]).
+/// `BLOB.RDMA_SET <key> <length> <rkey> <remote-address> <length>`.
 pub fn set(
     dialect: Dialect,
     advertisement: &Advertisement,
@@ -196,7 +188,7 @@ pub fn set(
             }
             Ok(command)
         }
-        Dialect::LargeObj | Dialect::LargeObjRdma => {
+        Dialect::LargeObj => {
             if options.checksum.is_some() {
                 return Err(DmaError::Configuration(
                     "largeobj takes no checksum on a write".into(),
@@ -213,8 +205,8 @@ pub fn set(
 }
 
 /// `DMA.GET <address> <rkey> <remote-address> <capacity> <key> [<crc-flag>]`, or
-/// `BLOB.GET <key> <rkey> <remote-address> <capacity>` (`BLOB.RDMA_GET` under
-/// [`Dialect::LargeObjRdma`]). largeobj returns a CRC-32c unconditionally.
+/// `BLOB.RDMA_GET <key> <rkey> <remote-address> <capacity>`. largeobj returns a CRC-32c
+/// unconditionally.
 pub fn get(
     dialect: Dialect,
     advertisement: &Advertisement,
@@ -231,7 +223,7 @@ pub fn get(
             }
             Ok(command)
         }
-        Dialect::LargeObj | Dialect::LargeObjRdma => {
+        Dialect::LargeObj => {
             let mut arguments = vec![key.to_vec()];
             arguments.extend(address_triple(advertisement, capacity));
             Ok(DmaCommand {
@@ -369,7 +361,7 @@ mod tests {
     #[test]
     fn a_largeobj_hello_carries_the_client_address_as_hex() {
         let command = hello(Dialect::LargeObj, &[0xde, 0xad, 0xbe, 0xef]);
-        assert_eq!(command.name(), "BLOB.HELLO");
+        assert_eq!(command.name(), "BLOB.RDMA_HELLO");
         assert_eq!(arguments(&command), ["deadbeef"]);
 
         // vdma learns the address from each transfer instead.
@@ -389,7 +381,7 @@ mod tests {
             &DmaSetOptions::default(),
         )
         .unwrap();
-        assert_eq!(command.name(), "BLOB.SET");
+        assert_eq!(command.name(), "BLOB.RDMA_SET");
         assert_eq!(arguments(&command), ["key", "64", "7", "4096", "64"]);
     }
 
@@ -404,33 +396,8 @@ mod tests {
             &DmaGetOptions::default(),
         )
         .unwrap();
-        assert_eq!(command.name(), "BLOB.GET");
+        assert_eq!(command.name(), "BLOB.RDMA_GET");
         assert_eq!(arguments(&command), ["key", "7", "4096", "64"]);
-    }
-
-    /// The renamed commands differ from the originals in name only.
-    #[test]
-    fn rdma_names_take_the_same_arguments() {
-        let address = [0xde, 0xad, 0xbe, 0xef];
-        let (old, new) = (Dialect::LargeObj, Dialect::LargeObjRdma);
-        let pairs = [
-            (hello(old, &address), hello(new, &address)),
-            (
-                set(old, &advertisement(), b"key", 64, &DmaSetOptions::default()).unwrap(),
-                set(new, &advertisement(), b"key", 64, &DmaSetOptions::default()).unwrap(),
-            ),
-            (
-                get(old, &advertisement(), b"key", 64, &DmaGetOptions::default()).unwrap(),
-                get(new, &advertisement(), b"key", 64, &DmaGetOptions::default()).unwrap(),
-            ),
-        ];
-        let names: Vec<_> = pairs.iter().map(|(_, n)| n.name()).collect();
-        assert_eq!(names, ["BLOB.RDMA_HELLO", "BLOB.RDMA_SET", "BLOB.RDMA_GET"]);
-        for (o, n) in &pairs {
-            assert_eq!(o.arguments(), n.arguments());
-        }
-        let checksum = DmaSetOptions::default().with_checksum(0xabcd);
-        assert!(set(new, &advertisement(), b"key", 64, &checksum).is_err());
     }
 
     #[test]

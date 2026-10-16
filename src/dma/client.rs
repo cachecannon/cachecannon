@@ -34,21 +34,14 @@ impl DmaClient {
     /// Hello, insert every server address, and register a `capacity`-byte buffer.
     ///
     /// Under [`Dialect::LargeObj`] the hello binds this fabric's address to the connection, and a
-    /// second hello after one has succeeded is refused. The connection sends `BLOB.RDMA_HELLO`,
-    /// and `BLOB.HELLO` only if that is answered with an error; it speaks
-    /// [`Dialect::LargeObjRdma`] if the first succeeds. See [`negotiate`].
+    /// second hello is refused.
     pub(crate) async fn connect(
         mut client: Client,
         fabric: DmaFabric,
         capacity: usize,
         dialect: Dialect,
     ) -> Result<Self, Error> {
-        let mut sender = Hello {
-            client: &mut client,
-            local_address: fabric.local_address(),
-        };
-        let (dialect, addresses) = negotiate(dialect, &mut sender).await?;
-        for address in addresses {
+        for address in hello(&mut client, dialect, fabric.local_address()).await? {
             fabric.insert_peer(&address).map_err(Error::Dma)?;
         }
         let buffer = fabric.register(vec![0u8; capacity]).map_err(Error::Dma)?;
@@ -181,50 +174,6 @@ fn request(command: &DmaCommand) -> Request<'_> {
     request
 }
 
-/// Sends one hello under a given dialect's names.
-trait SendHello {
-    async fn send_hello(&mut self, dialect: Dialect) -> Result<Vec<Vec<u8>>, Error>;
-}
-
-/// [`SendHello`] over a connection.
-struct Hello<'a> {
-    client: &'a mut Client,
-    local_address: &'a [u8],
-}
-
-impl SendHello for Hello<'_> {
-    async fn send_hello(&mut self, dialect: Dialect) -> Result<Vec<Vec<u8>>, Error> {
-        hello(self.client, dialect, self.local_address).await
-    }
-}
-
-/// The hello under the names the server has, and the dialect that succeeded.
-///
-/// For [`Dialect::LargeObj`]: `BLOB.RDMA_HELLO`, and if the server answers it with an error,
-/// `BLOB.HELLO`. A server without a command answers with an error and keeps no state, so the
-/// second attempt starts clean. If both fail, the error carries both replies. Any other failure,
-/// such as a closed connection, ends the attempt.
-async fn negotiate(
-    dialect: Dialect,
-    sender: &mut impl SendHello,
-) -> Result<(Dialect, Vec<Vec<u8>>), Error> {
-    if dialect != Dialect::LargeObj {
-        return Ok((dialect, sender.send_hello(dialect).await?));
-    }
-    let first = match sender.send_hello(Dialect::LargeObjRdma).await {
-        Ok(addresses) => return Ok((Dialect::LargeObjRdma, addresses)),
-        Err(Error::Resp(ringline_redis::Error::Redis(message))) => message,
-        Err(error) => return Err(error),
-    };
-    match sender.send_hello(Dialect::LargeObj).await {
-        Ok(addresses) => Ok((Dialect::LargeObj, addresses)),
-        Err(Error::Resp(ringline_redis::Error::Redis(second))) => Err(Error::Resp(
-            ringline_redis::Error::Redis(format!("BLOB.RDMA_HELLO: {first}; BLOB.HELLO: {second}")),
-        )),
-        Err(error) => Err(error),
-    }
-}
-
 /// The hello, decoded into every fabric address the server may initiate from.
 async fn hello(
     client: &mut Client,
@@ -281,97 +230,13 @@ fn parse(reply: Value) -> Result<TransferReply, DmaError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Error, SendHello, negotiate, parse, request};
+    use super::{parse, request};
     use crate::dma::command::{self, TransferReply};
     use crate::dma::{Dialect, DmaError, TransferReceipt};
     use resp_proto::Value;
 
     fn receipt(reply: Value) -> Result<Option<TransferReceipt>, DmaError> {
         parse(reply)?.receipt()
-    }
-
-    /// Replies one by one; records the dialect of each hello sent.
-    struct Script {
-        replies: Vec<Result<Vec<Vec<u8>>, Error>>,
-        sent: Vec<Dialect>,
-    }
-
-    impl SendHello for Script {
-        async fn send_hello(&mut self, dialect: Dialect) -> Result<Vec<Vec<u8>>, Error> {
-            self.sent.push(dialect);
-            self.replies.remove(0)
-        }
-    }
-
-    fn script(replies: Vec<Result<Vec<Vec<u8>>, Error>>) -> Script {
-        Script {
-            replies,
-            sent: Vec::new(),
-        }
-    }
-
-    fn refused(message: &str) -> Result<Vec<Vec<u8>>, Error> {
-        Err(Error::Resp(ringline_redis::Error::Redis(message.into())))
-    }
-
-    #[tokio::test]
-    async fn a_server_with_the_rdma_names_takes_one_hello() {
-        let mut s = script(vec![Ok(vec![vec![1]])]);
-        let (dialect, addresses) = negotiate(Dialect::LargeObj, &mut s).await.unwrap();
-        assert_eq!(dialect, Dialect::LargeObjRdma);
-        assert_eq!(addresses, [vec![1]]);
-        assert_eq!(s.sent, [Dialect::LargeObjRdma]);
-    }
-
-    #[tokio::test]
-    async fn a_server_without_them_gets_the_original_hello() {
-        let mut s = script(vec![refused("ERR unknown command"), Ok(vec![vec![2]])]);
-        let (dialect, _) = negotiate(Dialect::LargeObj, &mut s).await.unwrap();
-        assert_eq!(dialect, Dialect::LargeObj);
-        assert_eq!(s.sent, [Dialect::LargeObjRdma, Dialect::LargeObj]);
-    }
-
-    #[tokio::test]
-    async fn two_refusals_report_both_replies() {
-        let mut s = script(vec![refused("NOPERM rdma"), refused("ERR unknown command")]);
-        let error = negotiate(Dialect::LargeObj, &mut s).await.unwrap_err();
-        assert!(matches!(
-            error,
-            Error::Resp(ringline_redis::Error::Redis(_))
-        ));
-        let error = error.to_string();
-        assert!(error.contains("NOPERM rdma"), "{error}");
-        assert!(error.contains("ERR unknown command"), "{error}");
-    }
-
-    #[tokio::test]
-    async fn a_closed_connection_is_not_retried() {
-        let mut s = script(vec![Err(Error::Resp(
-            ringline_redis::Error::ConnectionClosed,
-        ))]);
-        assert!(negotiate(Dialect::LargeObj, &mut s).await.is_err());
-        assert_eq!(s.sent, [Dialect::LargeObjRdma]);
-    }
-
-    #[tokio::test]
-    async fn a_closed_connection_on_the_second_hello_is_returned() {
-        let mut s = script(vec![
-            refused("ERR unknown command"),
-            Err(Error::Resp(ringline_redis::Error::ConnectionClosed)),
-        ]);
-        let error = negotiate(Dialect::LargeObj, &mut s).await.unwrap_err();
-        assert!(matches!(
-            error,
-            Error::Resp(ringline_redis::Error::ConnectionClosed)
-        ));
-        assert_eq!(s.sent, [Dialect::LargeObjRdma, Dialect::LargeObj]);
-    }
-
-    #[tokio::test]
-    async fn vdma_sends_its_own_hello_once() {
-        let mut s = script(vec![refused("ERR")]);
-        assert!(negotiate(Dialect::Vdma, &mut s).await.is_err());
-        assert_eq!(s.sent, [Dialect::Vdma]);
     }
 
     #[test]

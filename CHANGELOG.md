@@ -8,13 +8,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
-- With `[dma] module = "largeobj"`, each connection sends `BLOB.RDMA_HELLO`
-  and, if the server accepts it, uses `BLOB.RDMA_GET` and `BLOB.RDMA_SET`. If
-  the server answers `BLOB.RDMA_HELLO` with an error, the connection sends
-  `BLOB.HELLO` and uses `BLOB.GET` and `BLOB.SET`, as before. If both are
-  refused, the error carries both replies. cachecannon sends the same
-  arguments under both names, so one build works against module builds from
-  before and after the rename.
 - `[workload.kv_replay]` replays a request-level KV-cache trace (the kvtrace
   request format from pelikan-io/cachesim) against a RESP server used as an
   LLM serving engine's KV-cache prefix store, and reports prompt tokens
@@ -89,8 +82,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   timing, memory and error-handling differences.
 - `protocol = "dma"` (`--features dma`): RESP carries the commands and the
   values transmit over libfabric, server-initiated. `[dma] module` picks the
-  server module dialect, `largeobj` (`BLOB.*`, the default) or `vdma`
+  server module dialect, `largeobj` (`BLOB.RDMA_*`, the default) or `vdma`
   (`DMA.*`). The fabric, buffers, and connection task are the same for both.
+  A server whose module registers only `BLOB.HELLO`, `BLOB.GET` and
+  `BLOB.SET` answers `BLOB.RDMA_HELLO` with an error; every connection
+  retries, and the run stops at precheck with `no connectivity` (the server's
+  reply is logged at debug). The 0.0.x branch falls back to those names.
   `[dma] checksum = true` checks the CRC-32c the server returns with a read
   under both modules. Under vdma, writes also carry one; the default module takes no
   write checksum, so writes are sent without one.

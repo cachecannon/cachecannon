@@ -888,9 +888,8 @@ impl Dma {
 pub enum DmaModule {
     /// vdma: `DMA.HELLO`/`DMA.GET`/`DMA.SET`, values in the ordinary keyspace.
     Vdma,
-    /// valkey-large-object: `BLOB.RDMA_HELLO`/`BLOB.RDMA_GET`/`BLOB.RDMA_SET`, or
-    /// `BLOB.HELLO`/`BLOB.GET`/`BLOB.SET` on a server that refuses `BLOB.RDMA_HELLO`; a module type
-    /// of its own. The client sends no write checksum; a read returns one unasked.
+    /// valkey-large-object: `BLOB.RDMA_HELLO`/`BLOB.RDMA_GET`/`BLOB.RDMA_SET`, a module type of
+    /// its own. The client sends no write checksum; a read returns one unasked.
     #[default]
     LargeObj,
 }
