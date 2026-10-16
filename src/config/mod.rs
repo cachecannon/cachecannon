@@ -18,6 +18,8 @@ pub struct Config {
     pub timestamps: Timestamps,
     #[serde(default)]
     pub admin: Admin,
+    #[serde(default)]
+    pub dma: Dma,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -163,6 +165,9 @@ pub enum Protocol {
     MemcacheBinary,
     /// Simple ASCII PING/PONG protocol
     Ping,
+    /// Server-initiated RMA against valkey with vdma module. RESP carries the commands, payloads travel
+    /// libfabric. Requires the `dma` feature and libfabric.
+    Dma,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -690,6 +695,62 @@ fn default_timestamps_enabled() -> bool {
     true
 }
 
+/// Fabric settings for `protocol = "dma"`.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct Dma {
+    /// Which server module is on the other end. This selects the RESP
+    /// vocabulary the transfers are issued in.
+    #[serde(default)]
+    pub module: DmaModule,
+    /// `efa-direct` for real dma, `tcp` for a development host.
+    #[serde(default)]
+    pub provider: DmaProvider,
+    /// Fabric domains to spread workers across, one endpoint per worker. Empty discovers all
+    /// domains.
+    #[serde(default)]
+    pub interfaces: Vec<String>,
+    /// Registered buffer size per connection. Defaults to the workload's value length. Registered
+    /// memory multiplies with connection count, against `RLIMIT_MEMLOCK`.
+    #[serde(default)]
+    pub buffer_capacity: Option<usize>,
+    /// Verify the CRC-32c the server returns with a read, and, under vdma, send one with each write.
+    /// Off by default. The default module returns one with every read and takes none on a write.
+    #[serde(default)]
+    pub checksum: bool,
+}
+
+impl Dma {
+    /// Whether a write carries a CRC-32c for the server to verify. Only vdma takes one: the default
+    /// module's write command takes no checksum argument.
+    pub fn checksums_writes(&self) -> bool {
+        self.checksum && self.module == DmaModule::Vdma
+    }
+}
+
+/// The server module a DMA run talks to.
+#[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum DmaModule {
+    /// vdma: `DMA.HELLO`/`DMA.GET`/`DMA.SET`, values in the ordinary keyspace.
+    Vdma,
+    /// valkey-large-object: `BLOB.RDMA_HELLO`/`BLOB.RDMA_GET`/`BLOB.RDMA_SET`, or
+    /// `BLOB.HELLO`/`BLOB.GET`/`BLOB.SET` on a server that refuses `BLOB.RDMA_HELLO`; a module type
+    /// of its own. The client sends no write checksum; a read returns one unasked.
+    #[default]
+    LargeObj,
+}
+
+/// Which libfabric provider a DMA run opens.
+#[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum DmaProvider {
+    /// EFA's `efa-direct` fabric — the hardware path.
+    #[default]
+    EfaDirect,
+    /// Software transport, for a development host with no RDMA hardware.
+    Tcp,
+}
+
 #[derive(Debug, Clone, Copy, Default, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum TimestampMode {
@@ -808,6 +869,40 @@ impl Config {
             return Err(ConfigError::Validation(
                 "tls_ca_file / tls_cert_file / tls_key_file require tls = true".to_string(),
             ));
+        }
+
+        if self.target.protocol == Protocol::Dma {
+            #[cfg(not(feature = "dma"))]
+            return Err(ConfigError::Validation(
+                "protocol = \"dma\" requires a build with --features dma (needs libfabric)"
+                    .to_string(),
+            ));
+
+            #[cfg(feature = "dma")]
+            if self.connection.pipeline_depth != 1 {
+                return Err(ConfigError::Validation(format!(
+                    "protocol = \"dma\" currently runs one transfer per connection; set \
+                     connection.pipeline_depth = 1 (got {}) and raise connections for concurrency",
+                    self.connection.pipeline_depth,
+                )));
+            }
+
+            #[cfg(feature = "dma")]
+            if self.workload.append.is_some() {
+                return Err(ConfigError::Validation(
+                    "protocol = \"dma\" does not support [workload.append]".to_string(),
+                ));
+            }
+
+            #[cfg(feature = "dma")]
+            if let Some(capacity) = self.dma.buffer_capacity
+                && capacity < self.workload.values.length
+            {
+                return Err(ConfigError::Validation(format!(
+                    "dma.buffer_capacity ({capacity}) must hold workload.values.length ({})",
+                    self.workload.values.length,
+                )));
+            }
         }
 
         if self.connection.total_connections() == 0 {
@@ -1815,5 +1910,65 @@ mod append_config_tests {
             ..a
         };
         assert_eq!(slow.spread_rate(), 1);
+    }
+
+    #[cfg(feature = "dma")]
+    #[test]
+    fn shipped_dma_configs_validate() {
+        let vdma = Config::load("config/dma.toml").expect("config/dma.toml");
+        assert_eq!(vdma.dma.module, DmaModule::Vdma);
+        let largeobj = Config::load("config/largeobj.toml").expect("config/largeobj.toml");
+        assert_eq!(largeobj.dma.module, DmaModule::LargeObj);
+    }
+
+    #[cfg(feature = "dma")]
+    fn dma_config(dma: &str) -> Result<Config, ConfigError> {
+        parse_config(&format!(
+            r#"
+            [target]
+            endpoints = ["127.0.0.1:6379"]
+            protocol = "dma"
+            [workload.values]
+            length = 4096
+            [dma]
+            {dma}
+            "#
+        ))
+    }
+
+    #[cfg(feature = "dma")]
+    #[test]
+    fn dma_module_defaults_to_largeobj() {
+        assert_eq!(dma_config("").unwrap().dma.module, DmaModule::LargeObj);
+        assert_eq!(
+            dma_config("module = \"vdma\"").unwrap().dma.module,
+            DmaModule::Vdma
+        );
+    }
+
+    #[cfg(feature = "dma")]
+    #[test]
+    fn checksum_is_accepted_for_both_modules() {
+        // The default module takes no write checksum but returns one with every read, so the
+        // client checks reads only.
+        let vdma = dma_config("module = \"vdma\"\nchecksum = true").unwrap();
+        assert!(vdma.dma.checksums_writes());
+        let default = dma_config("checksum = true").unwrap();
+        assert!(default.dma.checksum);
+        assert!(!default.dma.checksums_writes());
+        assert!(
+            !dma_config("module = \"vdma\"")
+                .unwrap()
+                .dma
+                .checksums_writes()
+        );
+    }
+
+    #[cfg(feature = "dma")]
+    #[test]
+    fn buffer_capacity_must_hold_a_value() {
+        assert!(dma_config("buffer_capacity = 4096").is_ok());
+        let error = dma_config("buffer_capacity = 4095").unwrap_err();
+        assert!(error.to_string().contains("buffer_capacity"), "{error}");
     }
 }
