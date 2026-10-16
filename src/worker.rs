@@ -1220,6 +1220,21 @@ pub(crate) async fn establish_connection(
     }
 }
 
+/// Closes the connection when dropped.
+///
+/// Dropping a ringline `Connection`, or a client built on one, releases its
+/// claim on the slot and leaves the socket open. Each connection task holds
+/// one of these from connect to the end of its loop body. The connection is
+/// therefore closed before every reconnect and when the task returns.
+/// `ConnCtx::close` does nothing for a connection that is already closed.
+pub(crate) struct CloseOnDrop(pub(crate) ConnCtx);
+
+impl Drop for CloseOnDrop {
+    fn drop(&mut self) {
+        self.0.close();
+    }
+}
+
 /// Resolve the TLS server name for an endpoint from task shared state.
 /// Returns None if TLS is disabled, otherwise the explicit hostname or the IP string.
 pub(crate) fn resolve_tls_server_name(
@@ -1344,6 +1359,7 @@ async fn resp_connection_task(state: Arc<SharedWorkerState>, endpoint_idx: usize
         };
 
         let conn = connection.as_conn();
+        let _close = CloseOnDrop(conn);
         metrics::CONNECTIONS_ACTIVE.increment();
         let builder = ringline_redis::Client::builder(connection).on_result(make_resp_callback());
         #[cfg(target_os = "linux")]
@@ -2285,6 +2301,7 @@ async fn memcache_connection_task(state: Arc<SharedWorkerState>, endpoint_idx: u
         };
 
         let conn = connection.as_conn();
+        let _close = CloseOnDrop(conn);
         metrics::CONNECTIONS_ACTIVE.increment();
         let builder = ringline_memcache::Client::builder(connection)
             .on_result(make_memcache_callback())
@@ -2848,6 +2865,7 @@ async fn ping_connection_task(state: Arc<SharedWorkerState>, endpoint_idx: usize
         };
 
         let conn = connection.as_conn();
+        let _close = CloseOnDrop(conn);
         metrics::CONNECTIONS_ACTIVE.increment();
         let builder = ringline_ping::Client::builder(connection).on_result(make_ping_callback());
         #[cfg(target_os = "linux")]
@@ -3257,6 +3275,7 @@ async fn resp_append_task(state: Arc<SharedWorkerState>, endpoint_idx: usize, se
         };
 
         let conn = connection.as_conn();
+        let _close = CloseOnDrop(conn);
         metrics::APPEND_CONNECTIONS_ACTIVE.increment();
         let builder =
             ringline_redis::Client::builder(connection).on_result(make_resp_append_callback());
@@ -3472,6 +3491,7 @@ async fn memcache_append_task(state: Arc<SharedWorkerState>, endpoint_idx: usize
         };
 
         let conn = connection.as_conn();
+        let _close = CloseOnDrop(conn);
         metrics::APPEND_CONNECTIONS_ACTIVE.increment();
         let builder = ringline_memcache::Client::builder(connection)
             .on_result(make_memcache_append_callback())

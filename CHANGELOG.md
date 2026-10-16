@@ -179,6 +179,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     a `query worker:` error.
 
 ### Fixed
+- Every connection task (RESP, RESP append, memcache, memcache append, ping
+  and DMA) closes its connection before reconnecting and when it returns.
+  After a failed `HELLO 3`, a failed DMA hello, a failed precheck or a failed
+  DMA transfer, the task reconnected without closing the old connection, and
+  dropping a ringline connection does not close it. A server that refused
+  every hello gained one open connection per task every 100 ms. Request
+  timeouts, kv-replay send failures and protocol errors (closed by the
+  ringline client) already closed the connection.
 - `valkey-lab` validates its config after applying the CLI flags. The flags
   were applied after `Config::load` validated the file (or to an unvalidated
   default config without `--config`), so they could set what a config file

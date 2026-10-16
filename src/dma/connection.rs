@@ -19,8 +19,8 @@ use crate::config::{DmaModule, DmaProvider};
 use crate::keydist::KeyDist;
 use crate::metrics;
 use crate::worker::{
-    DisconnectReason, InFlight, Phase, SharedWorkerState, confirm_prefill_key, dispatcher,
-    establish_connection, max_routing_attempts, record_counters, recv_with_timeout,
+    CloseOnDrop, DisconnectReason, InFlight, Phase, SharedWorkerState, confirm_prefill_key,
+    dispatcher, establish_connection, max_routing_attempts, record_counters, recv_with_timeout,
     resolve_tls_server_name, route_key, take_token, value_offset, wait_for_token, write_key,
 };
 
@@ -193,6 +193,7 @@ pub(crate) async fn dma_connection_task(
         };
 
         let conn = connection.as_conn();
+        let _close = CloseOnDrop(conn);
         metrics::CONNECTIONS_ACTIVE.increment();
         let client = ringline_redis::Client::new(connection);
         // Registration happens here, not on first use: `fi_mr_reg` pins pages and is slow, and
