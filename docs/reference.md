@@ -99,6 +99,42 @@ cluster = false
 auto_discovery = false
 ```
 
+### RESP Module Settings
+
+`[resp]` applies to `protocol = "resp"` and `protocol = "resp3"`. It selects
+the command names the RESP path sends GETs and SETs under.
+
+```toml
+[resp]
+# "none" - GET key / SET key value (default)
+# "largeobj" - BLOB.TCP_GET key / BLOB.TCP_SET key value, the TCP commands of
+#              the Valkey large-object module (valkey-io/valkey-large-object;
+#              config/largeobj.toml runs the same module over RDMA)
+module = "none"
+```
+
+With `module = "largeobj"`, every GET and SET the workload sends uses the
+module's command, prefill included. The module stores values as its own type.
+A plain `GET` on one of its keys answers `WRONGTYPE`; a plain `SET` replaces the
+key with a string, which `BLOB.TCP_GET` then answers with `WRONGTYPE`.
+`BLOB.TCP_SET` also answers `WRONGTYPE` on a key that holds a string, so a
+server filled by an earlier run without the module must be flushed first. A server
+without the module answers the `BLOB.TCP_*` commands with an unknown-command
+error. The other commands the RESP path sends are unchanged: `HELLO 3` under
+`resp3`, the precheck `PING`, and `DEL` for `[workload.commands] delete`, which
+removes the module's keys like any other. In cluster mode both commands
+declare the key as their first argument, so slot ownership and MOVED redirects
+apply to them as to GET and SET.
+
+Config load refuses `module = "largeobj"` with a protocol other than `resp` or
+`resp3`; `protocol = "dma"` with `[dma] module = "largeobj"` sends the module's
+RDMA commands. It also refuses `[workload.append]`. The append writers send
+plain `SET`, which replaces the module's keys with strings, and later
+`BLOB.TCP_GET`s of those keys answer `WRONGTYPE`. It also refuses
+`[workload.kv_replay]`, a combination not run against the module. The RESP
+workload sends no TTL, so every SET is the three-argument form `BLOB.TCP_SET`
+accepts.
+
 ### Connection Settings
 
 ```toml
@@ -686,7 +722,13 @@ Single-line summary only:
 Supported commands:
 - `GET key` — Retrieve value
 - `SET key value` — Store value
+- `DEL key` — Delete, for a nonzero `delete` ratio
 - `PING` — Connection health check
+- `HELLO 3` — Under `protocol = "resp3"`, once per connection
+
+`[resp] module = "largeobj"` sends `BLOB.TCP_GET key` and
+`BLOB.TCP_SET key value` in place of `GET` and `SET`; see
+[RESP Module Settings](#resp-module-settings).
 
 The benchmark generates random keys based on keyspace settings and random values based on value length.
 
