@@ -47,3 +47,11 @@ interfaces = []
 # buffer_capacity = 1048576
 # The module takes no write checksum, so `true` checks reads only: every read returns a CRC-32c.
 checksum = false
+
+# The same workload over the module's TCP commands (BLOB.TCP_GET / BLOB.TCP_SET) instead of RDMA:
+# set `protocol = "resp"` (or "resp3") in [target], drop the [dma] section, and add
+#
+#   [resp]
+#   module = "largeobj"
+#
+# This needs no `--features dma` build and no libfabric. `pipeline_depth` may then be above 1.

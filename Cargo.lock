@@ -2353,9 +2353,9 @@ dependencies = [
 
 [[package]]
 name = "ringline-redis"
-version = "0.7.0"
+version = "0.7.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c556a8440503cbf9c1c06c0395ab61980acde31805549caf8989983c4f1f18e5"
+checksum = "f97a23a883a28393b673fbebb24b324435938d4dca252f7b685da9eb7c55baa0"
 dependencies = [
  "bytes",
  "histogram 0.11.5",
