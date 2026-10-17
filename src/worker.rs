@@ -1246,6 +1246,12 @@ async fn resp_connection_task(state: Arc<SharedWorkerState>, endpoint_idx: usize
         // without materializing it (zero-copy on io_uring, streaming-drain on
         // mio). `fire_*` is unchanged and metrics are identical (recorded by the
         // `on_result` callback above).
+        // `[resp] module`: the module's command names for every GET and SET this client sends,
+        // prefill included. Config validation refuses the paths that would send anything else.
+        let builder = match config.resp.module.command_names() {
+            Some((get, set)) => builder.get_command(get).set_command(set),
+            None => builder,
+        };
         let mut client = builder
             .max_batch_size(config.connection.effective_batch_size())
             .build();

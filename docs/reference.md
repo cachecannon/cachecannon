@@ -94,6 +94,37 @@ tls = false
 cluster = false
 ```
 
+### RESP Module Settings
+
+`[resp]` applies to `protocol = "resp"` and `protocol = "resp3"`. It selects
+the command names the RESP path sends GETs and SETs under.
+
+```toml
+[resp]
+# "none" - GET key / SET key value (default)
+# "largeobj" - BLOB.TCP_GET key / BLOB.TCP_SET key value, the TCP commands of
+#              the server module that `[dma] module = "largeobj"` talks to
+module = "none"
+```
+
+With `module = "largeobj"`, every GET and SET the workload sends uses the
+module's command, prefill included. The module stores values as its own type.
+A plain `GET` on one of its keys answers `WRONGTYPE`; a plain `SET` replaces the
+key with a string, which `BLOB.TCP_GET` then answers with `WRONGTYPE`. A server
+without the module answers the `BLOB.TCP_*` commands with an unknown-command
+error. The other commands the RESP path sends are unchanged: `HELLO 3` under
+`resp3`, the precheck `PING`, and `DEL` for `[workload.commands] delete`, which
+removes the module's keys like any other. In cluster mode both commands
+declare the key as their first argument, so slot ownership and MOVED redirects
+apply to them as to GET and SET.
+
+Config load refuses `module = "largeobj"` with a protocol other than `resp` or
+`resp3` (use `[dma] module = "largeobj"` for the module's RDMA commands) and
+with `[workload.append]`, whose writers send plain `SET`: it would succeed, turn
+those keys into strings, and make later `BLOB.TCP_GET`s of them fail with
+`WRONGTYPE`. The RESP workload sends
+no TTL, so the module's three-argument `BLOB.TCP_SET` takes every SET it sends.
+
 ### Connection Settings
 
 ```toml
@@ -394,7 +425,13 @@ Single-line summary only:
 Supported commands:
 - `GET key` — Retrieve value
 - `SET key value` — Store value
+- `DEL key` — Delete, for a nonzero `delete` ratio
 - `PING` — Connection health check
+- `HELLO 3` — Under `protocol = "resp3"`, once per connection
+
+`[resp] module = "largeobj"` sends `BLOB.TCP_GET key` and
+`BLOB.TCP_SET key value` in place of `GET` and `SET`; see
+[RESP Module Settings](#resp-module-settings).
 
 The benchmark generates random keys based on keyspace settings and random values based on value length.
 

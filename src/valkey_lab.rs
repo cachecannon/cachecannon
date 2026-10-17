@@ -392,6 +392,7 @@ fn load_base_config(args: &BenchArgs) -> Result<Config, Box<dyn std::error::Erro
             timestamps: Default::default(),
             admin: Default::default(),
             dma: Default::default(),
+            resp: Default::default(),
         })
     }
 }

@@ -8,6 +8,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `[resp] module = "largeobj"` makes the RESP path (`protocol = "resp"` and
+  `"resp3"`) send a server module's TCP commands, `BLOB.TCP_GET key` and
+  `BLOB.TCP_SET key value`, in place of `GET` and `SET`, prefill included.
+  The default, `module = "none"`, sends `GET` and `SET`. `HELLO 3`, the
+  precheck `PING` and `DEL` are unchanged. Config load refuses the option
+  with another protocol and with `[workload.append]`, whose writers send
+  plain `SET` to the same keys. Needs ringline-redis 0.7.1
+  (`ClientBuilder::get_command` / `set_command`). Backported from main.
 - `protocol = "dma"` (`--features dma`, needs libfabric): RESP carries the
   commands and the values transmit over libfabric, initiated by the server.
   `[dma] module` picks the server module, `largeobj` (`BLOB.*`, the default)

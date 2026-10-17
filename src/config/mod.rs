@@ -20,6 +20,8 @@ pub struct Config {
     pub admin: Admin,
     #[serde(default)]
     pub dma: Dma,
+    #[serde(default)]
+    pub resp: Resp,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -740,6 +742,39 @@ pub enum DmaModule {
     LargeObj,
 }
 
+/// Settings for `protocol = "resp"` and `protocol = "resp3"`.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct Resp {
+    /// Which server module is on the other end. This selects the command names GETs and SETs are
+    /// sent under; every other command the RESP path sends (`PING`, `HELLO 3`, `DEL`) is unchanged.
+    #[serde(default)]
+    pub module: RespModule,
+}
+
+/// The server module a RESP run talks to.
+#[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum RespModule {
+    /// No module: `GET` and `SET`.
+    #[default]
+    None,
+    /// The `[dma] module = "largeobj"` server's TCP commands: `BLOB.TCP_GET key` and
+    /// `BLOB.TCP_SET key value`. Values are a module type: a plain `GET` on one of its keys answers
+    /// `WRONGTYPE`, and a plain `SET` replaces the key with a string, which `BLOB.TCP_GET` then
+    /// answers with `WRONGTYPE`. `DEL` removes its keys like any other.
+    LargeObj,
+}
+
+impl RespModule {
+    /// The command names sent in place of `GET` and `SET`, or `None` for plain `GET`/`SET`.
+    pub fn command_names(self) -> Option<(&'static str, &'static str)> {
+        match self {
+            RespModule::None => None,
+            RespModule::LargeObj => Some(("BLOB.TCP_GET", "BLOB.TCP_SET")),
+        }
+    }
+}
+
 /// Which libfabric provider a DMA run opens.
 #[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
@@ -803,6 +838,30 @@ impl Config {
             toml::from_str(&content).map_err(|e| ConfigError::Parse(e.to_string()))?;
         config.validate()?;
         Ok(config)
+    }
+
+    /// `[resp] module` renames GET and SET on the RESP workload path only. A configuration
+    /// that would send other commands to the module's keys, or that never reaches that path, is
+    /// refused.
+    fn validate_resp_module(&self) -> Result<(), ConfigError> {
+        let name = match self.resp.module {
+            RespModule::None => return Ok(()),
+            RespModule::LargeObj => "largeobj",
+        };
+        let refuse = |why: &str| {
+            Err(ConfigError::Validation(format!(
+                "resp.module = \"{name}\" {why}"
+            )))
+        };
+        if !matches!(self.target.protocol, Protocol::Resp | Protocol::Resp3) {
+            return refuse("applies to protocol = \"resp\" or \"resp3\" only");
+        }
+        // The append writers run their own clients, which send plain SET. That SET succeeds and
+        // turns the key into a string, which BLOB.TCP_GET then answers with WRONGTYPE.
+        if self.workload.append.is_some() {
+            return refuse("does not support [workload.append]");
+        }
+        Ok(())
     }
 
     /// Validate config invariants that can't be expressed via serde alone.
@@ -904,6 +963,8 @@ impl Config {
                 )));
             }
         }
+
+        self.validate_resp_module()?;
 
         if self.connection.total_connections() == 0 {
             return Err(ConfigError::Validation(
@@ -1919,6 +1980,64 @@ mod append_config_tests {
         assert_eq!(vdma.dma.module, DmaModule::Vdma);
         let largeobj = Config::load("config/largeobj.toml").expect("config/largeobj.toml");
         assert_eq!(largeobj.dma.module, DmaModule::LargeObj);
+    }
+
+    /// A RESP config with `extra` appended and `[resp] module = "largeobj"`.
+    fn resp_module_config(protocol: &str, extra: &str) -> Result<Config, ConfigError> {
+        parse_config(&format!(
+            "[target]\nendpoints = [\"127.0.0.1:6379\"]\nprotocol = \"{protocol}\"\n\
+             [resp]\nmodule = \"largeobj\"\n{extra}\n"
+        ))
+    }
+
+    #[test]
+    fn resp_module_defaults_to_none() {
+        let config = parse_config("[target]\nendpoints = [\"127.0.0.1:6379\"]\n").unwrap();
+        assert_eq!(config.resp.module, RespModule::None);
+        assert_eq!(config.resp.module.command_names(), None);
+    }
+
+    #[test]
+    fn resp_module_largeobj_names_the_tcp_commands() {
+        for protocol in ["resp", "resp3"] {
+            let config = resp_module_config(protocol, "").unwrap();
+            assert_eq!(config.resp.module, RespModule::LargeObj);
+            assert_eq!(
+                config.resp.module.command_names(),
+                Some(("BLOB.TCP_GET", "BLOB.TCP_SET"))
+            );
+        }
+        // DEL removes the module's keys, so a delete ratio is allowed.
+        resp_module_config(
+            "resp",
+            "[workload.commands]\nget = 50\nset = 25\ndelete = 25",
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn resp_module_refuses_other_protocols() {
+        for protocol in ["memcache", "memcache-binary", "ping", "dma"] {
+            let err = resp_module_config(protocol, "").unwrap_err().to_string();
+            // A build without the dma feature refuses protocol = "dma" for that reason first.
+            assert!(
+                err.contains("applies to protocol = \"resp\" or \"resp3\" only")
+                    || (protocol == "dma" && err.contains("--features dma")),
+                "{protocol}: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn resp_module_refuses_append() {
+        let err = resp_module_config(
+            "resp",
+            "[workload.keyspace]\ndistribution = \"recency\"\n\
+             [workload.append]\nbatch = 100\nevery = \"1s\"",
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("does not support [workload.append]"), "{err}");
     }
 
     #[cfg(feature = "dma")]
