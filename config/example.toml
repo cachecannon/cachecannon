@@ -27,6 +27,7 @@ connect_timeout = "5s"    # Per connect attempt, and the precheck deadline ("0s"
 request_timeout = "1s"    # Per request; on expiry all in-flight requests on that connection
                           # count as timeouts (errors) and it reconnects ("0s" = unbounded)
 # request_distribution = "roundrobin"  # "roundrobin" (even spread) or "greedy" (fill pipeline first)
+# endpoint_allocation = "even"  # or "key_share": connections per endpoint follow zipf share (zipf only)
 
 [workload]
 # prefill = true              # Write each key once before test starts

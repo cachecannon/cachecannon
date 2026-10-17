@@ -200,9 +200,10 @@ pub fn run_benchmark_full(
     ));
 
     // Steady-state key distribution. Built ONCE here rather than per worker:
-    // zipf setup computes zeta(n, theta), which is O(keyspace) and would
-    // otherwise be repeated by every worker thread at startup.
-    let key_dist = Arc::new(KeyDist::from_workload(&config.workload));
+    // with several endpoints, zipf builds a per-endpoint alias table, which is
+    // O(keyspace) and would otherwise be repeated by every worker thread.
+    let key_dist =
+        Arc::new(KeyDist::from_workload(&config.workload).with_endpoint_keys(&endpoint_keys));
     debug_assert_eq!(key_dist.len(), key_count);
 
     // Append stream: shared per-endpoint queues drained by the writer

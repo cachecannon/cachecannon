@@ -292,8 +292,8 @@ async fn run_transfers(
             (key_id, Op::Set, Source::Backfill)
         } else {
             // As the RESP path: a single endpoint samples the distribution directly; several
-            // endpoints draw from this endpoint's bucket under a uniform distribution and
-            // reject-route otherwise, so each endpoint sees its own share of the distribution.
+            // endpoints draw from this endpoint's bucket under a uniform distribution, from
+            // zipf restricted to this endpoint's keys under zipf, and reject-route otherwise.
             // A miss yields without spending a rate-limit token.
             let key_id = if !multi_endpoint {
                 state.task_state.key_dist.sample(rng)
@@ -304,6 +304,14 @@ async fn run_transfers(
                     continue;
                 }
                 bucket[rng.random_range(0..bucket.len())] as usize
+            } else if let Some(by_endpoint) = state.task_state.key_dist.endpoint_sampler() {
+                match by_endpoint.sample(endpoint_idx, rng) {
+                    Some(key_id) => key_id,
+                    None => {
+                        ringline::sleep(Duration::from_micros(100)).await;
+                        continue;
+                    }
+                }
             } else {
                 let mut attempts = 0usize;
                 let max_attempts = max_routing_attempts(num_endpoints);

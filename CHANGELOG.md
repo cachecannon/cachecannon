@@ -35,8 +35,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   as histograms. Every metric is in one windowless group, `cachecannon/main`.
   An interval below the 10 ms update floor is refused with 400. `/metrics` and
   `/metrics/binary` are unchanged.
+- `[connection] endpoint_allocation = "key_share"` (zipf, several endpoints):
+  each endpoint gets connections in proportion to the zipf probability its
+  keys carry (at least one if it owns keys, none if it owns none) instead of
+  an equal number. In a rate-limited run in which no connection is held back
+  by its pipeline, each endpoint then receives its zipf share of requests, so
+  the servers together see the global distribution; with the default `even`,
+  every endpoint gets the same share whatever its keys' popularity. With DMA
+  at MiB values (one transfer per connection) or closed loop, the hot
+  endpoint gets less than its share. `docs/reference.md` says how to check
+  the shares a run achieved. Backported from main (#212).
+- `examples/zipfbench.rs`: per-key selection cost of the reject-route, alias
+  and uniform multi-endpoint paths on one core, no network.
+  `cargo run --release --example zipfbench -- [keys] [endpoints] [theta]
+  [threads] [base_addr] [connections]`; prints each endpoint's keys, zipf
+  share and `key_share` connection count. Backported from main (#212).
 
 ### Changed
+- `keyspace.zipf_theta` must now be in (0, 10]; larger values were accepted
+  before. A large theta could underflow every key weight on an endpoint,
+  which the per-endpoint alias tables cannot sample. Backported from main
+  (#212).
 - rustls 0.23.45 → 0.23.46 for RUSTSEC-2026-0346, -0347, -0348 and -0349,
   published 2026-10-14, which failed `cargo audit` in CI.
 - metriken 0.9 → 0.11.3 (metriken-core 0.3), metriken-exposition 0.16 → 0.22,
@@ -72,6 +91,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   0.6.0 are unchanged.
 
 ### Fixed
+- Multi-endpoint `distribution = "zipf"` drew from the global zipf and discarded
+  keys that routed to another endpoint: about `1 / P(endpoint)` draws, key
+  renders and ketama hashes per request (61 at 48 endpoints and 100,000 keys;
+  `examples/zipfbench` measures the per-key cost on the client host). Each
+  endpoint now samples zipf restricted to its own keys from an alias table
+  built once at startup: the same pmf the rejection produced, in O(1). On main
+  at #212, closed loop against 48 server processes with 1536 connections and
+  4 KiB values, zipf went from 2.04M to 6.10M req/s on RESP (uniform keys: 6.1M)
+  and from 1.9M to 3.80M on DMA (uniform: 3.73M); not measured on 0.0.x. The
+  alias tables take 12 bytes per key. With several endpoints and zipf, RESP
+  draws a different key sequence from the same `general.seed` than 0.0.30 did,
+  and DMA a different one than before this change. RESP and DMA only; memcache
+  and `recency` still reject-route. The tables use the startup key partition,
+  so in cluster mode a slot that moves during the run is not followed: the old
+  owner's connections keep sending its keys and get MOVED, as the uniform path
+  already does. Backported from main (#212).
 - Every connection task (RESP, RESP append, memcache, memcache append, ping
   and DMA) closes its connection before reconnecting and when it returns.
   After a failed `HELLO 3`, a failed DMA hello, a failed precheck or a failed
@@ -80,6 +115,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   every hello gained one open connection per task every 100 ms. Request
   timeouts, an exhausted timer pool and protocol errors (closed by the
   ringline client) already closed the connection.
+
+### Known issues
+- With `endpoint_allocation = "even"` (the default), an endpoint that owns no
+  keys still gets connections. Ketama can leave endpoints with no keys even
+  with more keys than endpoints: 128 keys (a 16 GiB keyspace of 128 MiB
+  values) over 48 endpoints leaves 3 empty in `examples/zipfbench`. In RESP
+  and memcache each such connection claims a rate-limit token batch, finds no
+  key and drops it, which lowers the achieved rate; DMA draws a key before it
+  claims a token. With zipf, `key_share` gives such endpoints no connections.
+  Backported from main (#212).
 
 ## [0.0.30] - 2026-10-01
 
