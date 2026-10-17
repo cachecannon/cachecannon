@@ -128,11 +128,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - With `endpoint_allocation = "even"` (the default), an endpoint that owns no
   keys still gets connections. Ketama can leave endpoints with no keys even
   with more keys than endpoints: 128 keys (a 16 GiB keyspace of 128 MiB
-  values) over 48 endpoints leaves 3 empty in `examples/zipfbench`. In RESP
-  and memcache each such connection claims a rate-limit token batch, finds no
-  key and drops it, which lowers the achieved rate; DMA draws a key before it
-  claims a token. With zipf, `key_share` gives such endpoints no connections.
-  Backported from main (#212).
+  values) over 48 endpoints leaves 3 empty in `examples/zipfbench` at its
+  default base address 172.31.0.10:6379 (the count depends on the addresses).
+  In RESP and memcache each such connection claims a rate-limit token batch,
+  finds no key and drops it, which lowers the achieved rate; DMA draws a key
+  before it claims a token. `key_share` (zipf only) gives such endpoints no
+  connections. Backported from main (#212).
 
 ## [0.0.30] - 2026-10-01
 
