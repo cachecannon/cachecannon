@@ -1125,8 +1125,9 @@ impl Config {
             let endpoints = self.target.endpoints.len();
             if endpoints > 1 && self.connection.total_connections() < endpoints {
                 return Err(ConfigError::Validation(format!(
-                    "connection.endpoint_allocation = \"key_share\" gives every endpoint at \
-                     least one connection, so connections must be >= {endpoints} endpoints"
+                    "connection.endpoint_allocation = \"key_share\" requires connections >= \
+                     {endpoints}, the number of endpoints (validation runs before keys are \
+                     assigned, so it counts endpoints that may own none)"
                 )));
             }
         }

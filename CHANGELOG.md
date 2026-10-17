@@ -262,11 +262,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and the same connection across runs, never share a stream.
 
 ### Known issues
-- With `endpoint_allocation = "even"` (the default), an
-  endpoint that owns no keys (fewer keys than endpoints, e.g. a 16 GiB
-  keyspace of 128 MiB values over 48 endpoints) still gets connections. In
-  RESP each claims a rate-limit token batch, finds no key and drops it, which
-  lowers the achieved rate. `key_share` gives such endpoints no connections.
+- With `endpoint_allocation = "even"` (the default), an endpoint that owns no
+  keys still gets connections. Ketama can leave endpoints with no keys even
+  with more keys than endpoints: 128 keys (a 16 GiB keyspace of 128 MiB
+  values) over 48 endpoints leaves 3 empty in `examples/zipfbench` at its
+  default base address 172.31.0.10:6379 (the count depends on the addresses).
+  In RESP and memcache each such connection claims a rate-limit token batch,
+  finds no key and drops it, which lowers the achieved rate; DMA draws a key
+  before it claims a token. `key_share` (zipf only) gives such endpoints no
+  connections.
 
 ## [0.0.28] - 2026-09-28
 
