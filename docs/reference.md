@@ -184,9 +184,11 @@ its endpoints as consecutive ports on the first address and renders 16-byte hex
 keys over the ketama ring, so its shares match a run only with that layout: the
 same endpoint addresses, `keyspace.length = 16`, hex keys and no cluster mode.
 
-With `even`, an endpoint that owns no keys (fewer keys than endpoints, or a
-large value size) still gets connections; under a rate limit they claim tokens
-they cannot spend, which lowers the achieved rate.
+With `even`, an endpoint that owns no keys still gets connections. That happens
+with fewer keys than endpoints and can happen with more: with 128 keys over 48
+endpoints, ketama left 3 endpoints with none. In RESP and memcache each of those
+connections claims a rate-limit token batch it cannot spend, which lowers the
+achieved rate; DMA claims a token only after it has a key.
 
 > **Note:** `pool_size` is accepted as a legacy alias for `connections`. If both are specified, `pool_size` takes precedence. Prefer `connections` in new configurations.
 

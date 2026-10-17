@@ -97,9 +97,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   100,000 keys; `examples/zipfbench` measures the per-key cost on the client
   host). Each endpoint now samples zipf restricted to its own keys from an
   alias table built once at startup: the same pmf the rejection produced, in
-  O(1). Closed loop against 48 server processes with 1536 connections and
-  4 KiB values, zipf went from 2.04M to 6.10M req/s on RESP (uniform keys:
-  6.1M) and from 1.9M to 3.80M on DMA (uniform: 3.73M). RESP and DMA only;
+  O(1). On main at #212, closed loop against 48 server processes with 1536
+  connections and 4 KiB values, zipf went from 2.04M to 6.10M req/s on RESP
+  (uniform keys: 6.1M) and from 1.9M to 3.80M on DMA (uniform: 3.73M); not
+  measured on 0.0.x. The alias tables take 12 bytes per key. With several
+  endpoints and zipf, RESP and DMA draw a different key sequence from the
+  same `general.seed` than 0.0.30 did. RESP and DMA only;
   memcache and `recency` still reject-route. The tables use the startup key
   partition, so in cluster mode a slot that moves during the run is not
   followed: the old owner's connections keep sending its keys and get MOVED,
@@ -114,11 +117,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ringline client) already closed the connection.
 
 ### Known issues
-- With `endpoint_allocation = "even"` (the default), an
-  endpoint that owns no keys (fewer keys than endpoints, e.g. a 16 GiB
-  keyspace of 128 MiB values over 48 endpoints) still gets connections. In
-  RESP each claims a rate-limit token batch, finds no key and drops it, which
-  lowers the achieved rate. `key_share` gives such endpoints no connections.
+- With `endpoint_allocation = "even"` (the default), an endpoint that owns no
+  keys still gets connections. Ketama can leave endpoints with no keys even
+  with more keys than endpoints: 128 keys (a 16 GiB keyspace of 128 MiB
+  values) over 48 endpoints leaves 3 empty in `examples/zipfbench`. In RESP
+  and memcache each such connection claims a rate-limit token batch, finds no
+  key and drops it, which lowers the achieved rate; DMA draws a key before it
+  claims a token. With zipf, `key_share` gives such endpoints no connections.
+  Backported from main (#212).
 
 ## [0.0.30] - 2026-10-01
 
