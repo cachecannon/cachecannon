@@ -91,22 +91,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   0.6.0 are unchanged.
 
 ### Fixed
-- Multi-endpoint `distribution = "zipf"` drew from the global zipf and
-  discarded keys that routed to another endpoint: about `1 / P(endpoint)`
-  draws, key renders and ketama hashes per request (61 at 48 endpoints and
-  100,000 keys; `examples/zipfbench` measures the per-key cost on the client
-  host). Each endpoint now samples zipf restricted to its own keys from an
-  alias table built once at startup: the same pmf the rejection produced, in
-  O(1). On main at #212, closed loop against 48 server processes with 1536
-  connections and 4 KiB values, zipf went from 2.04M to 6.10M req/s on RESP
-  (uniform keys: 6.1M) and from 1.9M to 3.80M on DMA (uniform: 3.73M); not
-  measured on 0.0.x. The alias tables take 12 bytes per key. With several
-  endpoints and zipf, RESP and DMA draw a different key sequence from the
-  same `general.seed` than 0.0.30 did. RESP and DMA only;
-  memcache and `recency` still reject-route. The tables use the startup key
-  partition, so in cluster mode a slot that moves during the run is not
-  followed: the old owner's connections keep sending its keys and get MOVED,
-  as the uniform path already does. Backported from main (#212).
+- Multi-endpoint `distribution = "zipf"` drew from the global zipf and discarded
+  keys that routed to another endpoint: about `1 / P(endpoint)` draws, key
+  renders and ketama hashes per request (61 at 48 endpoints and 100,000 keys;
+  `examples/zipfbench` measures the per-key cost on the client host). Each
+  endpoint now samples zipf restricted to its own keys from an alias table
+  built once at startup: the same pmf the rejection produced, in O(1). On main
+  at #212, closed loop against 48 server processes with 1536 connections and
+  4 KiB values, zipf went from 2.04M to 6.10M req/s on RESP (uniform keys: 6.1M)
+  and from 1.9M to 3.80M on DMA (uniform: 3.73M); not measured on 0.0.x. The
+  alias tables take 12 bytes per key. With several endpoints and zipf, RESP
+  draws a different key sequence from the same `general.seed` than 0.0.30 did,
+  and DMA a different one than before this change. RESP and DMA only; memcache
+  and `recency` still reject-route. The tables use the startup key partition,
+  so in cluster mode a slot that moves during the run is not followed: the old
+  owner's connections keep sending its keys and get MOVED, as the uniform path
+  already does. Backported from main (#212).
 - Every connection task (RESP, RESP append, memcache, memcache append, ping
   and DMA) closes its connection before reconnecting and when it returns.
   After a failed `HELLO 3`, a failed DMA hello, a failed precheck or a failed
