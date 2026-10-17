@@ -7,133 +7,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.31] - 2026-10-17
+
 ### Added
-- `[resp] module = "largeobj"` makes the RESP path (`protocol = "resp"` and
-  `"resp3"`) send a server module's TCP commands, `BLOB.TCP_GET key` and
-  `BLOB.TCP_SET key value`, in place of `GET` and `SET`, prefill included.
-  The default, `module = "none"`, sends `GET` and `SET`. `HELLO 3`, the
-  precheck `PING` and `DEL` are unchanged. Config load refuses the option
-  with another protocol and with `[workload.append]`, whose writers send
-  plain `SET` to the same keys. Needs ringline-redis 0.7.1
-  (`ClientBuilder::get_command` / `set_command`). Backported from main.
-- `protocol = "dma"` (`--features dma`, needs libfabric): RESP carries the
-  commands and the values transmit over libfabric, initiated by the server.
-  `[dma] module` picks the server module, `largeobj` (`BLOB.*`, the default)
-  or `vdma` (`DMA.*`); the fabric, buffers and connection task are the same
-  for both. Under `largeobj` each connection sends `BLOB.RDMA_HELLO` and, if
-  the server accepts it, uses `BLOB.RDMA_GET` and `BLOB.RDMA_SET`; if the
-  server answers with an error it sends `BLOB.HELLO` and uses `BLOB.GET` and
-  `BLOB.SET`. `[dma] checksum = true` checks the CRC-32c the server returns
-  with a read under both modules; under vdma writes also carry one.
-  Backported from main (#201, #211, #213, #222).
-- `[admin] listen` serves `GET /metrics/stream[?interval=..&layout=wide|long]`,
-  metriken-exposition's stream route: dendro replication frames
-  (`application/vnd.metriken.replication.v1+dendro`), a handshake with
-  `source=cachecannon`, then one frame per interval until the client
-  disconnects. A rezolus recorder that reads this content type records the
-  benchmark into a `.dendro` archive beside agents, with the latency histograms
-  as histograms. Every metric is in one windowless group, `cachecannon/main`.
-  An interval below the 10 ms update floor is refused with 400. `/metrics` and
-  `/metrics/binary` are unchanged.
-- `[connection] endpoint_allocation = "key_share"` (zipf, several endpoints):
-  each endpoint gets connections in proportion to the zipf probability its
-  keys carry (at least one if it owns keys, none if it owns none) instead of
-  an equal number. In a rate-limited run in which no connection is held back
-  by its pipeline, each endpoint then receives its zipf share of requests, so
-  the servers together see the global distribution; with the default `even`,
-  every endpoint gets the same share whatever its keys' popularity. With DMA
-  at MiB values (one transfer per connection) or closed loop, the hot
-  endpoint gets less than its share. `docs/reference.md` says how to check
-  the shares a run achieved. Backported from main (#212).
-- `examples/zipfbench.rs`: per-key selection cost of the reject-route, alias
-  and uniform multi-endpoint paths on one core, no network.
-  `cargo run --release --example zipfbench -- [keys] [endpoints] [theta]
-  [threads] [base_addr] [connections]`; prints each endpoint's keys, zipf
-  share and `key_share` connection count. Backported from main (#212).
+- Valkey large object storage (BLOB) over TCP (`[resp] module`) and RDMA
+  (`protocol = "dma"`, built with `--features dma`). (#223, #230)
+- Streaming metrics endpoint, `GET /metrics/stream`, which enables recording
+  into `.dendro` archives. (#206)
+- `[connection] endpoint_allocation = "key_share"`: with zipf keys over several
+  endpoints, each endpoint gets connections in proportion to its keys'
+  popularity, so in a rate-limited run the servers together see the global
+  distribution. (#231)
 
 ### Changed
-- `keyspace.zipf_theta` must now be in (0, 10]; larger values were accepted
-  before. A large theta could underflow every key weight on an endpoint,
-  which the per-endpoint alias tables cannot sample. Backported from main
-  (#212).
-- rustls 0.23.45 → 0.23.46 for RUSTSEC-2026-0346, -0347, -0348 and -0349,
-  published 2026-10-14, which failed `cargo audit` in CI.
-- metriken 0.9 → 0.11.3 (metriken-core 0.3), metriken-exposition 0.16 → 0.22,
-  metriken-query 0.9 → 0.36, and metriken-storage 0.2 for `--parquet`'s
-  msgpack-to-parquet conversion, which left metriken-exposition. No SQLite is
-  compiled: metriken-query is built without its `archive` feature until
-  `cachecannon view` reads `.dendro`. metriken-query 0.36 has no HTTP layer,
-  so the viewer serves `/api/v1/query`, `query_range`, `labels`,
-  `label/{name}/values` and `metadata` itself, with 0.9's request parameters
-  and response bodies. Query results differ where the engine changed: points
-  are at the recording's own timestamps rather than rounded to a one-second
-  grid, `irate` divides by the measured spacing (2000 req/s reads 1997–2001
-  where 0.9 read 2003–2007), a range ends at the last sample rather than one
-  grid step past it, `/api/v1/metadata` gives the first and last sample times
-  exactly rather than in whole seconds, and matrix results carry `intervals`
-  and `bands`, which the frontend ignores. The dashboards' section JSON is
-  byte-identical.
-- Requires ringline 0.6.10 (was 0.6.8). metriken-core declares `links`, so the
-  graph can hold one metriken-core, and ringline 0.6.9 and earlier depend on
-  metriken 0.9 (core 0.2). 0.6.10 is 0.6.9 with metriken 0.11.3 and two
-  stale-handle fixes: `ConnCtx::close` through a handle whose slot was reused
-  by a new connection used to close that connection and now does nothing (the
-  same for `set_recv_sink`, `take_recv_sink` and `recv_timestamp`;
-  ringline-rs/ringline#535), and `forward_recv_buf` refuses a stale handle
-  before taking the pending buffer (ringline-rs/ringline#544). cachecannon
-  calls `close` on a `ConnCtx` on a request timeout, an exhausted timer pool
-  and a receive error. 0.6.9 fixes
-  one io_uring bug: a deferred `shutdown(SHUT_WR)` names its socket by
-  registered-file slot, and the `Close` that frees the slot could complete
-  first, so the FIN could land on the next connection accepted into that slot
-  (ringline-rs/ringline#518). The `Close` now waits for the `Shutdown` to
-  complete. ringline-redis 0.7.0, ringline-memcache 0.7.1 and ringline-ping
-  0.6.0 are unchanged.
+- `keyspace.zipf_theta` must be in (0, 10]. (#231)
+- With zipf keys over several endpoints, RESP draws a different key sequence
+  from the same `general.seed` than 0.0.30. (#231)
+- `cachecannon view` query results can differ slightly from 0.0.30: points sit
+  at the recording's own timestamps and `irate` divides by the measured
+  spacing. (#206)
 
 ### Fixed
-- A run with `rate_limit` no longer opens with a burst. Each worker's limiter
-  started full and kept refilling while connections opened and prefill ran,
-  so warmup began by releasing a second's share of requests at once: about
-  2,200 within the first 100 ms at `rate_limit = 2000` against a fake server,
-  and, at 26,820 req/s of 1 MiB values, enough to make the sending NIC
-  queue or drop packets for ten seconds. Each limiter now starts holding only
-  its stagger, at most one batch, and is reset to it when warmup begins.
-  Backported from main (#215).
-- Multi-endpoint `distribution = "zipf"` drew from the global zipf and discarded
-  keys that routed to another endpoint: about `1 / P(endpoint)` draws, key
-  renders and ketama hashes per request (61 at 48 endpoints and 100,000 keys;
-  `examples/zipfbench` measures the per-key cost on the client host). Each
-  endpoint now samples zipf restricted to its own keys from an alias table
-  built once at startup: the same pmf the rejection produced, in O(1). On main
-  at #212, closed loop against 48 server processes with 1536 connections and
-  4 KiB values, zipf went from 2.04M to 6.10M req/s on RESP (uniform keys: 6.1M)
-  and from 1.9M to 3.80M on DMA (uniform: 3.73M); not measured on 0.0.x. The
-  alias tables take 12 bytes per key. With several endpoints and zipf, RESP
-  draws a different key sequence from the same `general.seed` than 0.0.30 did,
-  and DMA a different one than before this change. RESP and DMA only; memcache
-  and `recency` still reject-route. The tables use the startup key partition,
-  so in cluster mode a slot that moves during the run is not followed: the old
-  owner's connections keep sending its keys and get MOVED, as the uniform path
-  already does. Backported from main (#212).
-- Every connection task (RESP, RESP append, memcache, memcache append, ping
-  and DMA) closes its connection before reconnecting and when it returns.
-  After a failed `HELLO 3`, a failed DMA hello, a failed precheck or a failed
-  DMA transfer, the task reconnected without closing the old connection, and
-  dropping a ringline connection does not close it. A server that refused
-  every hello gained one open connection per task every 100 ms. Request
-  timeouts, an exhausted timer pool and protocol errors (closed by the
-  ringline client) already closed the connection.
+- A rate-limited run no longer opens with a burst of up to a second's requests
+  at the start of warmup. (#232)
+- Multi-endpoint zipf on RESP picks each key in constant time instead of
+  redrawing until one routes to the endpoint; measured on main at 48
+  endpoints, it runs about as fast as uniform keys. (#231)
+- A connection that failed its handshake or precheck is closed before the
+  task reconnects; a server refusing every handshake used to collect open
+  connections. (#228)
+
+### Security
+- rustls 0.23.46 for RUSTSEC-2026-0346, -0347, -0348 and -0349. (#224)
 
 ### Known issues
-- With `endpoint_allocation = "even"` (the default), an endpoint that owns no
-  keys still gets connections. Ketama can leave endpoints with no keys even
-  with more keys than endpoints: 128 keys (a 16 GiB keyspace of 128 MiB
-  values) over 48 endpoints leaves 3 empty in `examples/zipfbench` at its
-  default base address 172.31.0.10:6379 (the count depends on the addresses).
-  In RESP and memcache each such connection claims a rate-limit token batch,
-  finds no key and drops it, which lowers the achieved rate; DMA draws a key
-  before it claims a token. `key_share` (zipf only) gives such endpoints no
-  connections. Backported from main (#212).
+- With the default `endpoint_allocation = "even"`, an endpoint that owns no
+  keys still gets connections, and under a rate limit RESP and memcache lose
+  tokens to them, lowering the achieved rate. `key_share` (zipf only) avoids
+  this.
 
 ## [0.0.30] - 2026-10-01
 
