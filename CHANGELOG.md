@@ -91,6 +91,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   0.6.0 are unchanged.
 
 ### Fixed
+- A run with `rate_limit` no longer opens with a burst. Each worker's limiter
+  started full and kept refilling while connections opened and prefill ran,
+  so warmup began by releasing a second's share of requests at once: about
+  2,200 within the first 100 ms at `rate_limit = 2000` against a fake server,
+  and, at 26,820 req/s of 1 MiB values, enough to make the sending NIC
+  queue or drop packets for ten seconds. Each limiter now starts holding only
+  its stagger, at most one batch, and is reset to it when warmup begins.
+  Backported from main (#215).
 - Multi-endpoint `distribution = "zipf"` drew from the global zipf and discarded
   keys that routed to another endpoint: about `1 / P(endpoint)` draws, key
   renders and ketama hashes per request (61 at 48 endpoints and 100,000 keys;

@@ -19,9 +19,19 @@
 //! pipeline 32 and 100K req/s, that was 8 x 32 requests every 2.6 ms and GET
 //! p99 rose from 647 us to 860 us. The workers are therefore staggered: each
 //! limiter counts in 1/`SUB` of a request, and worker `i` of `n` gets a cap
-//! `i/n` of a claim above the others. A worker spends whole claims, so the
-//! fraction it holds when it fills to its cap persists, and the workers stay
-//! spread across the claim interval.
+//! `i/n` of a claim above the others, and starts holding that fraction. A
+//! worker spends whole claims, so the fraction it holds persists (from the
+//! start, and again whenever it fills to its cap), and the workers stay spread
+//! across the claim interval.
+//!
+//! Starting at the stagger rather than the cap also means the run does not
+//! open with a burst. The limiters are built before connections open and
+//! prefill runs; a limiter that started full, or refilled to its cap
+//! meanwhile, released a second's share of the rate at once when warmup
+//! began. At 26,820 req/s of 1 MiB values, the sending host's NIC then queued
+//! or dropped up to 1.2M packets a second for the first ten seconds of
+//! warmup. `WorkerLimiters::restart` resets each limiter to its stagger as
+//! warmup begins.
 
 use ratelimit::{Ratelimiter, TryWaitError};
 use std::sync::Arc;
@@ -38,29 +48,64 @@ pub struct WorkerLimiter {
     inner: Ratelimiter,
     /// Size of one claim in sub-units: the batch every claim asks for.
     claim: u64,
+    /// What the limiter holds at the start of the run, in sub-units: its
+    /// stagger. See [`restart`](Self::restart).
+    start: u64,
 }
 
 impl WorkerLimiter {
     /// `rate` requests per `period`, holding at most `burst` requests plus
-    /// `stagger` sub-units, and starting full. Claims are `claim` requests.
-    fn build(rate: u64, period: Duration, burst: u64, stagger: u64, claim: u64) -> Self {
+    /// `stagger` sub-units, and starting with `start` sub-units (`None`: full).
+    /// Claims are `claim` requests.
+    fn build(
+        rate: u64,
+        period: Duration,
+        burst: u64,
+        stagger: u64,
+        claim: u64,
+        start: Option<u64>,
+    ) -> Self {
         let cap = burst.saturating_mul(SUB).saturating_add(stagger);
         let inner = Ratelimiter::builder(rate.saturating_mul(SUB))
             .period(period)
             .max_tokens(cap)
-            .initial_available(cap)
+            .initial_available(start.unwrap_or(cap).min(cap))
             .build()
             .expect("failed to build worker rate limiter");
         Self {
             inner,
             claim: claim.max(1).saturating_mul(SUB),
+            start: start.unwrap_or(cap).min(cap),
         }
     }
 
+    /// Set the bucket back to what it held when built, discarding whatever
+    /// accrued since. The limiters are built before the connections open and
+    /// before prefill, and refill to their cap meanwhile; without this the run
+    /// would open by releasing that cap at once.
+    ///
+    /// Nothing may take tokens while this runs: the cap is briefly narrowed to
+    /// less than one claim, so a concurrent take could not fund a claim, and a
+    /// concurrent refill could re-add the time since the last take under the
+    /// restored cap. The runner calls it before setting the Warmup phase, and
+    /// every taker waits for Warmup or Running.
+    ///
+    /// `ratelimit` refills lazily, so lowering the cap alone is not enough:
+    /// the next take would refill the time since the last one under the
+    /// restored cap. The cap is narrowed to one sub-unit above the start, a
+    /// take forces the refill under it (leaving exactly the start), and then
+    /// the cap is restored.
+    pub fn restart(&self) {
+        let cap = self.inner.max_tokens();
+        self.inner.set_max_tokens(self.start.saturating_add(1));
+        let _ = self.inner.try_wait_n(1);
+        self.inner.set_max_tokens(cap);
+    }
+
     /// A limiter at `rate` requests per second holding `burst`, unstaggered,
-    /// with one-request claims.
+    /// with one-request claims, starting full.
     pub fn per_second(rate: u64, burst: u64) -> Self {
-        Self::build(rate, Duration::from_secs(1), burst, 0, 1)
+        Self::build(rate, Duration::from_secs(1), burst, 0, 1, None)
     }
 
     /// Take `n` requests' worth of tokens, or report how long until they are
@@ -131,9 +176,10 @@ pub struct WorkerLimiters {
 
 impl WorkerLimiters {
     /// Split `rate` across workers in proportion to `connections` (one entry
-    /// per worker). Each limiter holds its share of one second of tokens, at
-    /// least `claim` (a full batch, so a batch is always fundable), plus its
-    /// stagger. `claim` is also the unit the workers are staggered across.
+    /// per worker). Each limiter's cap is its share of one second of tokens,
+    /// at least `claim` (a full batch, so a batch is always fundable), plus
+    /// its stagger; it starts holding only the stagger. `claim` is also the
+    /// unit the workers are staggered across.
     pub fn new(rate: u64, connections: &[usize], claim: u64) -> Self {
         let weights: Vec<u64> = connections.iter().map(|&c| c as u64).collect();
         let total_weight = weights.iter().sum::<u64>().max(1);
@@ -156,6 +202,7 @@ impl WorkerLimiters {
                     burst,
                     stagger,
                     claim,
+                    Some(stagger),
                 )))
             })
             .collect();
@@ -164,6 +211,14 @@ impl WorkerLimiters {
             weights,
             total_weight,
             rate: AtomicU64::new(rate),
+        }
+    }
+
+    /// [`WorkerLimiter::restart`] every worker's limiter. Called as the run's
+    /// traffic starts.
+    pub fn restart(&self) {
+        for rl in self.limiters.iter().flatten() {
+            rl.restart();
         }
     }
 
@@ -263,16 +318,76 @@ mod tests {
     }
 
     #[test]
-    fn workers_are_staggered_across_one_claim() {
-        // With the buckets full, each worker holds a different fraction of a
-        // claim, i/n of the way through it. 100/s over 64 connections is 12.5/s
-        // per worker, so each holds 13 requests before its stagger.
+    fn workers_start_staggered_across_one_claim() {
+        // Each worker starts with only its stagger, i/n of a claim, so worker
+        // 0 holds nothing and none holds a claim: the first claims are
+        // fundable at different times, and nothing is released as a burst.
+        // 100/s over 8 workers is 12.5/s each, so the half request worker 7
+        // lacks takes 40 ms to accrue: only a delay that long could fund a
+        // claim.
         let l = WorkerLimiters::new(100, &[8; 8], 4);
-        let held: Vec<u64> = (0..8)
-            .map(|i| l.worker(i).unwrap().inner.available())
-            .collect();
-        for (i, &h) in held.iter().enumerate() {
-            assert_eq!(h, 13 * SUB + i as u64 * 4 * SUB / 8, "worker {i}");
+        for i in 0..8u64 {
+            let rl = l.worker(i as usize).unwrap();
+            assert_eq!(rl.inner.available(), i * 4 * SUB / 8, "worker {i}");
+            assert!(
+                rl.try_wait_n(4).is_err(),
+                "worker {i} could fund a claim at start"
+            );
+        }
+    }
+
+    #[test]
+    fn a_fresh_limiter_releases_no_more_than_its_rate() {
+        // At 100K req/s over 8 workers, a full start released 12,500 requests
+        // per worker at once. Starting at the stagger, the first 10 ms release
+        // about 10 ms of the rate.
+        let start = std::time::Instant::now();
+        let l = WorkerLimiters::new(100_000, &[8; 8], 1);
+        let mut taken = 0u64;
+        while start.elapsed() < Duration::from_millis(10) {
+            for i in 0..8 {
+                while l.worker(i).unwrap().try_wait().is_ok() {
+                    taken += 1;
+                }
+            }
+        }
+        let allowed = (100_000.0 * start.elapsed().as_secs_f64()) as u64 + 8;
+        assert!(taken <= allowed, "took {taken}, rate allows {allowed}");
+    }
+
+    #[test]
+    fn restart_discards_what_accrued_before_the_run() {
+        // 100K req/s over 8 workers is 12,500/s each: 200 ms accrues about
+        // 2,500 requests per worker, all of which restart must discard.
+        let l = WorkerLimiters::new(100_000, &[8; 8], 4);
+        std::thread::sleep(Duration::from_millis(200));
+        l.restart();
+        for i in 0..8u64 {
+            let rl = l.worker(i as usize).unwrap();
+            let held = rl.inner.available();
+            // Its stagger, plus at most what accrued since the restart.
+            assert!(held >= i * 4 * SUB / 8, "worker {i}: {held}");
+            assert!(held < i * 4 * SUB / 8 + SUB, "worker {i}: {held}");
+            assert_eq!(
+                rl.max_tokens(),
+                12_500 + (i * 4 / 8),
+                "worker {i}: cap restored"
+            );
+            // `available` does not refill; a take does. A restart that only
+            // narrowed and restored the cap would refill the 200 ms (about
+            // 2,500 requests) here; 1,250 is 100 ms of this worker's rate.
+            assert!(
+                rl.try_wait_n(1250).is_err(),
+                "worker {i} still held what accrued before restart"
+            );
+        }
+    }
+
+    #[test]
+    fn a_fresh_limiter_reports_no_slip() {
+        let l = WorkerLimiters::new(100_000, &[8; 8], 4);
+        for i in 0..8 {
+            assert_eq!(l.worker(i).unwrap().slip_ns(), 0, "worker {i}");
         }
     }
 
@@ -302,7 +417,7 @@ mod tests {
         // One worker at 1000/s expressed as 8000 per 8 s, full at 125
         // requests with 5-request claims: 120 requests beyond the next claim
         // are 120 ms of schedule.
-        let rl = WorkerLimiter::build(8000, Duration::from_secs(8), 125, 0, 5);
+        let rl = WorkerLimiter::build(8000, Duration::from_secs(8), 125, 0, 5, None);
         let slip = rl.slip_ns();
         assert!((120_000_000..=121_000_000).contains(&slip), "slip {slip}");
     }

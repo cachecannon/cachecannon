@@ -478,6 +478,9 @@ pub fn run_benchmark_full(
                     formatter.print_prefill(key_count);
                     formatter.print_prefill_header();
                 } else {
+                    if let Some(ref rl) = ratelimiter {
+                        rl.restart();
+                    }
                     shared.set_phase(Phase::Warmup);
                     current_phase = Phase::Warmup;
                     warmup_start = Some(Instant::now());
@@ -539,6 +542,9 @@ pub fn run_benchmark_full(
             // when N per-worker markers fire, since a worker may serve only a
             // subset of cluster nodes and would never reach a per-worker total.
             if total > 0 && confirmed >= total {
+                if let Some(ref rl) = ratelimiter {
+                    rl.restart();
+                }
                 shared.set_phase(Phase::Warmup);
                 current_phase = Phase::Warmup;
                 warmup_start = Some(Instant::now());
