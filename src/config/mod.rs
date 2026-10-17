@@ -196,6 +196,35 @@ pub struct Connection {
     /// How to distribute requests across connections.
     #[serde(default)]
     pub request_distribution: RequestDistribution,
+    /// How connections are assigned to endpoints. See [`EndpointAllocation`].
+    #[serde(default)]
+    pub endpoint_allocation: EndpointAllocation,
+}
+
+/// How connections are assigned to endpoints when there are several.
+#[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum EndpointAllocation {
+    /// Connection `i` serves endpoint `i % endpoints` (default). Every endpoint
+    /// gets the same number of connections, and so the same request share in a
+    /// rate-limited run, whatever share of the key distribution it owns.
+    #[default]
+    Even,
+    /// Each endpoint gets connections in proportion to the share of zipf
+    /// probability its keys carry: at least one if it owns keys, none if it
+    /// owns none. When every connection gets the same share of rate-limit
+    /// tokens, each endpoint then receives its zipf share of requests, so the
+    /// servers together see the global zipf distribution. That needs a
+    /// rate-limited run in which no connection is held back by its pipeline:
+    /// tokens go first come, first served among a worker's waiting
+    /// connections, so a connection with a full pipeline takes fewer (DMA, one
+    /// transfer per connection, at MiB values). In a closed-loop run an
+    /// endpoint's share also depends on its latency. Requires
+    /// `keyspace.distribution = "zipf"`; validation counts the endpoints in
+    /// `[target]`, which in cluster mode are the seeds. The memcache protocols
+    /// still reject-route zipf keys rather than using the per-endpoint alias
+    /// tables; the allocation applies to them all the same.
+    KeyShare,
 }
 
 /// How requests are distributed across connections.
@@ -234,6 +263,7 @@ impl Default for Connection {
             connect_timeout: default_connect_timeout(),
             request_timeout: default_request_timeout(),
             request_distribution: RequestDistribution::default(),
+            endpoint_allocation: EndpointAllocation::default(),
         }
     }
 }
@@ -473,8 +503,10 @@ pub struct Keyspace {
     #[serde(default)]
     pub distribution: Distribution,
     /// YCSB skew parameter for `distribution = "zipf"`; ignored for uniform.
-    /// Larger is more skewed. Must be > 0 and != 1 (the generator divides by
-    /// `1 - theta`). 0.99 is the YCSB default.
+    /// Larger is more skewed. Must be in (0, 10]; 0.99 is the YCSB default.
+    /// The upper bound keeps every key's weight `(id + 1)^-theta` above f64
+    /// underflow for any keyspace below 1e30 keys, which the per-endpoint alias
+    /// tables need (an endpoint whose weights all underflow has no sampler).
     #[serde(default = "default_zipf_theta")]
     pub zipf_theta: f64,
     /// How key ids are rendered into key bytes (`hex` default, or `uuid`).
@@ -583,6 +615,9 @@ fn default_key_length() -> usize {
 fn default_key_count() -> usize {
     1_000_000
 }
+
+/// Upper bound on `keyspace.zipf_theta`; see that field.
+pub const MAX_ZIPF_THETA: f64 = 10.0;
 
 fn default_zipf_theta() -> f64 {
     0.99
@@ -989,9 +1024,26 @@ impl Config {
             // is_finite() first so NaN is caught before the ordered comparison.
             // rand_distr's rejection-inversion handles theta == 1, so unlike a
             // zeta-based generator there is no singularity to exclude here.
-            if !theta.is_finite() || theta <= 0.0 {
+            if !theta.is_finite() || theta <= 0.0 || theta > MAX_ZIPF_THETA {
                 return Err(ConfigError::Validation(format!(
-                    "keyspace.zipf_theta must be finite and > 0 (got {theta})"
+                    "keyspace.zipf_theta must be in (0, {MAX_ZIPF_THETA}] (got {theta})"
+                )));
+            }
+        }
+
+        if self.connection.endpoint_allocation == EndpointAllocation::KeyShare {
+            if self.workload.keyspace.distribution != Distribution::Zipf {
+                return Err(ConfigError::Validation(
+                    "connection.endpoint_allocation = \"key_share\" requires \
+                     keyspace.distribution = \"zipf\""
+                        .to_string(),
+                ));
+            }
+            let endpoints = self.target.endpoints.len();
+            if endpoints > 1 && self.connection.total_connections() < endpoints {
+                return Err(ConfigError::Validation(format!(
+                    "connection.endpoint_allocation = \"key_share\" gives every endpoint at \
+                     least one connection, so connections must be >= {endpoints} endpoints"
                 )));
             }
         }
@@ -1318,7 +1370,7 @@ mod validation_tests {
 
     #[test]
     fn rejects_nonpositive_or_nan_zipf_theta() {
-        for bad in ["0.0", "-0.5", "nan"] {
+        for bad in ["0.0", "-0.5", "nan", "10.5", "inf"] {
             let err = toml::from_str::<Config>(&format!(
                 r#"
                 [target]
@@ -1341,11 +1393,10 @@ mod validation_tests {
 
     #[test]
     fn accepts_zipf_with_multiple_endpoints() {
-        // Skew across a sharded fleet is realistic and supported: hot keys hash
-        // to particular shards and those shards see disproportionate load, which
-        // is the imbalance the setup exists to measure. The worker draws from the
-        // global distribution and reject-routes rather than using the uniform
-        // per-endpoint fast path.
+        // Skew across a sharded fleet is supported. Each connection samples zipf
+        // restricted to its endpoint's keys. Shards see load in proportion to
+        // their zipf share only with `connection.endpoint_allocation =
+        // "key_share"`; the default gives every endpoint the same connections.
         toml::from_str::<Config>(
             r#"
             [target]
@@ -1358,6 +1409,53 @@ mod validation_tests {
         .expect("parses")
         .validate()
         .expect("zipf across shards must be allowed");
+    }
+
+    #[test]
+    fn endpoint_allocation_defaults_to_even_and_parses_key_share() {
+        let base = r#"
+            [target]
+            endpoints = ["127.0.0.1:6379", "127.0.0.1:6380"]
+            protocol = "resp"
+            [workload.keyspace]
+            distribution = "zipf"
+            "#;
+        let cfg: Config = toml::from_str(base).expect("parses");
+        assert_eq!(cfg.connection.endpoint_allocation, EndpointAllocation::Even);
+        let cfg: Config = toml::from_str(&format!(
+            "{base}\n[connection]\nconnections = 2\nendpoint_allocation = \"key_share\"\n"
+        ))
+        .expect("parses");
+        assert_eq!(
+            cfg.connection.endpoint_allocation,
+            EndpointAllocation::KeyShare
+        );
+        cfg.validate().expect("key_share with zipf is valid");
+    }
+
+    #[test]
+    fn key_share_requires_zipf_and_a_connection_per_endpoint() {
+        let cfg = |dist: &str, conns: usize| {
+            toml::from_str::<Config>(&format!(
+                r#"
+                [target]
+                endpoints = ["127.0.0.1:6379", "127.0.0.1:6380", "127.0.0.1:6381"]
+                protocol = "resp"
+                [connection]
+                connections = {conns}
+                endpoint_allocation = "key_share"
+                [workload.keyspace]
+                distribution = "{dist}"
+                "#
+            ))
+            .expect("parses")
+            .validate()
+        };
+        let err = cfg("uniform", 3).unwrap_err();
+        assert!(format!("{err:?}").contains("requires"), "{err:?}");
+        let err = cfg("zipf", 2).unwrap_err();
+        assert!(format!("{err:?}").contains(">= 3"), "{err:?}");
+        cfg("zipf", 3).expect("one connection per endpoint is enough");
     }
 
     #[test]

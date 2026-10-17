@@ -155,7 +155,38 @@ request_timeout = "1s"
 # "roundrobin" - Distribute requests evenly across connections
 # "greedy" - Fill one connection's pipeline before moving to next
 request_distribution = "roundrobin"
+
+# How connections are assigned to endpoints (several endpoints only)
+# "even"      - connection i serves endpoint i % endpoints (default)
+# "key_share" - each endpoint gets connections in proportion to the zipf
+#               probability its keys carry: at least one if it owns keys,
+#               none if it owns none. Requires keyspace.distribution = "zipf"
+#               and connections >= endpoints, counting the endpoints listed in
+#               [target] (in cluster mode, the seed endpoints, not the nodes
+#               discovered later).
+endpoint_allocation = "even"
 ```
+
+With `key_share`, each endpoint receives its zipf share of requests only when
+every connection gets the same share of rate-limit tokens. That holds in a
+rate-limited run in which no connection is held back by its pipeline:
+tokens go first come, first served among a worker's waiting connections, so a
+connection whose pipeline is full takes fewer. With `protocol = "dma"` each
+connection has one transfer in flight, so at MiB values the hot endpoint's
+connections spend most of their time waiting on a transfer and it receives less
+than its share. In a closed-loop run an endpoint's share also depends on its
+latency. Check the shares a run achieved from per-instance server counters, for
+example `cmdstat_get` and `cmdstat_set` calls from `INFO commandstats` on each
+instance, divided by their total, against the `zipf_share` column that
+`cargo run --release --example zipfbench -- <keys> <endpoints> <theta> 1
+<first endpoint addr> <connections>` prints per endpoint. zipfbench builds
+its endpoints as consecutive ports on the first address and renders 16-byte hex
+keys over the ketama ring, so its shares match a run only with that layout: the
+same endpoint addresses, `keyspace.length = 16`, hex keys and no cluster mode.
+
+With `even`, an endpoint that owns no keys (fewer keys than endpoints, or a
+large value size) still gets connections; under a rate limit they claim tokens
+they cannot spend, which lowers the achieved rate.
 
 > **Note:** `pool_size` is accepted as a legacy alias for `connections`. If both are specified, `pool_size` takes precedence. Prefer `connections` in new configurations.
 
@@ -188,10 +219,17 @@ count = 1000000
 
 # Key selection distribution
 # "uniform" - All keys equally likely
-# "zipf" - Zipfian distribution (hot keys accessed more often)
+# "zipf" - Zipfian distribution (hot keys accessed more often). With several
+#          endpoints each connection samples zipf restricted to its endpoint's
+#          keys, using the key-to-endpoint partition computed at startup; like
+#          "uniform", it does not follow slot-table changes during the run.
 # "recency" - Newest keys are hot, in units of append batches
 #             (requires [workload.append]; see guide.md "Append Stream")
 distribution = "uniform"
+
+# zipf only: exponent, P(key id k) proportional to (k + 1)^-zipf_theta.
+# In (0, 10]; default 0.99.
+zipf_theta = 0.99
 
 # recency only: how many of the newest batches form the hot window (default 8)
 hot_generations = 8
