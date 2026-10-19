@@ -379,6 +379,7 @@ fn load_base_config(args: &BenchArgs) -> Result<Config, Box<dyn std::error::Erro
                 tls_cert_file: None,
                 tls_key_file: None,
                 cluster: false,
+                auto_discovery: false,
             },
             connection: Connection {
                 connections: args.connections.unwrap_or(1),

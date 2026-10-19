@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- `target.auto_discovery` supports ElastiCache for Memcached auto discovery.
+  Before the run, cachecannon sends `config get cluster` to the configured
+  endpoints (falling back to `get AmazonElastiCache:cluster` on engines that
+  answer `ERROR`), over TLS when `target.tls` is set, and runs against the
+  nodes listed. Requires protocol `memcache` or `memcache-binary`. Discovery
+  runs once; node changes during the run are not followed.
+
+### Fixed
+- `[workload.append] connections` is checked against the node count after
+  cluster discovery. Validation counts the seed endpoints, so a cluster run
+  with fewer writers than nodes passed it and then stalled: a node with no
+  writer never drained its append queue and the first batch never
+  committed. The run now fails at startup.
+
 ## [0.0.32] - 2026-10-21
 
 ### Security

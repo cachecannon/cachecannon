@@ -92,6 +92,11 @@ tls = false
 
 # Enable Valkey/Redis Cluster mode (see guide.md for details)
 cluster = false
+
+# ElastiCache for Memcached auto discovery: query the endpoints (a
+# configuration endpoint) with `config get cluster` and run against the nodes
+# it lists. Requires protocol memcache or memcache-binary; not with cluster.
+auto_discovery = false
 ```
 
 ### RESP Module Settings
@@ -162,8 +167,8 @@ request_distribution = "roundrobin"
 #               probability its keys carry: at least one if it owns keys,
 #               none if it owns none. Requires keyspace.distribution = "zipf"
 #               and connections >= endpoints, counting the endpoints listed in
-#               [target] (in cluster mode, the seed endpoints, not the nodes
-#               discovered later).
+#               [target] (in cluster and auto discovery modes, the seed
+#               endpoints, not the nodes discovered later).
 endpoint_allocation = "even"
 ```
 
@@ -249,7 +254,9 @@ hot_fraction = 0.8
 # batch = 100000          # keys per batch
 # every = "60s"           # interval between batch starts, from the start of warmup
 # pace = "burst"          # "burst" (as fast as the writers allow) or "spread"
-# connections = 1         # writer connections; cluster mode needs >= nodes
+# connections = 1         # writer connections; >= the endpoint count when there
+#                          # are several (in cluster and auto discovery modes,
+#                          # the nodes found by discovery)
 # pipeline_depth = 32     # in-flight SETs per writer connection
 
 [workload.commands]

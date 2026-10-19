@@ -1,4 +1,5 @@
 pub mod admin;
+pub mod autodiscovery;
 pub mod buffer;
 pub mod client;
 pub mod cluster;
