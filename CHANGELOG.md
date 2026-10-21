@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.32] - 2026-10-21
+
 ### Security
 - `webpki-roots` 0.26.11 and 1.0.8 to 1.0.10 (RUSTSEC-2026-0381: the bundled
   emSign ECC Root CA - G3 allowed paths through distrusted emSign
@@ -16,7 +18,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (used when `tls_ca_file` is unset) no longer contains emSign ECC Root CA - G3
   or Atos TrustedRoot 2011 and gains SECOM TLS ECC/RSA Root CA 2024 and Telia
   EC/RSA TLS Root CA v3, so a server whose chain ends only at one of the two
-  removed roots now fails verification.
+  removed roots now fails verification. (#246)
 
 ## [0.0.31] - 2026-10-17
 
