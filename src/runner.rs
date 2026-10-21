@@ -91,20 +91,7 @@ pub fn run_benchmark_full(
         "rng seed (set general.seed = {seed} to repeat this key sequence)"
     );
 
-    // Cluster mode: discover topology and replace endpoints with primaries
-    let slot_table = if config.target.cluster {
-        match config.target.protocol {
-            CacheProtocol::Resp | CacheProtocol::Resp3 => {}
-            other => {
-                return Err(format!("cluster mode requires resp protocol, got {:?}", other).into());
-            }
-        }
-        let (endpoints, table) = crate::cluster::discover_topology(&config.target.endpoints)?;
-        config.target.endpoints = endpoints;
-        Some(table)
-    } else {
-        None
-    };
+    let slot_table = resolve_endpoints(&mut config)?;
 
     let num_threads = config.general.threads;
     let warmup = effective_warmup(&config);
@@ -158,22 +145,6 @@ pub fn run_benchmark_full(
     // using the same distribution formula as worker.rs create_for_worker().
     let prefill_enabled = config.workload.prefill;
     let key_count = config.workload.keyspace.count;
-    let num_endpoints = config.target.endpoints.len();
-
-    // Guardrail: prefill is drained from shared per-endpoint queues, so it can
-    // only complete if every node has at least one connection across all
-    // workers. Fewer connections than nodes leaves a node's queue with no
-    // draining task — fail loud at startup instead of stalling silently
-    // mid-prefill at conns/nodes progress.
-    if prefill_enabled && num_endpoints > 1 && total_connections < num_endpoints {
-        return Err(format!(
-            "cluster prefill needs at least one connection per node, but \
-             --connections={} < {} cluster nodes. Increase --connections to >= {} \
-             (ideally >= threads x nodes for an even spread).",
-            total_connections, num_endpoints, num_endpoints
-        )
-        .into());
-    }
 
     // Build the shared per-endpoint prefill queues once: the full keyspace,
     // partitioned by owning endpoint. All workers share this `Arc` and drain
@@ -1068,6 +1039,79 @@ fn max_from_histogram(hist: &Histogram) -> f64 {
     0.0
 }
 
+/// Run cluster or auto discovery, replace `config.target.endpoints` with the
+/// nodes found, and check connection counts against them. Returns the slot
+/// table in cluster mode. Must run before anything is sized from the endpoint
+/// count. Config validation checked connection counts against the seeds;
+/// `check_node_counts` checks them against the nodes.
+pub(crate) fn resolve_endpoints(
+    config: &mut Config,
+) -> Result<Option<Vec<u16>>, Box<dyn std::error::Error>> {
+    let slot_table = if config.target.cluster {
+        match config.target.protocol {
+            CacheProtocol::Resp | CacheProtocol::Resp3 => {}
+            other => {
+                return Err(format!("cluster mode requires resp protocol, got {:?}", other).into());
+            }
+        }
+        let (endpoints, table) = crate::cluster::discover_topology(&config.target.endpoints)?;
+        config.target.endpoints = endpoints;
+        Some(table)
+    } else {
+        None
+    };
+
+    if config.target.auto_discovery {
+        config.target.endpoints = crate::autodiscovery::discover_nodes(&config.target)?.nodes;
+    }
+
+    check_node_counts(config, config.target.endpoints.len())?;
+    Ok(slot_table)
+}
+
+/// Checks that need the node count, which in cluster and auto discovery modes
+/// is known only after discovery. Each one rejects a config that would
+/// otherwise stall: a node no task drains.
+pub(crate) fn check_node_counts(
+    config: &Config,
+    num_endpoints: usize,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let prefill_enabled = config.workload.prefill;
+    let total_connections = config.connection.total_connections();
+
+    // Guardrail: prefill is drained from shared per-endpoint queues, so it can
+    // only complete if every node has at least one connection across all
+    // workers. Fewer connections than nodes leaves a node's queue with no
+    // draining task — fail loud at startup instead of stalling silently
+    // mid-prefill at conns/nodes progress.
+    if prefill_enabled && num_endpoints > 1 && total_connections < num_endpoints {
+        return Err(format!(
+            "cluster prefill needs at least one connection per node, but \
+             --connections={} < {} cluster nodes. Increase --connections to >= {} \
+             (ideally >= threads x nodes for an even spread).",
+            total_connections, num_endpoints, num_endpoints
+        )
+        .into());
+    }
+
+    // Same for the append stream: writers are assigned to nodes round-robin,
+    // so a node without one never drains its append queue and the first batch
+    // never commits.
+    if let Some(ref append) = config.workload.append
+        && num_endpoints > 1
+        && append.connections < num_endpoints
+    {
+        return Err(format!(
+            "append.connections ({}) must be >= the number of nodes ({num_endpoints}) so \
+             every node's append queue has a writer draining it",
+            append.connections
+        )
+        .into());
+    }
+
+    Ok(())
+}
+
 /// Build the rustls client config from the target's TLS settings.
 ///
 /// Two independent axes:
@@ -1080,7 +1124,7 @@ fn max_from_histogram(hist: &Histogram) -> f64 {
 /// * **Client identity** (`tls_cert_file` + `tls_key_file`) — the certificate
 ///   presented for mutual TLS. Applied on both verification paths, so a
 ///   self-signed server and client auth can be used together.
-fn build_tls_client_config(
+pub(crate) fn build_tls_client_config(
     target: &crate::config::Target,
 ) -> Result<rustls::ClientConfig, Box<dyn std::error::Error>> {
     use rustls::pki_types::pem::PemObject;
@@ -1423,6 +1467,7 @@ mod tls_tests {
             tls_cert_file: None,
             tls_key_file: None,
             cluster: false,
+            auto_discovery: false,
         }
     }
 

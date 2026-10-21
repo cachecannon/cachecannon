@@ -151,6 +151,11 @@ pub struct Target {
     /// and route by hash slot instead of ketama consistent hashing.
     #[serde(default)]
     pub cluster: bool,
+    /// ElastiCache for Memcached auto discovery: send `config get cluster` to
+    /// the endpoints (a configuration endpoint) and run against the nodes it
+    /// lists. Requires a memcache protocol.
+    #[serde(default)]
+    pub auto_discovery: bool,
 }
 
 #[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]
@@ -221,9 +226,10 @@ pub enum EndpointAllocation {
     /// transfer per connection, at MiB values). In a closed-loop run an
     /// endpoint's share also depends on its latency. Requires
     /// `keyspace.distribution = "zipf"`; validation counts the endpoints in
-    /// `[target]`, which in cluster mode are the seeds. The memcache protocols
-    /// still reject-route zipf keys rather than using the per-endpoint alias
-    /// tables; the allocation applies to them all the same.
+    /// `[target]`, which in cluster and auto discovery modes are the seeds.
+    /// The memcache protocols still reject-route zipf keys rather than using
+    /// the per-endpoint alias tables; the allocation applies to them all the
+    /// same.
     KeyShare,
 }
 
@@ -900,7 +906,7 @@ impl Config {
     }
 
     /// Validate config invariants that can't be expressed via serde alone.
-    fn validate(&self) -> Result<(), ConfigError> {
+    pub(crate) fn validate(&self) -> Result<(), ConfigError> {
         if self.target.endpoints.is_empty() {
             return Err(ConfigError::Validation(
                 "endpoints must be specified".to_string(),
@@ -909,6 +915,23 @@ impl Config {
 
         if self.general.threads == 0 {
             return Err(ConfigError::Validation("threads must be >= 1".to_string()));
+        }
+
+        if self.target.auto_discovery {
+            if self.target.cluster {
+                return Err(ConfigError::Validation(
+                    "target.auto_discovery and target.cluster cannot both be set".to_string(),
+                ));
+            }
+            if !matches!(
+                self.target.protocol,
+                Protocol::Memcache | Protocol::MemcacheBinary
+            ) {
+                return Err(ConfigError::Validation(format!(
+                    "target.auto_discovery requires protocol memcache or memcache-binary, got {:?}",
+                    self.target.protocol
+                )));
+            }
         }
 
         // io_uring's provided-buffer ring is indexed by a mask, so ringline
@@ -1298,6 +1321,23 @@ mod validation_tests {
         let config: Config = toml::from_str(toml).map_err(|e| ConfigError::Parse(e.to_string()))?;
         config.validate()?;
         Ok(config)
+    }
+
+    #[test]
+    fn auto_discovery_needs_memcache_and_no_cluster() {
+        let config = |extra: &str| {
+            parse_config(&format!(
+                "[target]\nendpoints = [\"127.0.0.1:11211\"]\nauto_discovery = true\n{extra}"
+            ))
+        };
+        config("protocol = \"memcache\"\n").unwrap();
+        config("protocol = \"memcache-binary\"\n").unwrap();
+        let err = config("").unwrap_err().to_string();
+        assert!(err.contains("memcache"), "{err}");
+        let err = config("protocol = \"memcache\"\ncluster = true\n")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("cannot both"), "{err}");
     }
 
     #[test]

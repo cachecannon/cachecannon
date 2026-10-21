@@ -499,6 +499,40 @@ prefill = true
 
 See `config/valkey-cluster.toml` for a ready-to-use configuration.
 
+## Memcached Auto Discovery
+
+`auto_discovery` runs against every node of an ElastiCache for Memcached
+cluster, given its configuration endpoint
+([AWS documentation](https://docs.aws.amazon.com/AmazonElastiCache/latest/dg/AutoDiscovery.AddingToYourClientLibrary.html)).
+
+```toml
+[target]
+endpoints = ["10.0.1.25:11211"]  # the configuration endpoint, resolved
+protocol = "memcache"            # or "memcache-binary"
+auto_discovery = true
+```
+
+Before the workers start, cachecannon sends `config get cluster` to the first
+endpoint over a separate blocking connection (TLS when `tls = true`), and
+replaces `endpoints` with the nodes in the reply. If an endpoint fails, the next
+one is tried. If the server answers `ERROR`, the node list is read from the
+`AmazonElastiCache:cluster` key, which AWS documents for engines before
+memcached 1.4.14. A plain memcached has neither, and the run fails with an
+error naming the endpoint.
+
+Keys are routed to the discovered nodes by ketama consistent hashing over their
+`ip:port`, as with any list of several endpoints. Discovery runs once: nodes
+added or removed during the run are not picked up.
+
+`endpoints` takes IP addresses, so resolve the configuration endpoint's DNS name
+first, from inside the VPC (`dig +short <configuration endpoint>`). Each node is
+reached at the IP in the reply; a node listed with no IP is resolved from its
+hostname.
+
+With `tls = true`, every node connection uses the one `tls_hostname` (or the
+node's IP when unset) for SNI and certificate verification. Whether one name
+verifies every node depends on the names in the cluster's certificates.
+
 ## TLS
 
 TLS encrypts connections between cachecannon and the target server. Enable it with a single flag:
@@ -551,7 +585,7 @@ handshake:
 - **Only TLS 1.2/1.3 with modern cipher suites** — no RSA key exchange, no
   3DES or CBC-SHA1. An older server may have nothing to negotiate.
 
-TLS works with all protocols (RESP, Memcache, Ping) and with cluster mode. It adds some latency overhead from the TLS handshake and encryption, so enable it when your server requires it rather than for local benchmarking. On memcache SET, TLS also costs the zero-copy value path: encryption has to copy, so `SendGuard` no longer avoids a copy.
+TLS works with all protocols (RESP, Memcache, Ping), with cluster mode and with memcached auto discovery. It adds some latency overhead from the TLS handshake and encryption, so enable it when your server requires it rather than for local benchmarking. On memcache SET, TLS also costs the zero-copy value path: encryption has to copy, so `SendGuard` no longer avoids a copy.
 
 ## Memcache Protocol Selection
 
