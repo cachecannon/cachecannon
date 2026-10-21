@@ -113,7 +113,7 @@ metriken-storage = { version = "0.2", default-features = false, features = ["con
 
 # TLS
 rustls = { version = "0.23", default-features = false, features = ["std", "ring"] }
-webpki-roots = "0.26"
+webpki-roots = "1"
 
 # Rate limiting
 ratelimit = "2.0.0"
