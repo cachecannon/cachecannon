@@ -2,7 +2,7 @@
 
 use super::{
     KvReplayResults, LatencyStats, OutputFormatter, PrefillDiagnostics, PrefillSample, Results,
-    Sample,
+    Sample, TraceReplayResults,
 };
 use crate::config::Config;
 use serde::Serialize;
@@ -39,6 +39,44 @@ struct KvConfigOutput {
     write_rule: &'static str,
 }
 
+/// `[workload.trace_replay]` in the config line.
+#[derive(Serialize)]
+struct TraceConfigOutput {
+    trace: String,
+    key_prefix: String,
+    key_format: &'static str,
+}
+
+/// `[workload.trace_replay]` totals in the result line.
+#[derive(Serialize)]
+struct TraceReplayOutput {
+    trace_rows: u64,
+    rows: u64,
+    rows_failed: u64,
+    rows_skipped: u64,
+    gets: u64,
+    sets: u64,
+    dels: u64,
+    read_waits: u64,
+    finished: bool,
+}
+
+impl TraceReplayOutput {
+    fn new(t: &TraceReplayResults) -> Self {
+        Self {
+            trace_rows: t.trace_rows,
+            rows: t.rows,
+            rows_failed: t.rows_failed,
+            rows_skipped: t.rows_skipped,
+            gets: t.gets,
+            sets: t.sets,
+            dels: t.dels,
+            read_waits: t.read_waits,
+            finished: t.finished,
+        }
+    }
+}
+
 #[derive(Serialize)]
 struct ConfigOutput {
     #[serde(rename = "type")]
@@ -49,7 +87,8 @@ struct ConfigOutput {
     threads: usize,
     conns: usize,
     pipeline: usize,
-    /// The synthetic keyspace; absent for a KV replay, which ignores it.
+    /// The synthetic keyspace; absent for a KV or trace replay, which ignore
+    /// it.
     #[serde(skip_serializing_if = "Option::is_none")]
     keyspace: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -58,6 +97,8 @@ struct ConfigOutput {
     value_size: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
     kv_replay: Option<KvConfigOutput>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    trace_replay: Option<TraceConfigOutput>,
     engine: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     ratelimit: Option<u64>,
@@ -135,6 +176,8 @@ struct ResultsOutput {
     perceived_latency: Option<LatencyOutput>,
     #[serde(skip_serializing_if = "Option::is_none")]
     kv_replay: Option<KvReplayOutput>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    trace_replay: Option<TraceReplayOutput>,
 }
 
 /// `[workload.kv_replay]` totals in the result line. Times are per trace
@@ -220,7 +263,8 @@ fn config_output(config: &Config) -> ConfigOutput {
         .collect::<Vec<_>>()
         .join(",");
     let kv = config.workload.kv_replay.as_ref();
-    let synthetic = kv.is_none();
+    let trace = config.workload.trace_replay.as_ref();
+    let synthetic = kv.is_none() && trace.is_none();
     ConfigOutput {
         msg_type: "config",
         target,
@@ -240,6 +284,14 @@ fn config_output(config: &Config) -> ConfigOutput {
             kv_bytes_per_token: kv.kv_bytes_per_token,
             mla: kv.mla,
             write_rule: kv.write_rule.as_str(),
+        }),
+        trace_replay: trace.map(|t| TraceConfigOutput {
+            trace: t.trace.display().to_string(),
+            key_prefix: t.key_prefix.clone(),
+            key_format: match t.key_format {
+                crate::config::KvKeyFormat::Hex => "hex",
+                crate::config::KvKeyFormat::Decimal => "decimal",
+            },
         }),
         engine: crate::output::IO_ENGINE.to_string(),
         ratelimit: config.workload.rate_limit,
@@ -485,6 +537,7 @@ impl OutputFormatter for JsonFormatter {
                 None
             },
             kv_replay: results.kv_replay.as_ref().map(KvReplayOutput::new),
+            trace_replay: results.trace_replay.as_ref().map(TraceReplayOutput::new),
         };
 
         match serde_json::to_string(&output) {

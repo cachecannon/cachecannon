@@ -314,6 +314,63 @@ pub static KV_GET_NIL: Counter = Counter::new(&KV, kv::GET_NIL);
 )]
 pub static KV_TRACE_READ_WAITS: Counter = Counter::new(&KV, kv::TRACE_READ_WAITS);
 
+// ── Object trace replay metrics ──────────────────────────────────────────
+//
+// `[workload.trace_replay]`. The GETs, SETs and DELs the rows send are also
+// counted in the request, response and per-op metrics above.
+static TRACE: CounterGroup = CounterGroup::new();
+
+/// Counter slot indices for trace replay metrics.
+pub mod trace {
+    pub const ROWS: usize = 0;
+    pub const ROWS_FAILED: usize = 1;
+    pub const ROWS_SKIPPED: usize = 2;
+    pub const GETS: usize = 3;
+    pub const SETS: usize = 4;
+    pub const DELS: usize = 5;
+    pub const READ_WAITS: usize = 6;
+}
+
+#[metric(name = "trace_rows", description = "Trace replay: rows answered")]
+pub static TRACE_ROWS: Counter = Counter::new(&TRACE, trace::ROWS);
+
+#[metric(
+    name = "trace_rows_failed",
+    description = "Trace replay: rows in flight on a connection that failed (not retried), or that the send pool refused outright 3 times"
+)]
+pub static TRACE_ROWS_FAILED: Counter = Counter::new(&TRACE, trace::ROWS_FAILED);
+
+#[metric(
+    name = "trace_rows_skipped",
+    description = "Trace replay: rows not sent, with an unknown op or a SET larger than the value pool"
+)]
+pub static TRACE_ROWS_SKIPPED: Counter = Counter::new(&TRACE, trace::ROWS_SKIPPED);
+
+#[metric(
+    name = "trace_gets",
+    description = "Trace replay: rows answered that were sent as GET"
+)]
+pub static TRACE_GETS: Counter = Counter::new(&TRACE, trace::GETS);
+
+#[metric(
+    name = "trace_sets",
+    description = "Trace replay: rows answered that were sent as SET (backfill SETs are not rows)"
+)]
+pub static TRACE_SETS: Counter = Counter::new(&TRACE, trace::SETS);
+
+#[metric(
+    name = "trace_dels",
+    description = "Trace replay: rows answered that were sent as DEL"
+)]
+pub static TRACE_DELS: Counter = Counter::new(&TRACE, trace::DELS);
+
+#[metric(
+    name = "trace_read_waits",
+    description = "Trace replay: times a connection had room to send and no row, because the \
+                   trace reader had not read the next batch yet"
+)]
+pub static TRACE_READ_WAITS: Counter = Counter::new(&TRACE, trace::READ_WAITS);
+
 #[metric(name = "kv_exists_count", description = "KV replay: EXISTS operations")]
 pub static KV_EXISTS_COUNT: Counter = Counter::new(&KV, kv::EXISTS);
 

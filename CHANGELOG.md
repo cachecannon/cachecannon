@@ -87,6 +87,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   than with a burst. Unset or 0 leaves prefill unpaced, as before. A config
   whose paced prefill cannot finish within `prefill_timeout` is rejected,
   including after valkey-lab's `--keyspace` and `--prefill` flags.
+- `[workload.trace_replay]` replays a cachesim object-level trace (the
+  `cachetrace` Parquet format from pelikan-io/cachesim: `obj_id` UInt64,
+  `obj_size` UInt32, optional `op` UInt8) against a RESP server, one command
+  per row in file order: reads and rows without an op send GET, DELETE sends
+  DEL, and writes send a SET of `obj_size` bytes (`BLOB.TCP_*` under
+  `[resp] module`). Paced by `workload.rate_limit` in rows per second, or
+  closed loop; trace timestamps are not used. `backfill_on_miss` SETs a missed
+  GET's row size. Rows go to whichever connection has room, so one key's
+  operations can be in flight on several connections at once and rows can
+  reach the server out of file order. Rows with an unknown op or a SET over
+  the value pool are skipped (`trace_rows_skipped`); rows in flight on a failed
+  connection, and rows the send pool refused outright three times, are
+  counted in `trace_rows_failed` and not retried. A batch that carries a
+  zero-copy value is flushed before its copied bytes would pass one send-pool
+  slot, which ringline refuses on io_uring. A failed connection's unsent claimed rows go to a shared queue any
+  worker sends from. The run ends when every row is answered or counted
+  failed, at a read error, or at `duration`. A file with other column types is
+  refused when the run starts; a trace whose every row is skipped fails the
+  run. Refused with other protocols, several endpoints or cluster mode,
+  prefill, read_values, append, saturation search, kv_replay and routed mode.
+  New `trace_*` counters are registered statically, so every run's metrics
+  carry them as zeros when `trace_replay` is not set. The JSON config and
+  result lines gain a `trace_replay` object when it is. The public `Results`
+  and `BenchWorkerConfig` structs gain a `trace_replay` field, so code outside
+  this crate that builds either with a struct literal must add it.
 - `[resp] module = "largeobj"` makes the RESP path (`protocol = "resp"` and
   `"resp3"`) send a server module's TCP commands, `BLOB.TCP_GET key` and
   `BLOB.TCP_SET key value`, in place of `GET` and `SET`, prefill included.
