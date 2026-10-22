@@ -63,10 +63,15 @@ jobs:
       - name: Bump to next dev version
         if: steps.check_tag.outputs.exists == 'false'
         run: |
-          # Calculate next dev version (patch bump + alpha.0)
+          # main carries the next minor (X.(Y+1).0-alpha.0); an X.Y.x branch
+          # carries its next patch (X.Y.(Z+1)-alpha.0).
           VERSION="${{ steps.version.outputs.version }}"
           IFS='.' read -r MAJOR MINOR PATCH <<< "$VERSION"
-          NEXT_DEV="${MAJOR}.${MINOR}.$((PATCH + 1))-alpha.0"
+          if [ "${{ github.ref_name }}" = "main" ]; then
+            NEXT_DEV="${MAJOR}.$((MINOR + 1)).0-alpha.0"
+          else
+            NEXT_DEV="${MAJOR}.${MINOR}.$((PATCH + 1))-alpha.0"
+          fi
           echo "Bumping to next dev version: $NEXT_DEV"
           echo "next_dev=$NEXT_DEV" >> $GITHUB_OUTPUT
 

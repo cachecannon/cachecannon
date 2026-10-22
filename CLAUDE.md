@@ -124,14 +124,18 @@ on the way out and a test scans the rendered body.
 Cut releases with `/cs:release`. What it cannot read from the repository:
 
 - `main` is the development line; minor and major releases come from it. Each
-  released line has a branch `X.Y.x` (`0.0.x` exists), and patch releases for
-  that line come from it, with fixes reaching it by cherry-pick or backport PR.
+  released line has a branch `X.Y.x` (`git ls-remote --heads origin '*.*.x'`
+  lists them), and patch releases for that line come from it, with fixes
+  reaching it by cherry-pick or backport PR.
   The release PR targets the branch it was cut from.
 - `.github/workflows/tag-release.yml` runs on `main` and `*.*.x`. It tags only
-  when the head commit starts with `release: v`, then opens
-  `chore: bump to X.Y.(Z+1)-alpha.0` against the same branch. Do not tag by
-  hand: a tag that already exists makes the workflow skip the bump PR. The tag
-  starts `release.yml`, which builds, signs and publishes the .deb and .rpm
-  packages and creates the GitHub release. Nothing is published to crates.io.
+  when the pushed head commit's message starts with `release: v`. The tag is
+  `v` plus the version in `Cargo.toml`; the title's version is not checked.
+  It then opens a bump PR against the same branch: `X.(Y+1).0-alpha.0` on
+  `main`, `X.Y.(Z+1)-alpha.0` on `X.Y.x`. Merge it once its checks pass. Do
+  not tag by hand: a tag that already exists makes the workflow skip the bump
+  PR. The tag starts `release.yml`, which builds, signs and publishes the .deb
+  and .rpm packages and creates the GitHub release. Nothing is published to
+  crates.io.
 - After a minor or major release from `main`, create the line's branch at the
   new tag: `git push origin vX.Y.0^{commit}:refs/heads/X.Y.x`.
