@@ -77,7 +77,9 @@ resp-proto = { version = "0.0.2", features = ["resp3"] }
 # PoolConfig, `ConnCtx: !Send`, `recv_accumulator_max` defaulting to 1 GiB).
 # Carries forward the 0.6.5 RESP3 null (`_\r\n`) GET-miss parsing (ringline
 # #294) and the uniform recv_meta reply-metadata path (RespMeta / recv_meta,
-# ringline #288, 0.6.4).
+# ringline #288, 0.6.4). `[resp] module` needs `ClientBuilder::get_command`,
+# which crates.io has from 0.7.1; the `[patch.crates-io]` pin below carries it
+# at 0.7.0, so raise this requirement when that patch is dropped.
 ringline-redis = "0.7.0"
 ringline-memcache = "0.7.1"
 ringline-ping = "0.6.0"
@@ -208,6 +210,8 @@ dendro = { version = "0.4", default-features = false }
 # crates.io alongside the patched one the client crates use.
 [patch.crates-io]
 # ab81ceb is ringline main after #682, which added `Client::recv_ready`.
+# It also carries ringline-redis `ClientBuilder::get_command` / `set_command`
+# (ringline #674), which `[resp] module` uses.
 # metriken-core declares `links`, so ringline and cachecannon must agree on one
 # metriken-core (0.3, from metriken 0.11.3 since ringline #649).
 ringline = { git = "https://github.com/ringline-rs/ringline", rev = "ab81ceb" }

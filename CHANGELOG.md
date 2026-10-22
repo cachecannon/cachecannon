@@ -87,6 +87,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   than with a burst. Unset or 0 leaves prefill unpaced, as before. A config
   whose paced prefill cannot finish within `prefill_timeout` is rejected,
   including after valkey-lab's `--keyspace` and `--prefill` flags.
+- `[resp] module = "largeobj"` makes the RESP path (`protocol = "resp"` and
+  `"resp3"`) send a server module's TCP commands, `BLOB.TCP_GET key` and
+  `BLOB.TCP_SET key value`, in place of `GET` and `SET`, prefill included.
+  The default, `module = "none"`, sends `GET` and `SET`. `HELLO 3`, the
+  precheck `PING` and `DEL` are unchanged. Config load refuses the option
+  with another protocol, with `[workload.append]`, whose writers send plain
+  `SET` to the same keys, and with `[workload.kv_replay]`, a combination not
+  run against the module. `BLOB.TCP_SET` answers `WRONGTYPE` on a key that
+  holds a string, so a server filled without the module must be flushed
+  first. Uses ringline-redis
+  `ClientBuilder::get_command` / `set_command` (ringline #674), which the
+  pinned ringline carries. Forward-ported from 0.0.x (#230).
 - `[admin] listen` serves `GET /metrics/stream[?interval=..&layout=wide|long]`,
   metriken-exposition's stream route: dendro replication frames
   (`application/vnd.metriken.replication.v1+dendro`), a handshake with
