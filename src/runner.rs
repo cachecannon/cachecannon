@@ -1348,6 +1348,35 @@ mod tests {
     };
     use crate::config::Config;
 
+    #[test]
+    fn prefill_needs_a_connection_to_every_node() {
+        let config = |connections: usize, prefill: bool| -> Config {
+            toml::from_str(&format!(
+                "[target]\nendpoints = [\"127.0.0.1:6379\"]\n\
+                 [connection]\nconnections = {connections}\n\
+                 [workload]\nprefill = {prefill}\n"
+            ))
+            .expect("test config must parse")
+        };
+        let err = super::check_node_counts(&config(2, true), 3)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("--connections=2 < 3 cluster nodes"), "{err}");
+        super::check_node_counts(&config(1, true), 2).unwrap_err();
+        super::check_node_counts(&config(3, true), 3).unwrap();
+        super::check_node_counts(&config(2, false), 3).unwrap();
+        super::check_node_counts(&config(1, true), 1).unwrap();
+
+        // `pool_size` overrides `connections` in the count.
+        let pooled: Config = toml::from_str(
+            "[target]\nendpoints = [\"127.0.0.1:6379\"]\n\
+             [connection]\nconnections = 1\npool_size = 3\n\
+             [workload]\nprefill = true\n",
+        )
+        .expect("test config must parse");
+        super::check_node_counts(&pooled, 3).unwrap();
+    }
+
     /// A minimal parsed config with the two recv keys set as given.
     fn test_config(ring: Option<u16>, buffer: Option<u32>) -> Config {
         let mut config: Config = toml::from_str("[target]\nendpoints = [\"127.0.0.1:6379\"]\n")
