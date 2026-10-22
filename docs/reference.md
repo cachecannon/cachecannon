@@ -484,6 +484,98 @@ order:
 | `lookup_ns`, `load_ns`, `store_ns` | As in the result; 0 when there was no such step |
 | `recorded` | 1 if the request finished during recording, 0 during warmup, read from the phase when it finished. A request finishing at the warmup-to-recording transition can be on either side of the JSON totals |
 
+### Object Trace Replay Settings
+
+`[workload.trace_replay]` replaces the synthetic keyspace with a cachesim
+object-level trace: the `cachetrace` Parquet format from pelikan-io/cachesim,
+one row per cache request with `obj_id`, `obj_size` and an optional `op`
+(libCacheSim's `req_op_e` codes). `cachesim convert` makes one from a
+libCacheSim binary trace or a pelikan-io/cache-trace CSV, and `cachesim kv
+expand` from a KV-cache request trace.
+
+```toml
+[workload]
+# Rows per second; unset replays closed loop.
+rate_limit = 5000
+# A GET that misses is followed by a SET of the row's obj_size.
+backfill_on_miss = true
+
+[workload.trace_replay]
+trace = "trace.parquet"
+# Prepended to every key. Default "".
+key_prefix = "obj:"
+# How obj_id is written after the prefix: "hex" (16 digits, default) or
+# "decimal".
+key_format = "hex"
+```
+
+Each row sends one command, in file order:
+
+- reads (GET, GETS, READ, NOP) and rows with no `op` send `GET`;
+- `DELETE` sends `DEL`;
+- every write (SET, ADD, CAS, REPLACE, APPEND, PREPEND, INCR, DECR, WRITE,
+  UPDATE) sends a `SET` of `obj_size` bytes.
+
+`[resp] module = "largeobj"` sends `BLOB.TCP_GET` and `BLOB.TCP_SET` in
+place of `GET` and `SET`. A row with an op code of 15 or more, or a SET larger
+than the 1 GiB value pool, is skipped and counted in `trace_rows_skipped`.
+
+Rows are paced by `workload.rate_limit` (a backfill SET takes a token too),
+or run closed loop. The trace's timestamps are not used. Rows are first sent
+as warmup starts when there is a warmup, otherwise as recording starts. The
+run ends when every row has been answered or counted failed, at a read error
+in the trace, or at `duration`.
+
+Rows go to whichever connection has room for them, not to a connection chosen
+by key, so a hot key's requests are in flight on several connections at once.
+Rows can then reach the server out of file order: rows in flight on one
+worker's connections at once (up to its connections x `pipeline_depth`), and
+rows claimed by different workers (each claims 64 at a time), can arrive in
+either order. A worker
+whose connections stall or reconnect keeps its claimed rows while other
+workers continue, so how far apart in the file two reordered rows can be is
+not bounded. For an order the server must see (a fill, then deletes, then
+reads), use one trace file per phase and one run each.
+
+A row in flight on a connection that fails is counted in `trace_rows_failed`
+and not retried, because the server may have applied it; the rows that
+worker had claimed and not sent go to a shared queue that any worker sends
+from first. A row that could not be sent is put back at the front of the
+worker's claimed rows and sent again. When the send pool refused the send
+outright (ringline's `InvalidInput`: a buffer wider than the whole pool, or a
+TLS record limit), the failure counts against the row, and after three such
+failures the row is counted in `trace_rows_failed`; a send pool that is only
+full for now does not count. On io_uring ringline also refuses a batch
+carrying a zero-copy value whose copied bytes exceed one 16,448-byte send-pool
+slot, so the replay flushes a batch before it would. A backfill SET that could
+not be sent is dropped. Rows in flight when the run stops are in neither the
+answered nor the failed count.
+
+The trace must have `obj_id` (UInt64) and `obj_size` (UInt32) columns, an
+`op` column if any of UInt8, and `obj_size` statistics in its footer, which
+size the send buffers. A file without them, with another type for one of
+these columns (pyarrow's default Int64, for example), or with no rows is
+refused when the run starts; a trace whose every row is skipped fails the run.
+A read error later in the file stops the replay at that row and fails the run
+after printing results. Config load refuses `[workload.trace_replay]` with a
+protocol other than `resp` or `resp3`, with more than one endpoint or cluster
+mode, and with `prefill`, `read_values`, `[workload.append]`,
+`[workload.saturation_search]`, `[workload.kv_replay]` or
+`routing = "routed"`.
+
+#### Trace replay results
+
+The clean and verbose outputs and the JSON result line (`trace_replay`) report
+the rows answered, failed and skipped, the rows answered by the command they
+were sent as (GET, SET, DEL), how often a connection had room to send while
+the trace reader had no row ready (`read_waits`; the run logs a warning when
+it is above 0, since those waits lowered the achieved rate), and whether the
+whole trace was replayed (`finished`, false after a read error). Row counts
+are for the recording phase, except `rows_skipped`, which counts every skipped
+row the reader has reached, including rows it read ahead of the replay. The
+GETs, SETs and DELs are also counted in the request, response and per-command
+latency metrics.
+
 ### Saturation Search Settings
 
 See the [Saturation Search](guide.md#saturation-search) section in the guide for how this works.

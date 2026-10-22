@@ -45,12 +45,30 @@ pub(crate) fn kv_workload_summary(kv: &KvReplay) -> String {
     )
 }
 
+/// How a trace replay is configured, for the clean and verbose config
+/// summaries, in place of the synthetic keyspace and value size it ignores.
+pub(crate) fn trace_workload_summary(t: &TraceReplay) -> String {
+    let format = match t.key_format {
+        KvKeyFormat::Hex => "hex",
+        KvKeyFormat::Decimal => "decimal",
+    };
+    if t.key_prefix.is_empty() {
+        format!("trace_replay {}, {format} keys", t.trace.display())
+    } else {
+        format!(
+            "trace_replay {}, {format} keys after \"{}\"",
+            t.trace.display(),
+            t.key_prefix
+        )
+    }
+}
+
 pub use clean::CleanFormatter;
 pub use json::JsonFormatter;
 pub use quiet::QuietFormatter;
 pub use verbose::VerboseFormatter;
 
-use crate::config::{Config, KvReplay};
+use crate::config::{Config, KvKeyFormat, KvReplay, TraceReplay};
 use chrono::{DateTime, Utc};
 use std::fmt;
 use std::time::Duration;
@@ -205,6 +223,38 @@ pub struct Results {
     pub perceived_latency: LatencyStats,
     /// KV-cache replay totals; `None` unless `[workload.kv_replay]` is set.
     pub kv_replay: Option<KvReplayResults>,
+    /// Object trace replay totals; `None` unless `[workload.trace_replay]`
+    /// is set.
+    pub trace_replay: Option<TraceReplayResults>,
+}
+
+/// Object trace replay results (`[workload.trace_replay]`). Row counts are for
+/// the recording phase, except `rows_skipped`, which counts every skipped row
+/// the reader has reached, including rows read ahead of the replay. Rows in
+/// flight when the run stops are in no count.
+#[derive(Debug, Clone)]
+pub struct TraceReplayResults {
+    pub trace: String,
+    /// Rows in the trace file.
+    pub trace_rows: u64,
+    /// Rows answered.
+    pub rows: u64,
+    /// Rows in flight on a connection that failed (not retried), or that the
+    /// send pool refused outright three times.
+    pub rows_failed: u64,
+    /// Rows not sent: an unknown op, or a SET larger than the value pool.
+    pub rows_skipped: u64,
+    /// Rows answered, by the command they were sent as.
+    pub gets: u64,
+    pub sets: u64,
+    pub dels: u64,
+    /// Times a connection had room to send and the reader had no row ready.
+    pub read_waits: u64,
+    /// Every row of the trace was answered or counted failed. False after a
+    /// read error, which stops the replay early.
+    pub finished: bool,
+    /// The reader read the whole file and every row was skipped.
+    pub all_skipped: bool,
 }
 
 /// KV-cache replay results for the recording phase (`[workload.kv_replay]`).
@@ -378,6 +428,7 @@ mod overload_tests {
             schedule_slip: Default::default(),
             perceived_latency: Default::default(),
             kv_replay: None,
+            trace_replay: None,
         }
     }
 

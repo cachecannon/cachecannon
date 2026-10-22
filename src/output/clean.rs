@@ -117,6 +117,9 @@ impl CleanFormatter {
 
 /// The config summary's workload line, after its label.
 fn workload_line(config: &Config) -> String {
+    if let Some(ref t) = config.workload.trace_replay {
+        return super::trace_workload_summary(t);
+    }
     match config.workload.kv_replay {
         Some(ref kv) => super::kv_workload_summary(kv),
         None => format!(
@@ -455,6 +458,39 @@ impl OutputFormatter for CleanFormatter {
                     results.requests_dropped,
                     results.offered(),
                     results.overload_pct()
+                );
+            }
+        }
+
+        if let Some(ref t) = results.trace_replay {
+            println!();
+            println!("{}", self.cyan(&format!("Trace Replay ({})", t.trace)));
+            let mut extra = String::new();
+            if t.rows_failed > 0 {
+                extra += &self.red(&format!(", {} failed", format_count(t.rows_failed)));
+            }
+            if t.rows_skipped > 0 {
+                extra += &format!(", {} skipped", format_count(t.rows_skipped));
+            }
+            let finished = if t.finished { ", trace finished" } else { "" };
+            println!(
+                "{}         {} of {} trace rows{extra}{finished}",
+                self.cyan("rows"),
+                format_count(t.rows),
+                format_count(t.trace_rows)
+            );
+            println!(
+                "{}          {} GET, {} SET, {} DEL",
+                self.cyan("ops"),
+                format_count(t.gets),
+                format_count(t.sets),
+                format_count(t.dels)
+            );
+            if t.read_waits > 0 {
+                println!(
+                    "{}       {} waits for the trace reader",
+                    self.cyan("reader"),
+                    format_count(t.read_waits)
                 );
             }
         }

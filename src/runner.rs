@@ -5,6 +5,7 @@ use crate::limiters::WorkerLimiters;
 use crate::metrics;
 use crate::output::{PrefillDiagnostics, PrefillSample, PrefillStallCause};
 use crate::saturation::SaturationSearchState;
+use crate::tracereplay::{TraceBaseline, TraceReplay};
 use crate::worker::{BenchWorkerConfig, Phase, init_config_channel};
 use crate::{
     AdminServer, LatencyStats, OutputFormatter, Results, Sample, SharedState, create_formatter,
@@ -96,6 +97,12 @@ pub fn run_benchmark_full(
     // the trace is found by the reader thread (see `wait_read_ahead`).
     let kv_replay = match config.workload.kv_replay {
         Some(ref kv) => Some(Arc::new(KvReplay::load(kv)?)),
+        None => None,
+    };
+    // Object trace replay: check the trace's columns and read its largest
+    // object size from the footer before anything starts.
+    let trace_replay = match config.workload.trace_replay {
+        Some(ref t) => Some(Arc::new(TraceReplay::load(t)?)),
         None => None,
     };
 
@@ -271,6 +278,7 @@ pub fn run_benchmark_full(
                 value_pool: Arc::clone(&value_pool),
                 slot_table: slot_table.clone(),
                 kv_replay: kv_replay.clone(),
+                trace_replay: trace_replay.clone(),
             })
             .expect("failed to queue worker config");
     }
@@ -291,11 +299,13 @@ pub fn run_benchmark_full(
 
     let total_conns = config.connection.total_connections();
     let standalone_task_capacity = standalone_task_capacity(total_conns, num_threads);
-    let main_load = match kv_replay {
-        Some(ref kv) => SendLoad::kv_replay(&config, kv),
-        None => SendLoad::main(&config),
+    let main_loads = match (&kv_replay, &trace_replay) {
+        (Some(kv), _) => vec![SendLoad::kv_replay(&config, kv)],
+        (None, Some(t)) => SendLoad::trace_replay(&config, t),
+        (None, None) => vec![SendLoad::main(&config)],
     };
-    let send_loads: Vec<SendLoad> = std::iter::once(main_load)
+    let send_loads: Vec<SendLoad> = main_loads
+        .into_iter()
         .chain(SendLoad::append(&config))
         .collect();
     let send_slab_slots = send_slab_slots(&send_loads, num_threads);
@@ -407,6 +417,7 @@ pub fn run_benchmark_full(
     let mut baseline_requests_send_failed = 0u64;
     let mut baseline_routed_queue_dropped = 0u64;
     let mut kv_baseline: Option<KvBaseline> = None;
+    let mut trace_baseline: Option<TraceBaseline> = None;
     let mut current_phase = Phase::Precheck;
 
     let mut actual_duration = duration;
@@ -493,6 +504,17 @@ pub fn run_benchmark_full(
                         continue;
                     }
                 }
+                if let Some(ref t) = trace_replay {
+                    t.wait_read_ahead(&running);
+                    if t.trace_error().is_some() {
+                        shared.set_phase(Phase::Stop);
+                        actual_duration = Duration::ZERO;
+                        break;
+                    }
+                    if !running.load(Ordering::SeqCst) {
+                        continue;
+                    }
+                }
                 if prefill_enabled {
                     if let Some(ref pacer) = prefill_ratelimiter {
                         pacer.restart();
@@ -511,6 +533,11 @@ pub fn run_benchmark_full(
                         && !warmup.is_zero()
                     {
                         kv.start_at(Instant::now());
+                    }
+                    if let Some(ref t) = trace_replay
+                        && !warmup.is_zero()
+                    {
+                        t.start();
                     }
                     if let Some(ref rl) = ratelimiter {
                         rl.restart();
@@ -693,7 +720,8 @@ pub fn run_benchmark_full(
         let has_saturation = config.workload.saturation_search.is_some();
         let time_done = elapsed >= warmup + duration;
         // A KV replay also ends when every trace request has finished.
-        let kv_done = kv_replay.as_ref().is_some_and(|kv| kv.is_finished());
+        let kv_done = kv_replay.as_ref().is_some_and(|kv| kv.is_finished())
+            || trace_replay.as_ref().is_some_and(|t| t.is_finished());
         if kv_done && running_start.is_none() {
             actual_duration = Duration::ZERO;
         }
@@ -712,6 +740,9 @@ pub fn run_benchmark_full(
             // later could exclude a request its row marks as recorded.
             if kv_replay.is_some() {
                 kv_baseline = Some(KvBaseline::take());
+            }
+            if trace_replay.is_some() {
+                trace_baseline = Some(TraceBaseline::take());
             }
             shared.set_phase(Phase::Running);
             current_phase = Phase::Running;
@@ -754,6 +785,9 @@ pub fn run_benchmark_full(
             // every 100 ms.
             if let Some(ref kv) = kv_replay {
                 kv.start_at(Instant::now());
+            }
+            if let Some(ref t) = trace_replay {
+                t.start();
             }
 
             last_responses = baseline_responses;
@@ -1066,6 +1100,9 @@ pub fn run_benchmark_full(
         kv_replay: kv_replay
             .as_ref()
             .map(|kv| kv.results(&kv_baseline.unwrap_or_else(KvBaseline::take))),
+        trace_replay: trace_replay
+            .as_ref()
+            .map(|t| t.results(&trace_baseline.take().unwrap_or_else(TraceBaseline::take))),
     };
     if let Some(ref kv) = kv_replay {
         kv.flush_log();
@@ -1099,6 +1136,36 @@ pub fn run_benchmark_full(
             "kv_replay: the trace finished before recording started, so nothing was \
              recorded; lower general.warmup"
                 .into(),
+        );
+    }
+    if let Some(e) = trace_replay.as_ref().and_then(|t| t.trace_error()) {
+        return Err(e.into());
+    }
+    if results.trace_replay.as_ref().is_some_and(|r| r.all_skipped) {
+        return Err(
+            "trace_replay: every row of the trace was skipped (an op code of 15 or more, or a \
+             SET larger than the value pool)"
+                .into(),
+        );
+    }
+    let nothing_recorded = results
+        .trace_replay
+        .as_ref()
+        .is_some_and(|r| r.rows + r.rows_failed == 0)
+        && trace_replay.as_ref().is_some_and(|t| t.is_finished());
+    if nothing_recorded {
+        return Err(
+            "trace_replay: the trace finished before recording started, so nothing was \
+             recorded; lower general.warmup"
+                .into(),
+        );
+    }
+    let trace_waits = metrics::TRACE_READ_WAITS.value();
+    if trace_replay.is_some() && trace_waits > 0 {
+        tracing::warn!(
+            read_waits = trace_waits,
+            "trace replay: connections had room to send while the trace reader was behind, \
+             which lowered the achieved rate"
         );
     }
     let read_waits = metrics::KV_TRACE_READ_WAITS.value();
@@ -1476,7 +1543,7 @@ pub(crate) fn resolved_recv_geometry(config: &Config) -> (u16, u32) {
 
 /// ringline's default send-pool slot size, kept so a slot still holds one
 /// 16 KiB TLS record.
-const RINGLINE_SEND_SLOT_SIZE: u32 = 16448;
+pub(crate) const RINGLINE_SEND_SLOT_SIZE: u32 = 16448;
 /// Plaintext bytes in one TLS record, which takes one send-pool slot.
 const TLS_RECORD_PLAINTEXT: usize = 16384;
 /// ringline's defaults for the send copy pool and the zero-copy send slab, per
@@ -1484,7 +1551,7 @@ const TLS_RECORD_PLAINTEXT: usize = 16384;
 const RINGLINE_SEND_POOL_DEFAULT: usize = 1024;
 const RINGLINE_SEND_SLAB_DEFAULT: usize = 512;
 /// RESP and memcache framing around one request's key and value, rounded up.
-const REQUEST_FRAMING: usize = 64;
+pub(crate) const REQUEST_FRAMING: usize = 64;
 /// Guarded (zero-copy) values one send can carry: `MAX_FLUSH_GUARDS` in
 /// ringline-redis and ringline-memcache. A batch with more is sent as several
 /// sends.
@@ -1532,6 +1599,32 @@ impl SendLoad {
             value_len: kv.max_object_size(),
             lookup_bytes: kv.max_objects().saturating_mul(key_len + REQUEST_FRAMING),
             ..Self::main(config)
+        }
+    }
+
+    /// Trace replay connections. A trace's values range in size, so some are
+    /// copied (below `ZC_VALUE_THRESHOLD`) and some zero-copy: sized as both,
+    /// each with every connection, which over-provisions rather than letting
+    /// a mix of the two run out.
+    fn trace_replay(config: &Config, t: &TraceReplay) -> Vec<Self> {
+        let key_len = t.max_key_len();
+        let max = t.max_value_len();
+        let zc = crate::worker::ZC_VALUE_THRESHOLD;
+        let copied = Self {
+            key_len,
+            value_len: max.min(zc - 1),
+            ..Self::main(config)
+        };
+        if max < zc {
+            vec![copied]
+        } else {
+            vec![
+                copied,
+                Self {
+                    value_len: max,
+                    ..copied
+                },
+            ]
         }
     }
 

@@ -530,6 +530,7 @@ dependencies = [
  "arrow",
  "axum",
  "bytes",
+ "cachetrace",
  "chrono",
  "clap",
  "crc-fast",
@@ -577,6 +578,16 @@ dependencies = [
  "tracing-appender",
  "tracing-subscriber",
  "webpki-roots",
+]
+
+[[package]]
+name = "cachetrace"
+version = "0.1.0"
+source = "git+https://github.com/pelikan-io/cachesim?rev=6789f4cdb8f7a0d5fdb4af0c2649fa591b44555a#6789f4cdb8f7a0d5fdb4af0c2649fa591b44555a"
+dependencies = [
+ "arrow",
+ "parquet",
+ "thiserror",
 ]
 
 [[package]]

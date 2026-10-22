@@ -1,9 +1,10 @@
 # Cache trace replay
 
 - **Opened:** 2026-09-10
-- **Status:** OPEN — scoping, pre-build. No code yet. Records what replay would
-  have to do, what it deliberately would not, and the cheaper artifact that may
-  make it unnecessary.
+- **Status:** OPEN — key-sequence replay built 2026-10-22 as
+  `[workload.trace_replay]` on cachesim's `cachetrace` Parquet format, not the
+  container proposed below; see "2026-10-22: built on cachetrace". Not yet run
+  against a real server, on io_uring, or at scale.
 - **PRs:** none yet
 
 ## Problem
@@ -227,3 +228,75 @@ which is why this entry is open and no code exists.
   search reports whole-run percentiles that mix compliant and deliberately
   over-limit traffic, so its summary block is not a measurement of anything the
   server does in production. Quote the compliant step, or run a fixed rate.
+
+## 2026-10-22: built on cachetrace
+
+What was built (`src/tracereplay.rs`, `[workload.trace_replay]`), and where it
+departs from the scope above.
+
+**Why now.** The decision criteria above are about sizing a cache by hit rate,
+and they still hold for that question. The question that prompted the build is
+different: whether a storage tier under the server degrades as its free space
+fragments. That depends on the order and sizes of SETs and DELs (fill,
+delete a subset, refill, read back), which no synthetic distribution here can
+express, and which an MRC says nothing about.
+
+**Container: cachesim's Parquet, not an extracted rez/dendro crate.** The
+object-level format in pelikan-io/cachesim (`cachetrace`: `timestamp`,
+`obj_id`, `obj_size`, `next_access_vtime`, optional `op` and `ttl`, the
+libCacheSim oracleGeneral fields) already has a reader, a writer, converters
+from libCacheSim binaries and the pelikan-io/cache-trace CSVs, and
+`cachesim kv expand` for KV-cache traces. cachecannon already pins cachesim for
+`kvtrace`, so this is one more dependency line at the same commit. What this
+gives up is the capture path argued for above (a container to stream to from
+production); nothing here needs it yet. The two prerequisites in "Container"
+are not done and are not needed for this build.
+
+**Scope, against the list above.**
+- Key-sequence replay (mode 1) only, at `workload.rate_limit` rows per second
+  or closed loop. Timestamps are not used; timing-faithful and scaled replay
+  remain out of scope.
+- Variable value sizes: done. Each SET sends `obj_size` bytes sliced from the
+  1 GiB value pool; a SET larger than the pool is skipped and counted.
+- Integer identity rendered at replay time: done (`key_prefix`, `key_format`
+  hex or decimal).
+- Operations: reads send GET, DELETE sends DEL, every write sends SET of
+  `obj_size`. Read-modify-writes (APPEND, PREPEND, INCR, DECR) are sent as a
+  SET of the row's size, which is not what the source server did.
+- Sharding (`--shard k/N`): not done. A single endpoint is required.
+- Warmup by trace prefix: the general warmup applies, and the rows sent during
+  it are unrecorded; there is no separate prefix option.
+- Converters: cachesim's, out of tree as the scope wanted.
+
+**Ordering decision.** Rows go to whichever connection has room for them. The
+alternative, routing each `obj_id` to a fixed connection, keeps one key's
+operations in order but caps a hot key at one connection's throughput, which
+cannot reproduce a hot key that many clients hit at once. Rows in flight on
+one worker's connections, and rows claimed by different workers, can then
+reach the server out of file order, with no bound on
+how far apart in the file they are when a worker stalls. Same-key overlaps
+are not counted. A first version counted them on one connection only, where
+RESP applies them in order anyway, so the count measured nothing that could
+reorder; it was removed. A per-key ordering mode (writes wait for earlier
+operations on their key, reads stay concurrent) is not built; it needs a
+shared in-flight table whose cost has not been measured.
+
+**Tests.** `tests/trace_replay.rs` runs against a fake server that answers as
+the large-object module would: rows in file order as `BLOB.TCP_SET` with each
+row's size (copied and zero-copy), `BLOB.TCP_GET`, a backfilled miss and `DEL`,
+with an unknown op skipped; 200 GETs of one key in flight on at least two of
+four connections at once; `rate_limit = 200` spreading 100 rows over
+390 ms where unpaced they arrived within 7 ms; with the server closing a
+connection on every 300th command (2 threads, 4 connections, depth 16),
+answered plus failed rows equal the 3,000 in the file and the run ends on its
+own; and a trace of only skipped rows fails the run. Unit tests cover the
+footer type checks (pyarrow's signed integer defaults are refused), the
+send-retry limit and which failures count toward it, and a failed worker's
+claimed rows going to the next worker that asks. That last path is covered
+only by the unit test: in the connection-drop test every worker keeps a live
+connection or reconnects, so the run passes with the hand-off removed.
+Mutations seen red: DELETE sent as GET, backfill removed, the rate limiter
+ignored, rows sent before the replay is started (a zero-warmup run then
+finished the trace before recording began, the bug that gate fixes), and a
+failed connection's in-flight rows not counted (the run then waits for
+`duration`).

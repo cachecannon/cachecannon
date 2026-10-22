@@ -12,6 +12,7 @@ use crate::kvreplay::KvReplay;
 use crate::limiters::{PrefillPacer, WorkerLimiter};
 use crate::metrics;
 use crate::read_values::ValueReader;
+use crate::tracereplay::TraceReplay;
 use ratelimit::{Ratelimiter, TryWaitError};
 
 use ringline::{AsyncEventHandler, ConnCtx, Connection, DriverCtx, RegionId, SendGuard};
@@ -260,6 +261,9 @@ pub struct BenchWorkerConfig {
     /// The KV-cache trace and its replay state, shared by every worker; `None`
     /// unless `[workload.kv_replay]` is set.
     pub kv_replay: Option<Arc<KvReplay>>,
+    /// The object trace and its replay state, shared by every worker; `None`
+    /// unless `[workload.trace_replay]` is set.
+    pub trace_replay: Option<Arc<TraceReplay>>,
 }
 
 // ── Config channel ────────────────────────────────────────────────────────
@@ -345,7 +349,7 @@ pub(crate) const ZC_VALUE_THRESHOLD: usize = 4096;
 /// fails on backpressure, so this is rarely taken and costs ~0.6 us of user CPU
 /// per request. Also the safety bound on a dispatcher wait, so a connection can
 /// never hang if the dispatcher task dies.
-const IDLE_SLEEP_MIN: Duration = Duration::from_micros(100);
+pub(crate) const IDLE_SLEEP_MIN: Duration = Duration::from_micros(100);
 
 /// Upper bound on a single dispatcher wait, and on how long the dispatcher
 /// itself sleeps when no connection wants a token.
@@ -425,7 +429,7 @@ impl TokenDispatcher {
     /// phase at least every `IDLE_SLEEP_MAX` and `drain`s every waiter when the
     /// run stops, and the release profile is `panic = "abort"`, so a dispatcher
     /// that failed would take the process with it rather than strand anyone.
-    async fn acquire(self: &Rc<Self>, want: u64) -> u64 {
+    pub(crate) async fn acquire(self: &Rc<Self>, want: u64) -> u64 {
         if self.closed.get() {
             return 0;
         }
@@ -996,6 +1000,8 @@ pub(crate) struct TaskSharedState {
     pub(crate) key_dist: Arc<KeyDist>,
     /// See `BenchWorkerConfig::kv_replay`.
     kv_replay: Option<Arc<KvReplay>>,
+    /// See `BenchWorkerConfig::trace_replay`.
+    trace_replay: Option<Arc<TraceReplay>>,
 }
 
 /// State shared between the BenchHandler (on_tick) and connection tasks.
@@ -1281,6 +1287,7 @@ impl AsyncEventHandler for BenchHandler {
             tls_enabled,
             tls_server_name,
             kv_replay: cfg.kv_replay.clone(),
+            trace_replay: cfg.trace_replay.clone(),
         });
 
         // Workers with no connections immediately pass precheck
@@ -1801,8 +1808,21 @@ async fn resp_connection_task(state: Arc<SharedWorkerState>, endpoint_idx: usize
             }
         }
 
-        let result = match state.task_state.kv_replay {
-            Some(ref kv) => {
+        let result = match (&state.task_state.kv_replay, &state.task_state.trace_replay) {
+            (_, Some(trace)) => {
+                let ctx = crate::tracereplay::TraceConn {
+                    trace,
+                    shared: &state.task_state.shared,
+                    ratelimiter: state.task_state.ratelimiter.as_ref(),
+                    value_pool: &state.task_state.value_pool,
+                    pipeline_depth: config.connection.pipeline_depth,
+                    batch_size: config.effective_batch_size(),
+                    request_timeout: config.connection.request_timeout,
+                    backfill_on_miss: state.task_state.backfill_on_miss,
+                };
+                crate::tracereplay::drive(&mut client, conn, &ctx, &mut rng).await
+            }
+            (Some(kv), None) => {
                 let ctx = crate::kvreplay::KvConn {
                     kv,
                     shared: &state.task_state.shared,
@@ -1812,7 +1832,7 @@ async fn resp_connection_task(state: Arc<SharedWorkerState>, endpoint_idx: usize
                 };
                 crate::kvreplay::drive(&mut client, conn, &ctx, &mut rng).await
             }
-            None => {
+            (None, None) => {
                 drive_resp_workload(
                     &mut client,
                     conn,
@@ -5419,6 +5439,7 @@ mod tests {
             tls_enabled: false,
             tls_server_name: None,
             kv_replay: None,
+            trace_replay: None,
         });
 
         Arc::new(SharedWorkerState {

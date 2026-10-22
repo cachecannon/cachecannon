@@ -384,6 +384,26 @@ pub struct Workload {
     /// of the synthetic keyspace. See `crate::kvreplay`.
     #[serde(default)]
     pub kv_replay: Option<KvReplay>,
+    /// Object-level trace replay: send a cachesim object trace's rows in
+    /// file order instead of the synthetic keyspace. See
+    /// `crate::tracereplay`.
+    #[serde(default)]
+    pub trace_replay: Option<TraceReplay>,
+}
+
+/// `[workload.trace_replay]`: replay a cachesim object-level trace
+/// (`cachetrace` Parquet) against a RESP server, one GET, SET or DEL per row,
+/// in file order, at `workload.rate_limit` rows per second or closed loop.
+#[derive(Debug, Clone, Deserialize)]
+pub struct TraceReplay {
+    /// cachetrace object trace (Parquet).
+    pub trace: PathBuf,
+    /// Prepended to every object key. Default empty.
+    #[serde(default)]
+    pub key_prefix: String,
+    /// How the object id is written after the prefix. Default `"hex"`.
+    #[serde(default)]
+    pub key_format: KvKeyFormat,
 }
 
 /// `[workload.kv_replay]`: replay a kvtrace request trace against the server
@@ -1365,6 +1385,9 @@ impl Config {
         if let Some(ref kv) = self.workload.kv_replay {
             self.validate_kv_replay(kv)?;
         }
+        if self.workload.trace_replay.is_some() {
+            self.validate_trace_replay()?;
+        }
 
         if let Some(ref sat) = self.workload.saturation_search {
             if sat.start_rate == 0 {
@@ -1444,6 +1467,9 @@ impl Config {
         if self.workload.kv_replay.is_some() {
             return bad("does not apply to [workload.kv_replay], which sets its own requests");
         }
+        if self.workload.trace_replay.is_some() {
+            return bad("does not apply to [workload.trace_replay], which sets its own requests");
+        }
         if self.connection.endpoint_allocation == EndpointAllocation::KeyShare {
             return bad(
                 "cannot be combined with connection.endpoint_allocation = \"key_share\"; \
@@ -1518,6 +1544,46 @@ impl Config {
             (w.backfill_on_miss, "backfill_on_miss"),
             (w.read_values, "read_values"),
             (w.append.is_some(), "[workload.append]"),
+        ] {
+            if set {
+                return bad(&format!("cannot be combined with {key}"));
+            }
+        }
+        Ok(())
+    }
+
+    /// `[workload.trace_replay]` checks that need no file access. The trace's
+    /// columns and footer are read when the run starts
+    /// (`crate::tracereplay::TraceReplay::load`).
+    fn validate_trace_replay(&self) -> Result<(), ConfigError> {
+        let bad = |msg: &str| {
+            Err(ConfigError::Validation(format!(
+                "workload.trace_replay: {msg}"
+            )))
+        };
+        if !matches!(self.target.protocol, Protocol::Resp | Protocol::Resp3) {
+            return bad("needs protocol resp or resp3");
+        }
+        // Rows are not routed by key: every connection sends whatever row is
+        // next, so every key must live on the one server.
+        if self.target.cluster || self.target.endpoints.len() > 1 {
+            return bad(
+                "needs a single endpoint; cluster and multi-endpoint routing are not supported",
+            );
+        }
+        // The trace sets the keys, values and operations, so the options that
+        // generate synthetic requests or a second request stream do not apply.
+        // `rate_limit` and `backfill_on_miss` do.
+        let w = &self.workload;
+        for (set, key) in [
+            (
+                w.saturation_search.is_some(),
+                "[workload.saturation_search]",
+            ),
+            (w.prefill, "prefill"),
+            (w.read_values, "read_values"),
+            (w.append.is_some(), "[workload.append]"),
+            (w.kv_replay.is_some(), "[workload.kv_replay]"),
         ] {
             if set {
                 return bad(&format!("cannot be combined with {key}"));
@@ -1648,6 +1714,74 @@ mod validation_tests {
             "[target]\nendpoints = [\"127.0.0.1:6379\"]\n{extra}\n\
              [workload.kv_replay]\ntrace = \"t.parquet\"\n{kv}\n"
         ))
+    }
+
+    /// A config with `[workload.trace_replay]` and `extra` before it.
+    fn trace_config(extra: &str) -> Result<Config, ConfigError> {
+        parse_config(&format!(
+            "[target]\nendpoints = [\"127.0.0.1:6379\"]\n{extra}\n\
+             [workload.trace_replay]\ntrace = \"t.parquet\"\n"
+        ))
+    }
+
+    #[test]
+    fn trace_replay_defaults_and_allowed_options() {
+        let config = trace_config("").unwrap();
+        let t = config.workload.trace_replay.unwrap();
+        assert_eq!(t.key_prefix, "");
+        assert_eq!(t.key_format, KvKeyFormat::Hex);
+        // The pace, demand fill and the module's commands apply to a replay.
+        trace_config(
+            "[workload]\nrate_limit = 100\nbackfill_on_miss = true\n[resp]\nmodule = \"largeobj\"",
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn trace_replay_refuses_other_shapes_and_synthetic_options() {
+        let refused = |toml: &str, want: &str| {
+            let err = parse_config(toml).unwrap_err().to_string();
+            assert!(err.contains(want), "{want}: {err}");
+        };
+        let replay = "[workload.trace_replay]\ntrace = \"t\"\n";
+        refused(
+            &format!(
+                "[target]\nendpoints = [\"127.0.0.1:6379\"]\nprotocol = \"memcache\"\n{replay}"
+            ),
+            "needs protocol resp or resp3",
+        );
+        refused(
+            &format!("[target]\nendpoints = [\"127.0.0.1:6379\", \"127.0.0.1:6380\"]\n{replay}"),
+            "needs a single endpoint",
+        );
+        for (workload, key) in [
+            ("prefill = true", "prefill"),
+            ("read_values = true", "read_values"),
+            (
+                "[workload.saturation_search]\nstart_rate = 1000\n[workload.saturation_search.slo]\np99 = \"1ms\"",
+                "[workload.saturation_search]",
+            ),
+            (
+                "[workload.kv_replay]\ntrace = \"k\"\nkv_bytes_per_token = 4",
+                "[workload.kv_replay]",
+            ),
+        ] {
+            let toml = format!(
+                "[target]\nendpoints = [\"127.0.0.1:6379\"]\n[workload]\n{workload}\n{replay}"
+            );
+            let err = parse_config(&toml).unwrap_err().to_string();
+            assert!(
+                err.contains(&format!("cannot be combined with {key}")),
+                "{key}: {err}"
+            );
+        }
+        refused(
+            &format!(
+                "[target]\nendpoints = [\"127.0.0.1:6379\"]\n[workload]\nrate_limit = 100\n\
+                 routing = \"routed\"\n{replay}"
+            ),
+            "does not apply to [workload.trace_replay]",
+        );
     }
 
     #[test]

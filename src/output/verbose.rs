@@ -32,7 +32,9 @@ impl OutputFormatter for VerboseFormatter {
             config.connection.total_connections()
         );
         tracing::info!("pipeline_depth: {}", config.connection.pipeline_depth);
-        if let Some(ref kv) = config.workload.kv_replay {
+        if let Some(ref t) = config.workload.trace_replay {
+            tracing::info!("workload: {}", super::trace_workload_summary(t));
+        } else if let Some(ref kv) = config.workload.kv_replay {
             tracing::info!("workload: {}", super::kv_workload_summary(kv));
         } else {
             tracing::info!(
@@ -48,8 +50,8 @@ impl OutputFormatter for VerboseFormatter {
         // is derived rather than configured by default, and because it is the
         // first thing to check when reported latency outruns the target's own.
         let (ring_size, buffer_size) = crate::runner::resolved_recv_geometry(config);
-        if config.workload.kv_replay.is_some() {
-            // Object sizes come from the trace's geometry, read after this.
+        if config.workload.kv_replay.is_some() || config.workload.trace_replay.is_some() {
+            // Object sizes come from the trace, read after this.
             tracing::info!(
                 "recv_buffer: {} x {} bytes per worker",
                 ring_size,
@@ -183,6 +185,22 @@ impl OutputFormatter for VerboseFormatter {
                     results.overload_pct()
                 );
             }
+        }
+        if let Some(ref t) = results.trace_replay {
+            tracing::info!(
+                "trace_replay: {} rows={}/{} failed={} skipped={} gets={} sets={} dels={} \
+                 read_waits={} finished={}",
+                t.trace,
+                t.rows,
+                t.trace_rows,
+                t.rows_failed,
+                t.rows_skipped,
+                t.gets,
+                t.sets,
+                t.dels,
+                t.read_waits,
+                t.finished
+            );
         }
         if let Some(ref kv) = results.kv_replay {
             tracing::info!(
