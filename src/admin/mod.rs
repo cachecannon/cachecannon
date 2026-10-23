@@ -968,7 +968,7 @@ mod tests {
         let parquet = dir.join("run.parquet");
 
         let mut writer = BufWriter::new(std::fs::File::create(&staged).unwrap());
-        for _ in 0..3 {
+        for _ in 0..6 {
             // A quantile reads the change between rows, so each row adds one.
             let _ = crate::metrics::RESPONSE_LATENCY.increment(12_345);
             append_snapshot(&mut writer, &create_snapshot()).unwrap();
@@ -978,7 +978,7 @@ mod tests {
         let rows = parquet_converter(Duration::from_millis(5))
             .convert_file_path(&staged, &parquet)
             .unwrap();
-        assert_eq!(rows, 3);
+        assert_eq!(rows, 6);
 
         let reader = metriken_query::ParquetReader::open(&parquet).unwrap();
         assert_eq!(reader.source(), "cachecannon");
@@ -1006,6 +1006,27 @@ mod tests {
         assert!(
             result.iter().any(|s| !s.values.is_empty()),
             "no response_latency quantile read back"
+        );
+
+        // The viewer passes a stride to `histogram_percentiles` as the third
+        // argument, which metriken-query must read as a window that merges
+        // snapshots. A stride longer than the recording merges all of them.
+        // This does not pin the unit: a stride read as milliseconds would
+        // also merge this recording of about 25 ms into one point.
+        let points = |query: &str| {
+            let QueryResult::Matrix { result } =
+                reader.query_range(query, start, end, 0.001).unwrap()
+            else {
+                panic!("not a matrix");
+            };
+            result.first().map_or(0, |s| s.values.len())
+        };
+        let per_snapshot = points("histogram_percentiles([0.5], response_latency)");
+        let strided = points("histogram_percentiles([0.5], response_latency, 3600)");
+        assert_eq!(per_snapshot, 5, "one point per change between rows");
+        assert_eq!(
+            strided, 1,
+            "a 3600 s stride over a recording of about 25 ms"
         );
 
         let _ = std::fs::remove_dir_all(&dir);

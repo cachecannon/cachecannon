@@ -3,6 +3,21 @@ import { ChartsState, Chart } from './charts/chart.js';
 // Global charts state for zoom synchronization
 let chartsState = new ChartsState();
 
+// Points per chart. Queries cover the whole recording, so the step grows with
+// its duration; a recording shorter than this many snapshot intervals is
+// charted at one point per snapshot. A longer recording gets about 3000 to
+// 6000 latency points per quantile, fewer where snapshots recorded no
+// latency: the server rounds the step to whole snapshots and adds no stride
+// below 1.5 intervals (`with_histogram_stride` in api.rs).
+const CHART_POINTS = 4000;
+
+// The range_query parameters for the whole recording, from /api/v1/metadata.
+const fullRange = ({ minTime, maxTime, interval }) => ({
+    start: minTime,
+    end: maxTime,
+    step: Math.max(interval || 1, (maxTime - minTime) / CHART_POINTS),
+});
+
 // Top navigation bar component
 const TopNav = {
     view() {
@@ -156,15 +171,9 @@ const QueryExplorer = {
                     throw new Error('Failed to get metadata');
                 }
 
-                const minTime = metadataResponse.data.minTime;
-                const maxTime = metadataResponse.data.maxTime;
-                const duration = maxTime - minTime;
+                const { start, end, step } = fullRange(metadataResponse.data);
 
-                const windowDuration = Math.min(3600, duration);
-                const start = Math.max(minTime, maxTime - windowDuration);
-                const step = Math.max(1, Math.floor(windowDuration / 100));
-
-                const url = `/api/v1/query_range?query=${encodeURIComponent(vnode.state.query)}&start=${start}&end=${maxTime}&step=${step}`;
+                const url = `/api/v1/query_range?query=${encodeURIComponent(vnode.state.query)}&start=${start}&end=${end}&step=${step}`;
 
                 const response = await m.request({
                     method: 'GET',
@@ -667,15 +676,9 @@ const executePromQLRangeQuery = async (query) => {
         throw new Error('Failed to get metadata');
     }
 
-    const minTime = metadataResponse.data.minTime;
-    const maxTime = metadataResponse.data.maxTime;
-    const duration = maxTime - minTime;
+    const { start, end, step } = fullRange(metadataResponse.data);
 
-    const windowDuration = Math.min(3600, duration);
-    const start = Math.max(minTime, maxTime - windowDuration);
-    const step = Math.max(1, Math.floor(windowDuration / 100));
-
-    const url = `/api/v1/query_range?query=${encodeURIComponent(query)}&start=${start}&end=${maxTime}&step=${step}`;
+    const url = `/api/v1/query_range?query=${encodeURIComponent(query)}&start=${start}&end=${end}&step=${step}`;
 
     return m.request({
         method: 'GET',
