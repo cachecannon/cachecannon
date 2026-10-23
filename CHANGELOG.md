@@ -219,13 +219,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `cachecannon view` reads `.dendro`. metriken-query 0.36 has no HTTP layer,
   so the viewer serves `/api/v1/query`, `query_range`, `labels`,
   `label/{name}/values` and `metadata` itself, with 0.9's request parameters
-  and response bodies. Query results differ where the engine changed: points
-  are at the recording's own timestamps rather than rounded to a one-second
-  grid, `irate` divides by the measured spacing (2000 req/s reads 1997–2001
-  where 0.9 read 2003–2007), a range ends at the last sample rather than one
-  grid step past it, `/api/v1/metadata` gives the first and last sample times
-  exactly rather than in whole seconds, and matrix results carry `intervals`
-  and `bands`, which the frontend ignores. The dashboards' section JSON is
+  and response bodies. Two differ: `metadata` also returns `interval`, and a
+  range query that is a single `histogram_percentiles` or
+  `histogram_quantiles` call with a step of 1.5 snapshot intervals or more
+  gets a stride derived from the step and returns window-merged quantiles.
+  An explicit stride chooses the window (see Fixed). Query results differ
+  where the engine changed: points are at the recording's own timestamps
+  rather than rounded to a one-second grid, `irate` divides by the measured
+  spacing (2000 req/s reads 1997–2001 where 0.9 read 2003–2007), a range
+  ends at the last sample rather than one grid step past it,
+  `/api/v1/metadata` gives the first and last sample times exactly rather
+  than in whole seconds, and matrix results carry `intervals` and `bands`,
+  which the frontend ignores. The dashboards' section JSON is
   byte-identical.
 - Built against unreleased ringline main (ringline-rs/ringline `dfff2e5`:
   ringline 0.7.0-alpha.0, ringline-redis 0.7.0, ringline-memcache 0.7.2,
@@ -267,6 +272,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     a `query worker:` error.
 
 ### Fixed
+- `cachecannon view` charts the whole recording. The frontend queried only
+  the last hour (`Math.min(3600, duration)` in `script.js`), so a four-hour
+  run showed its final hour. Charts now span the recording with a step of
+  the duration divided by 4000, and never less than the snapshot interval,
+  which `/api/v1/metadata` now reports as `interval`. Rate charts get up to
+  4000 points, where they had 100.
+
+  metriken-query ignores `step` for `histogram_percentiles` and
+  `histogram_quantiles`, so the viewer passes those calls a stride of the
+  step rounded to whole snapshots, less half an interval. On a four-hour,
+  1 s-interval recording the five-quantile overview latency chart returns
+  14,067 points per quantile (5.5 MB in all) without the stride and 3,543
+  with it (1.4 MB). A recording shorter than 6000 intervals (100 minutes at
+  1 s) gets one latency point per snapshot. Each strided point is the
+  quantile of its window's merged histograms, so a latency excursion
+  confined to one snapshot is diluted by the others in the window: on that
+  recording a 9.0 s per-snapshot p99 reads 55 ms at p99 and 9.0 s at p99.9.
+  The overview's six queries return 3.4 MB, against 1.4 MB for the last
+  hour before. Zoom acts on the fetched points, so zooming far into a long
+  run shows step-spaced points.
 - `[workload.append] connections` is checked against the node count after
   cluster discovery. Validation counts the seed endpoints, so a cluster run
   with fewer writers than nodes passed it and then stalled: a node with no
