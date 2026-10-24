@@ -17,6 +17,7 @@ pub mod saturation;
 #[cfg(feature = "search")]
 pub mod search;
 pub mod sharded_counter;
+pub mod sharded_histogram;
 pub mod tracereplay;
 pub mod viewer;
 pub mod worker;
