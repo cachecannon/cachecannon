@@ -645,7 +645,7 @@ async fn run(
                 None => ctx.batch_size,
             };
             let slip_ns = ctx.ratelimiter.map_or(0, |rl| rl.slip_ns());
-            metrics::CURRENT_SLIP_NS.set(slip_ns as i64);
+            metrics::set_worker_slip_ns(slip_ns);
 
             while client.pending_count() < ctx.pipeline_depth && token_budget > 0 {
                 let next = match backfill.pop_front() {
@@ -753,7 +753,7 @@ async fn run(
         }
         metrics::REQUESTS_SENT.add(fired_count);
         if let Some(rl) = ctx.ratelimiter {
-            metrics::CURRENT_SLIP_NS.set(rl.slip_ns() as i64);
+            metrics::set_worker_slip_ns(rl.slip_ns());
         }
 
         if client.pending_count() == 0 {

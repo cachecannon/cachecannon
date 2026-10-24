@@ -813,7 +813,7 @@ async fn run_routed_dispatcher(
         }
 
         let slip_ns = rl.slip_ns();
-        metrics::CURRENT_SLIP_NS.set(slip_ns as i64);
+        metrics::set_worker_slip_ns(slip_ns);
         let funded_at = Instant::now();
         let mut nap = None;
         for _ in 0..ROUTED_MINT_BATCH {
@@ -864,8 +864,7 @@ fn record_routed_latency(result: &RequestResult, queued_ns: u64) {
         RequestType::Ping | RequestType::Other => Ok(()),
     };
     let _ = metrics::RESPONSE_LATENCY.increment(latency);
-    let _ = metrics::PERCEIVED_LATENCY
-        .increment(latency.saturating_add(metrics::CURRENT_SLIP_NS.value() as u64));
+    let _ = metrics::PERCEIVED_LATENCY.increment(latency.saturating_add(metrics::worker_slip_ns()));
 }
 
 /// For a routed connection with a reply pending, wait until a request is
@@ -1599,13 +1598,12 @@ pub(crate) fn resolve_tls_server_name(
 /// Arrival-relative latency for one response.
 ///
 /// With no rate limiter the schedule slip is identically zero, so skip the
-/// `CURRENT_SLIP_NS` read: the gauge lives on one cache line shared by every
-/// worker thread, and reading it per response is a cross-core miss whenever
-/// another thread has just written it.
+/// slip read entirely. With one, the slip comes from this worker's own
+/// thread-local (`metrics::worker_slip_ns`), never a line another thread writes.
 #[inline]
 fn perceived_ns(latency_ns: u64, slip_tracked: bool) -> u64 {
     if slip_tracked {
-        latency_ns.saturating_add(metrics::CURRENT_SLIP_NS.value() as u64)
+        latency_ns.saturating_add(metrics::worker_slip_ns())
     } else {
         latency_ns
     }
@@ -2125,7 +2123,7 @@ async fn drive_resp_workload(
             // and the result callback can compute perceived latency.
             let slip_ns = state.task_state.ratelimiter.as_ref().map(|rl| rl.slip_ns());
             if let Some(slip) = slip_ns {
-                crate::metrics::CURRENT_SLIP_NS.set(slip as i64);
+                crate::metrics::set_worker_slip_ns(slip);
             }
 
             while client.pending_count() < pipeline_depth && token_budget > 0 {
@@ -2285,7 +2283,7 @@ async fn drive_resp_workload(
         // is full and we did not fire) so perceived latency reflects a still-
         // growing backlog.
         if let Some(ref rl) = state.task_state.ratelimiter {
-            crate::metrics::CURRENT_SLIP_NS.set(rl.slip_ns() as i64);
+            crate::metrics::set_worker_slip_ns(rl.slip_ns());
         }
 
         // Nothing in flight. If the limiter just turned this connection away,
@@ -3133,7 +3131,7 @@ async fn drive_memcache_workload(
 
             let slip_ns = state.task_state.ratelimiter.as_ref().map(|rl| rl.slip_ns());
             if let Some(slip) = slip_ns {
-                crate::metrics::CURRENT_SLIP_NS.set(slip as i64);
+                crate::metrics::set_worker_slip_ns(slip);
             }
 
             while client.pending_count() < pipeline_depth && token_budget > 0 {
@@ -3244,7 +3242,7 @@ async fn drive_memcache_workload(
         metrics::REQUESTS_SENT.add(fired_count);
 
         if let Some(ref rl) = state.task_state.ratelimiter {
-            crate::metrics::CURRENT_SLIP_NS.set(rl.slip_ns() as i64);
+            crate::metrics::set_worker_slip_ns(rl.slip_ns());
         }
 
         // Nothing in flight. If the limiter just turned this connection away,
@@ -3611,7 +3609,7 @@ async fn drive_ping_workload(
 
         let slip_ns = state.task_state.ratelimiter.as_ref().map(|rl| rl.slip_ns());
         if let Some(slip) = slip_ns {
-            crate::metrics::CURRENT_SLIP_NS.set(slip as i64);
+            crate::metrics::set_worker_slip_ns(slip);
         }
 
         metrics::REQUESTS_SENT.increment();
