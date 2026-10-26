@@ -1233,9 +1233,26 @@ pub(crate) fn resolve_tls_server_name(
 
 // ── on_result callback factories ─────────────────────────────────────────
 
+/// Arrival-relative latency for one response.
+///
+/// With no rate limiter the schedule slip is identically zero, so skip the
+/// `CURRENT_SLIP_NS` read: the gauge lives on one cache line shared by every
+/// worker thread, and reading it per response is a cross-core miss whenever
+/// another thread has just written it.
+#[inline]
+fn perceived_ns(latency_ns: u64, slip_tracked: bool) -> u64 {
+    if slip_tracked {
+        latency_ns.saturating_add(metrics::CURRENT_SLIP_NS.value() as u64)
+    } else {
+        latency_ns
+    }
+}
+
 /// Create a RESP on_result callback that records latency and byte metrics.
+/// `slip_tracked` is whether a rate limiter exists, so perceived latency has
+/// a slip term to add.
 /// Counter metrics (RESPONSES_RECEIVED, GET_COUNT, etc.) are recorded by record_counters().
-fn make_resp_callback() -> impl Fn(&ringline_redis::CommandResult) {
+fn make_resp_callback(slip_tracked: bool) -> impl Fn(&ringline_redis::CommandResult) {
     move |r| {
         match r.command {
             ringline_redis::CommandType::Get => {
@@ -1253,8 +1270,7 @@ fn make_resp_callback() -> impl Fn(&ringline_redis::CommandResult) {
             _ => {}
         }
         let _ = metrics::RESPONSE_LATENCY.increment(r.latency_ns);
-        let _ = metrics::PERCEIVED_LATENCY
-            .increment(r.latency_ns + metrics::CURRENT_SLIP_NS.value() as u64);
+        let _ = metrics::PERCEIVED_LATENCY.increment(perceived_ns(r.latency_ns, slip_tracked));
         metrics::BYTES_TX.add(r.tx_bytes as u64);
         metrics::BYTES_RX.add(r.rx_bytes as u64);
     }
@@ -1262,7 +1278,7 @@ fn make_resp_callback() -> impl Fn(&ringline_redis::CommandResult) {
 
 /// Create a Memcache on_result callback that records latency and byte metrics.
 /// Counter metrics (RESPONSES_RECEIVED, GET_COUNT, etc.) are recorded by record_counters().
-fn make_memcache_callback() -> impl Fn(&ringline_memcache::CommandResult) {
+fn make_memcache_callback(slip_tracked: bool) -> impl Fn(&ringline_memcache::CommandResult) {
     move |r| {
         match r.command {
             ringline_memcache::CommandType::Get => {
@@ -1280,15 +1296,14 @@ fn make_memcache_callback() -> impl Fn(&ringline_memcache::CommandResult) {
             _ => {}
         }
         let _ = metrics::RESPONSE_LATENCY.increment(r.latency_ns);
-        let _ = metrics::PERCEIVED_LATENCY
-            .increment(r.latency_ns + metrics::CURRENT_SLIP_NS.value() as u64);
+        let _ = metrics::PERCEIVED_LATENCY.increment(perceived_ns(r.latency_ns, slip_tracked));
         metrics::BYTES_TX.add(r.tx_bytes as u64);
         metrics::BYTES_RX.add(r.rx_bytes as u64);
     }
 }
 
 /// Create a Ping on_result callback that records metrics for each completed ping.
-fn make_ping_callback() -> impl Fn(&ringline_ping::CommandResult) {
+fn make_ping_callback(slip_tracked: bool) -> impl Fn(&ringline_ping::CommandResult) {
     move |r| {
         metrics::RESPONSES_RECEIVED.increment();
         metrics::GET_COUNT.increment(); // Ping counts as GET for metrics
@@ -1297,8 +1312,7 @@ fn make_ping_callback() -> impl Fn(&ringline_ping::CommandResult) {
         }
         let _ = metrics::RESPONSE_LATENCY.increment(r.latency_ns);
         let _ = metrics::GET_LATENCY.increment(r.latency_ns);
-        let _ = metrics::PERCEIVED_LATENCY
-            .increment(r.latency_ns + metrics::CURRENT_SLIP_NS.value() as u64);
+        let _ = metrics::PERCEIVED_LATENCY.increment(perceived_ns(r.latency_ns, slip_tracked));
     }
 }
 
@@ -1336,7 +1350,8 @@ async fn resp_connection_task(state: Arc<SharedWorkerState>, endpoint_idx: usize
         let _close = CloseOnDrop(conn);
 
         metrics::CONNECTIONS_ACTIVE.increment();
-        let builder = ringline_redis::Client::builder(conn).on_result(make_resp_callback());
+        let builder = ringline_redis::Client::builder(conn)
+            .on_result(make_resp_callback(state.task_state.ratelimiter.is_some()));
         #[cfg(target_os = "linux")]
         let builder =
             builder.kernel_timestamps(matches!(config.timestamps.mode, TimestampMode::Software));
@@ -1563,11 +1578,10 @@ async fn drive_resp_workload(
             // Coordinated omission: publish the current schedule slip (rate
             // limiter backlog) so each sent request can be charged a sample
             // and the result callback can compute perceived latency.
-            let slip_ns = match state.task_state.ratelimiter {
-                Some(ref rl) => rl.slip_ns(),
-                None => 0,
-            };
-            crate::metrics::CURRENT_SLIP_NS.set(slip_ns as i64);
+            let slip_ns = state.task_state.ratelimiter.as_ref().map(|rl| rl.slip_ns());
+            if let Some(slip) = slip_ns {
+                crate::metrics::CURRENT_SLIP_NS.set(slip as i64);
+            }
 
             while client.pending_count() < pipeline_depth && token_budget > 0 {
                 // Drain backfill queue first
@@ -1594,7 +1608,9 @@ async fn drive_resp_workload(
                     match res {
                         Ok(_) => {
                             metrics::REQUESTS_SENT.increment();
-                            let _ = metrics::SCHEDULE_SLIP.increment(slip_ns);
+                            if let Some(slip) = slip_ns {
+                                let _ = metrics::SCHEDULE_SLIP.increment(slip);
+                            }
                             inflight.push(fired_at);
                         }
                         Err(_) => {
@@ -1681,7 +1697,9 @@ async fn drive_resp_workload(
 
                 if sent {
                     metrics::REQUESTS_SENT.increment();
-                    let _ = metrics::SCHEDULE_SLIP.increment(slip_ns);
+                    if let Some(slip) = slip_ns {
+                        let _ = metrics::SCHEDULE_SLIP.increment(slip);
+                    }
                     inflight.push(fired_at);
                 } else {
                     break;
@@ -2024,7 +2042,9 @@ async fn memcache_connection_task(state: Arc<SharedWorkerState>, endpoint_idx: u
 
         metrics::CONNECTIONS_ACTIVE.increment();
         let builder = ringline_memcache::Client::builder(conn)
-            .on_result(make_memcache_callback())
+            .on_result(make_memcache_callback(
+                state.task_state.ratelimiter.is_some(),
+            ))
             .max_batch_size(config.connection.effective_batch_size());
         #[cfg(target_os = "linux")]
         let builder =
@@ -2216,11 +2236,10 @@ async fn drive_memcache_workload(
                 None => batch_size,
             };
 
-            let slip_ns = match state.task_state.ratelimiter {
-                Some(ref rl) => rl.slip_ns(),
-                None => 0,
-            };
-            crate::metrics::CURRENT_SLIP_NS.set(slip_ns as i64);
+            let slip_ns = state.task_state.ratelimiter.as_ref().map(|rl| rl.slip_ns());
+            if let Some(slip) = slip_ns {
+                crate::metrics::CURRENT_SLIP_NS.set(slip as i64);
+            }
 
             while client.pending_count() < pipeline_depth && token_budget > 0 {
                 // Drain backfill queue first
@@ -2235,7 +2254,9 @@ async fn drive_memcache_workload(
                     match client.fire_set_with_guard(key_buf, guard, 0, 0, user_data) {
                         Ok(_) => {
                             metrics::REQUESTS_SENT.increment();
-                            let _ = metrics::SCHEDULE_SLIP.increment(slip_ns);
+                            if let Some(slip) = slip_ns {
+                                let _ = metrics::SCHEDULE_SLIP.increment(slip);
+                            }
                             inflight.push(fired_at);
                         }
                         Err(_) => {
@@ -2288,7 +2309,9 @@ async fn drive_memcache_workload(
 
                 if sent {
                     metrics::REQUESTS_SENT.increment();
-                    let _ = metrics::SCHEDULE_SLIP.increment(slip_ns);
+                    if let Some(slip) = slip_ns {
+                        let _ = metrics::SCHEDULE_SLIP.increment(slip);
+                    }
                     inflight.push(fired_at);
                 } else {
                     break;
@@ -2501,7 +2524,8 @@ async fn ping_connection_task(state: Arc<SharedWorkerState>, endpoint_idx: usize
         let _close = CloseOnDrop(conn);
 
         metrics::CONNECTIONS_ACTIVE.increment();
-        let builder = ringline_ping::Client::builder(conn).on_result(make_ping_callback());
+        let builder = ringline_ping::Client::builder(conn)
+            .on_result(make_ping_callback(state.task_state.ratelimiter.is_some()));
         #[cfg(target_os = "linux")]
         let builder =
             builder.kernel_timestamps(matches!(config.timestamps.mode, TimestampMode::Software));
@@ -2616,14 +2640,15 @@ async fn drive_ping_workload(
             }
         }
 
-        let slip_ns = match state.task_state.ratelimiter {
-            Some(ref rl) => rl.slip_ns(),
-            None => 0,
-        };
-        crate::metrics::CURRENT_SLIP_NS.set(slip_ns as i64);
+        let slip_ns = state.task_state.ratelimiter.as_ref().map(|rl| rl.slip_ns());
+        if let Some(slip) = slip_ns {
+            crate::metrics::CURRENT_SLIP_NS.set(slip as i64);
+        }
 
         metrics::REQUESTS_SENT.increment();
-        let _ = metrics::SCHEDULE_SLIP.increment(slip_ns);
+        if let Some(slip) = slip_ns {
+            let _ = metrics::SCHEDULE_SLIP.increment(slip);
+        }
         inflight.push(fired_at);
         let conn = client.conn();
         match recv_with_timeout(client.ping(), &mut inflight, conn).await {

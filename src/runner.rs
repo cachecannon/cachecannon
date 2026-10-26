@@ -14,7 +14,7 @@ use crate::{
 use ratelimit::Ratelimiter;
 
 use chrono::Utc;
-use metriken::{AtomicHistogram, histogram::Histogram};
+use metriken::histogram::Histogram;
 use rand::RngCore;
 use rand_xoshiro::Xoshiro256PlusPlus;
 use rand_xoshiro::rand_core::SeedableRng;
@@ -984,7 +984,10 @@ pub fn run_benchmark_full(
 /// Subtracts the baseline snapshot (captured at warmup→running transition) from
 /// the current cumulative histogram so that precheck/prefill/warmup samples are
 /// excluded from the final results.
-fn delta_latency_stats(hist: &AtomicHistogram, baseline: &Option<Histogram>) -> LatencyStats {
+fn delta_latency_stats(
+    hist: &impl metriken::HistogramMetric,
+    baseline: &Option<Histogram>,
+) -> LatencyStats {
     let current = hist.load();
     let delta = match (&current, baseline) {
         (Some(cur), Some(base)) => cur.wrapping_sub(base).ok(),
