@@ -731,7 +731,7 @@ pub fn assert_routed_key_share(protocol: &str) {
     }
 }
 
-fn p50_ns(h: &metriken::AtomicHistogram) -> u64 {
+fn p50_ns(h: &cachecannon::metrics::LatencyHistogram) -> u64 {
     let h = h.load().expect("histogram has samples");
     h.quantiles(&[0.5])
         .unwrap()
@@ -815,7 +815,7 @@ pub fn routed_queue_wait_with_a_reply_pending(protocol: &str, batch: Option<usiz
     });
     let elapsed = started.elapsed();
     use cachecannon::metrics as m;
-    let quantiles = |h: &metriken::AtomicHistogram| -> Option<Vec<u64>> {
+    let quantiles = |h: &cachecannon::metrics::LatencyHistogram| -> Option<Vec<u64>> {
         let h = h.load()?;
         Some(
             h.quantiles(&[0.0, 0.1, 0.5, 0.9, 0.99, 1.0])

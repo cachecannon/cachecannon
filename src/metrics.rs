@@ -2,6 +2,7 @@
 
 pub use crate::sharded_counter::set_thread_shard;
 use crate::sharded_counter::{Counter, CounterGroup, Gauge as ShardedGauge};
+use crate::sharded_histogram::ShardedHistogram;
 use metriken::{AtomicHistogram, Gauge, metric};
 
 // Counter groups
@@ -207,7 +208,7 @@ pub static APPEND_SET_ERRORS: Counter = Counter::new(&APPEND, append::ERRORS);
     name = "append_set_latency",
     description = "Append-stream SET latency histogram (nanoseconds)"
 )]
-pub static APPEND_SET_LATENCY: AtomicHistogram = AtomicHistogram::new(7, 64);
+pub static APPEND_SET_LATENCY: LatencyHistogram = LatencyHistogram::new();
 
 #[metric(
     name = "append_head",
@@ -453,61 +454,64 @@ pub fn slip_ns(available: u64, rate: u64) -> u64 {
     available.saturating_mul(1_000_000_000) / rate
 }
 
-// Latency histograms (kept as metriken AtomicHistogram)
+// Latency histograms: one shard per worker thread, merged on load (see
+// sharded_histogram). A single process-wide AtomicHistogram would make every
+// worker contend on the same few hot buckets.
+pub type LatencyHistogram = ShardedHistogram<7, 64>;
 #[metric(
     name = "response_latency",
     description = "Response latency histogram (nanoseconds)"
 )]
-pub static RESPONSE_LATENCY: AtomicHistogram = AtomicHistogram::new(7, 64);
+pub static RESPONSE_LATENCY: LatencyHistogram = LatencyHistogram::new();
 
 #[metric(
     name = "get_latency",
     description = "GET response latency histogram (nanoseconds)"
 )]
-pub static GET_LATENCY: AtomicHistogram = AtomicHistogram::new(7, 64);
+pub static GET_LATENCY: LatencyHistogram = LatencyHistogram::new();
 
 #[metric(
     name = "set_latency",
     description = "SET response latency histogram (nanoseconds)"
 )]
-pub static SET_LATENCY: AtomicHistogram = AtomicHistogram::new(7, 64);
+pub static SET_LATENCY: LatencyHistogram = LatencyHistogram::new();
 
 #[metric(
     name = "delete_latency",
     description = "DELETE response latency histogram (nanoseconds)"
 )]
-pub static DELETE_LATENCY: AtomicHistogram = AtomicHistogram::new(7, 64);
+pub static DELETE_LATENCY: LatencyHistogram = LatencyHistogram::new();
 
 #[metric(
     name = "get_ttfb",
     description = "GET time-to-first-byte histogram (nanoseconds)"
 )]
-pub static GET_TTFB: AtomicHistogram = AtomicHistogram::new(7, 64);
+pub static GET_TTFB: LatencyHistogram = LatencyHistogram::new();
 
 #[metric(
     name = "routed_queue_wait",
     description = "Routed requests: time from the dispatcher funding a request to a connection sending it (nanoseconds); included in response_latency"
 )]
-pub static ROUTED_QUEUE_WAIT: AtomicHistogram = AtomicHistogram::new(7, 64);
+pub static ROUTED_QUEUE_WAIT: LatencyHistogram = LatencyHistogram::new();
 
 #[metric(
     name = "backfill_set_latency",
     description = "Backfill SET latency histogram (nanoseconds)"
 )]
-pub static BACKFILL_SET_LATENCY: AtomicHistogram = AtomicHistogram::new(7, 64);
+pub static BACKFILL_SET_LATENCY: LatencyHistogram = LatencyHistogram::new();
 
 // ── Coordinated-omission metrics ─────────────────────────────────────────
 #[metric(
     name = "schedule_slip",
     description = "Per-request schedule slip histogram (nanoseconds): queueing time the latency clock omits, from the rate limiter backlog"
 )]
-pub static SCHEDULE_SLIP: AtomicHistogram = AtomicHistogram::new(7, 64);
+pub static SCHEDULE_SLIP: LatencyHistogram = LatencyHistogram::new();
 
 #[metric(
     name = "perceived_latency",
     description = "Arrival-relative (CO-honest) response latency histogram (nanoseconds): response_latency + schedule slip"
 )]
-pub static PERCEIVED_LATENCY: AtomicHistogram = AtomicHistogram::new(7, 64);
+pub static PERCEIVED_LATENCY: LatencyHistogram = LatencyHistogram::new();
 
 #[metric(
     name = "current_slip_ns",
