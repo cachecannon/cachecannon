@@ -3,6 +3,8 @@
 pub use crate::sharded_counter::set_thread_shard;
 use crate::sharded_counter::{Counter, CounterGroup, Gauge as ShardedGauge};
 use crate::sharded_histogram::ShardedHistogram;
+use std::cell::Cell;
+
 use metriken::{Gauge, metric};
 
 // Counter groups
@@ -287,9 +289,43 @@ pub static PERCEIVED_LATENCY: LatencyHistogram = LatencyHistogram::new();
 
 #[metric(
     name = "current_slip_ns",
-    description = "Current schedule slip in nanoseconds (rate limiter backlog / rate)"
+    description = "Schedule slip in nanoseconds (rate limiter backlog / rate), sampled from the worker threads"
 )]
 pub static CURRENT_SLIP_NS: Gauge = Gauge::new();
+
+thread_local! {
+    /// This worker's schedule slip. Its fire loops write it after each limiter
+    /// claim and its result callbacks read it per response, so it never leaves
+    /// the thread. The limiter it describes is per worker too
+    /// (`limiters::WorkerLimiter`), so this is also the right value: the old
+    /// process-wide gauge charged every response with whichever worker wrote
+    /// last.
+    static SLIP_NS: Cell<u64> = const { Cell::new(0) };
+    static SLIP_PUBLISH_TICK: Cell<u8> = const { Cell::new(0) };
+}
+
+/// Record this worker's current schedule slip.
+///
+/// Every 256th call also refreshes the process-wide `current_slip_ns` gauge
+/// for `/metrics`. Keeping that gauge off the per-iteration path matters: with
+/// a limiter configured, 64 workers swapping it once per fire loop and loading
+/// it once per response put 87% of generator CPU on that one cache line and
+/// capped a process at ~14M req/s regardless of the configured rate.
+#[inline]
+pub fn set_worker_slip_ns(slip_ns: u64) {
+    SLIP_NS.set(slip_ns);
+    let tick = SLIP_PUBLISH_TICK.get().wrapping_add(1);
+    SLIP_PUBLISH_TICK.set(tick);
+    if tick == 0 {
+        CURRENT_SLIP_NS.set(slip_ns as i64);
+    }
+}
+
+/// This worker's current schedule slip, as last recorded by `set_worker_slip_ns`.
+#[inline]
+pub fn worker_slip_ns() -> u64 {
+    SLIP_NS.get()
+}
 
 #[metric(
     name = "requests_dropped",

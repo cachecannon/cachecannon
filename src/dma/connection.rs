@@ -338,7 +338,7 @@ async fn run_transfers(
                 if !take_token(&mut carried_tokens, limiter) {
                     // Refreshed even when nothing is sent, so perceived latency reflects a
                     // still-growing backlog.
-                    metrics::CURRENT_SLIP_NS.set(limiter.slip_ns() as i64);
+                    metrics::set_worker_slip_ns(limiter.slip_ns());
                     match token_dispatch {
                         Some(ref dispatch) => wait_for_token(dispatch, &mut carried_tokens).await,
                         None => ringline::sleep(Duration::from_micros(100)).await,
@@ -347,7 +347,7 @@ async fn run_transfers(
                 }
                 // Read after the claim, as does RESP.
                 let slip_ns = limiter.slip_ns();
-                metrics::CURRENT_SLIP_NS.set(slip_ns as i64);
+                metrics::set_worker_slip_ns(slip_ns);
                 let _ = metrics::SCHEDULE_SLIP.increment(slip_ns);
             }
             let roll = rng.random_range(0..100);
@@ -441,8 +441,7 @@ async fn run_transfers(
             }
         }
         let _ = metrics::RESPONSE_LATENCY.increment(latency_ns);
-        let _ = metrics::PERCEIVED_LATENCY
-            .increment(latency_ns + metrics::CURRENT_SLIP_NS.value() as u64);
+        let _ = metrics::PERCEIVED_LATENCY.increment(latency_ns + metrics::worker_slip_ns());
 
         let failed = outcome.is_err();
         // The server replied with an ERR. Anything else is the socket or the fabric.
