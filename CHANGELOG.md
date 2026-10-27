@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.34] - 2026-10-27
+
 ### Changed
 - Latency histograms are sharded per worker thread and merged on read, so
   workers no longer contend on shared buckets. On main, with this and the
