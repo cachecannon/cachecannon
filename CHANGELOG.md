@@ -11,8 +11,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Latency histograms are sharded per worker thread and merged on read, so
   workers no longer contend on shared buckets. On main, with this and the
   no-limiter slip change below, 64 threads at pipeline 64 on Graviton4 with
-  no rate limit went from 21.8M to 111M RPS. Each written histogram allocates one 58 KiB bucket array per
-  worker that records into it. Counter shards rise from 64 to 256. (#259)
+  no rate limit went from 21.8M to 111M RPS. Each written histogram
+  allocates one 58 KiB bucket array per worker that records into it.
+  Counter shards rise from 64 to 256. (#259)
 - With no rate limiter (neither `workload.rate_limit` nor
   `[workload.saturation_search]`), RESP, memcache and ping workers no
   longer write or read the shared `current_slip_ns` gauge and no longer
@@ -22,11 +23,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - With a rate limiter, each RESP, memcache, ping and DMA worker keeps its
   schedule slip in a thread-local instead of the shared `current_slip_ns`
   gauge, which every fire loop wrote and every response read. The gauge is
-  refreshed every 256th update. Perceived latency now adds the slip of the
-  worker that sent the request, not of whichever worker wrote the gauge
-  last. On main, on Graviton4 (64 threads, 2400 connections, pipeline 64),
-  a 100M RPS limit delivered 13.4M RPS with every worker at 100% CPU, and
-  now holds 100.1M RPS. (#260)
+  refreshed from a worker's first update and every 256th after it.
+  Perceived latency now adds the slip of the worker that sent the request,
+  not of whichever worker wrote the gauge last. On main, on Graviton4 (64
+  threads, 2400 connections, pipeline 64), a 100M RPS limit delivered 13.4M
+  RPS with every worker at 100% CPU, and now holds 100.1M RPS. (#260, #264)
 
 ### Security
 - arrow and parquet 58 → 60, metriken-query 0.36 → 0.37 and
