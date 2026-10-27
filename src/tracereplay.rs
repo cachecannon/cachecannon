@@ -644,8 +644,10 @@ async fn run(
                 }
                 None => ctx.batch_size,
             };
-            let slip_ns = ctx.ratelimiter.map_or(0, |rl| rl.slip_ns());
-            metrics::set_worker_slip_ns(slip_ns);
+            let slip_ns = ctx.ratelimiter.map(|rl| rl.slip_ns());
+            if let Some(slip) = slip_ns {
+                metrics::set_worker_slip_ns(slip);
+            }
 
             while client.pending_count() < ctx.pipeline_depth && token_budget > 0 {
                 let next = match backfill.pop_front() {
@@ -725,7 +727,9 @@ async fn run(
                     break;
                 }
                 fired_count += 1;
-                let _ = metrics::SCHEDULE_SLIP.increment(slip_ns);
+                if let Some(slip) = slip_ns {
+                    let _ = metrics::SCHEDULE_SLIP.increment(slip);
+                }
                 inflight.push(fired_at);
                 sent.push_back(next);
                 batch_copied += copied;

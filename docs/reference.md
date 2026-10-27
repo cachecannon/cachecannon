@@ -980,7 +980,7 @@ Each snapshot contains the full set of metrics. The file uses the metriken expos
 | `delete_latency` | DELETE response latency |
 | `get_ttfb` | GET time-to-first-byte: from the send to the completion batch in which the worker handled the receive carrying the reply's first byte. Excludes routed queue wait |
 | `backfill_set_latency` | Backfill SET latency |
-| `schedule_slip` | Queueing the latency clock omits: rate-limiter tokens beyond one claim (one batch), divided by rate, per worker. Zero without a rate limit. With `workload.routing = "routed"`, recorded once per funded request, including dropped ones, and not for backfill SETs |
+| `schedule_slip` | Queueing the latency clock omits: rate-limiter tokens beyond one claim (one batch), divided by rate, per worker. Not recorded without a rate limiter (neither `workload.rate_limit` nor `[workload.saturation_search]`), so the column is absent. With `workload.routing = "routed"`, recorded once per funded request, including dropped ones, and not for backfill SETs |
 | `perceived_latency` | `response_latency + schedule_slip`. What a client issuing at the target rate experienced |
 | `routed_queue_wait` | With `workload.routing = "routed"`: time from the dispatcher funding a request to a connection sending it, recorded at send (including requests a failed send then discards). Included in `response_latency` and the per-command latencies |
 | `kv_lookup_time`, `kv_load_time`, `kv_store_time` | KV replay, per trace request: first EXISTS, GET or SET sent to the last reply |

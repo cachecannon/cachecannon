@@ -61,17 +61,21 @@ impl<const G: u8, const M: u8> ShardedHistogram<G, M> {
         if !self.written.load(Ordering::Relaxed) {
             return None;
         }
+        // Sum into the first populated shard's snapshot in place; every shard
+        // has the same config, so the bucket slices line up.
         let mut merged: Option<Histogram> = None;
         for shard in &self.shards {
             let Some(snapshot) = shard.load() else {
                 continue;
             };
-            merged = Some(match merged {
-                None => snapshot,
-                Some(acc) => acc
-                    .wrapping_add(&snapshot)
-                    .expect("shards share one histogram config"),
-            });
+            match merged.as_mut() {
+                None => merged = Some(snapshot),
+                Some(acc) => {
+                    for (sum, count) in acc.as_mut_slice().iter_mut().zip(snapshot.as_slice()) {
+                        *sum = sum.wrapping_add(*count);
+                    }
+                }
+            }
         }
         merged
     }
