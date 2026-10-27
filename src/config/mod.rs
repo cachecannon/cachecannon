@@ -156,6 +156,101 @@ pub struct Target {
     /// lists. Requires a memcache protocol.
     #[serde(default)]
     pub auto_discovery: bool,
+    /// ACL username sent with `AUTH`. Unset sends the one-argument
+    /// `AUTH <password>`, which authenticates as the `default` user.
+    #[serde(default)]
+    pub auth_user: Option<String>,
+    /// Password sent as `AUTH [<auth_user>] <password>` on every new RESP
+    /// connection before any other command. Prefer `auth_password_file` or
+    /// the `CACHECANNON_AUTH_PASSWORD` environment variable, which keep the
+    /// password out of config files.
+    #[serde(default)]
+    pub auth_password: Option<Secret>,
+    /// File holding the password; one trailing newline is ignored. Cannot be
+    /// set together with `auth_password`.
+    #[serde(default)]
+    pub auth_password_file: Option<PathBuf>,
+}
+
+/// Environment variable read for the AUTH password when neither
+/// `target.auth_password` nor `target.auth_password_file` is set.
+pub const AUTH_PASSWORD_ENV: &str = "CACHECANNON_AUTH_PASSWORD";
+
+/// A string that `Debug` prints as `"<redacted>"`, so a logged config does not
+/// carry the password.
+#[derive(Clone, Deserialize, PartialEq, Eq)]
+#[serde(transparent)]
+pub struct Secret(String);
+
+impl Secret {
+    pub fn new(s: impl Into<String>) -> Self {
+        Self(s.into())
+    }
+
+    pub fn expose(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Debug for Secret {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("\"<redacted>\"")
+    }
+}
+
+impl Target {
+    /// Fill `auth_password` from `auth_password_file` or, failing both, from
+    /// [`AUTH_PASSWORD_ENV`]. The environment variable applies to RESP
+    /// protocols only, so a shell that exports it does not break a memcache
+    /// run. Call once before connecting.
+    pub fn resolve_auth(&mut self) -> Result<(), ConfigError> {
+        let env = std::env::var(AUTH_PASSWORD_ENV).ok();
+        self.resolve_auth_with(env)
+    }
+
+    fn resolve_auth_with(&mut self, env: Option<String>) -> Result<(), ConfigError> {
+        if let Some(path) = &self.auth_password_file {
+            let content = std::fs::read_to_string(path).map_err(|e| {
+                ConfigError::Io(format!("target.auth_password_file {}: {e}", path.display()))
+            })?;
+            let password = content
+                .strip_suffix("\r\n")
+                .or_else(|| content.strip_suffix('\n'))
+                .unwrap_or(&content);
+            if password.is_empty() {
+                return Err(ConfigError::Validation(format!(
+                    "target.auth_password_file {} is empty",
+                    path.display()
+                )));
+            }
+            self.auth_password = Some(Secret::new(password));
+        } else if self.auth_password.is_none()
+            && matches!(self.protocol, Protocol::Resp | Protocol::Resp3)
+            && let Some(password) = env.filter(|p| !p.is_empty())
+        {
+            self.auth_password = Some(Secret::new(password));
+        }
+
+        if self.auth_user.is_some() && self.auth_password.is_none() {
+            return Err(ConfigError::Validation(format!(
+                "target.auth_user is set but no password was given (auth_password, \
+                 auth_password_file or {AUTH_PASSWORD_ENV})"
+            )));
+        }
+        Ok(())
+    }
+
+    /// The `AUTH` arguments after the command name, or `None` when no
+    /// password is configured. Valid after [`Target::resolve_auth`].
+    pub fn auth_args(&self) -> Option<Vec<&[u8]>> {
+        let password = self.auth_password.as_ref()?;
+        let mut args = Vec::with_capacity(2);
+        if let Some(user) = &self.auth_user {
+            args.push(user.as_bytes());
+        }
+        args.push(password.expose().as_bytes());
+        Some(args)
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]
@@ -1036,6 +1131,24 @@ impl Config {
         Ok(config)
     }
 
+    fn validate_auth(&self) -> Result<(), ConfigError> {
+        let t = &self.target;
+        if t.auth_password.is_some() && t.auth_password_file.is_some() {
+            return Err(ConfigError::Validation(
+                "target.auth_password and target.auth_password_file cannot both be set".to_string(),
+            ));
+        }
+        let configured =
+            t.auth_user.is_some() || t.auth_password.is_some() || t.auth_password_file.is_some();
+        if configured && !matches!(t.protocol, Protocol::Resp | Protocol::Resp3) {
+            return Err(ConfigError::Validation(format!(
+                "target.auth_* requires protocol resp or resp3, got {:?}",
+                t.protocol
+            )));
+        }
+        Ok(())
+    }
+
     /// A paced prefill takes about keys / rate seconds; one that cannot finish
     /// inside `prefill_timeout` would fail after the full timeout.
     fn validate_prefill_pace(&self) -> Result<(), ConfigError> {
@@ -1116,6 +1229,7 @@ impl Config {
             }
         }
 
+        self.validate_auth()?;
         self.validate_prefill_pace()?;
 
         // io_uring's provided-buffer ring is indexed by a mask, so ringline
@@ -2923,5 +3037,157 @@ mod append_config_tests {
         assert!(dma_config("buffer_capacity = 4096").is_ok());
         let error = dma_config("buffer_capacity = 4095").unwrap_err();
         assert!(error.to_string().contains("buffer_capacity"), "{error}");
+    }
+}
+
+#[cfg(test)]
+mod auth_tests {
+    use super::*;
+
+    fn target(extra: &str) -> Result<Target, ConfigError> {
+        let config: Config = toml::from_str(&format!(
+            "[target]\nendpoints = [\"127.0.0.1:6379\"]\n{extra}\n"
+        ))
+        .map_err(|e| ConfigError::Parse(e.to_string()))?;
+        config.validate()?;
+        Ok(config.target)
+    }
+
+    /// A file under the temp dir, removed when the test ends.
+    struct TempFile(PathBuf);
+
+    impl TempFile {
+        fn new(name: &str, content: &str) -> Self {
+            let path = std::env::temp_dir()
+                .join(format!("cachecannon-auth-{}-{name}", std::process::id()));
+            std::fs::write(&path, content).unwrap();
+            Self(path)
+        }
+
+        fn toml(&self) -> String {
+            format!("auth_password_file = {:?}", self.0.display().to_string())
+        }
+    }
+
+    impl Drop for TempFile {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+        }
+    }
+
+    fn args(t: &Target) -> Option<Vec<&str>> {
+        t.auth_args()
+            .map(|a| a.iter().map(|b| std::str::from_utf8(b).unwrap()).collect())
+    }
+
+    #[test]
+    fn no_auth_by_default() {
+        let mut t = target("").unwrap();
+        t.resolve_auth_with(None).unwrap();
+        assert!(t.auth_args().is_none());
+    }
+
+    #[test]
+    fn password_only_sends_one_argument() {
+        let mut t = target("auth_password = \"pw\"").unwrap();
+        t.resolve_auth_with(None).unwrap();
+        assert_eq!(args(&t), Some(vec!["pw"]));
+    }
+
+    #[test]
+    fn user_comes_before_password() {
+        let mut t = target("auth_user = \"bench\"\nauth_password = \"pw\"").unwrap();
+        t.resolve_auth_with(None).unwrap();
+        assert_eq!(args(&t), Some(vec!["bench", "pw"]));
+    }
+
+    #[test]
+    fn debug_output_redacts_the_password() {
+        let t = target("auth_user = \"bench\"\nauth_password = \"hunter2\"").unwrap();
+        let shown = format!("{t:?}");
+        assert!(!shown.contains("hunter2"), "{shown}");
+        assert!(shown.contains("<redacted>"), "{shown}");
+        assert!(shown.contains("bench"), "{shown}");
+    }
+
+    #[test]
+    fn password_file_drops_one_trailing_newline() {
+        for (name, content, want) in [
+            ("lf", "pw\n", "pw"),
+            ("crlf", "pw\r\n", "pw"),
+            ("none", "pw", "pw"),
+            ("two", "pw\n\n", "pw\n"),
+        ] {
+            let f = TempFile::new(name, content);
+            let mut t = target(&f.toml()).unwrap();
+            t.resolve_auth_with(None).unwrap();
+            assert_eq!(args(&t), Some(vec![want]), "{name}");
+        }
+    }
+
+    #[test]
+    fn empty_password_file_is_rejected() {
+        let f = TempFile::new("empty", "\n");
+        let mut t = target(&f.toml()).unwrap();
+        let err = t.resolve_auth_with(None).unwrap_err().to_string();
+        assert!(err.contains("is empty"), "{err}");
+    }
+
+    #[test]
+    fn missing_password_file_names_the_key() {
+        let mut t = target("auth_password_file = \"/nonexistent/cachecannon-pw\"").unwrap();
+        let err = t.resolve_auth_with(None).unwrap_err().to_string();
+        assert!(err.contains("auth_password_file"), "{err}");
+    }
+
+    #[test]
+    fn password_and_password_file_are_exclusive() {
+        let err = target("auth_password = \"pw\"\nauth_password_file = \"pw.txt\"")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("cannot both be set"), "{err}");
+    }
+
+    #[test]
+    fn auth_requires_a_resp_protocol() {
+        let err = target("protocol = \"memcache\"\nauth_password = \"pw\"")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("requires protocol resp"), "{err}");
+        assert!(target("protocol = \"resp3\"\nauth_password = \"pw\"").is_ok());
+    }
+
+    #[test]
+    fn env_supplies_the_password_when_none_is_configured() {
+        let mut t = target("auth_user = \"bench\"").unwrap();
+        t.resolve_auth_with(Some("from-env".into())).unwrap();
+        assert_eq!(args(&t), Some(vec!["bench", "from-env"]));
+    }
+
+    #[test]
+    fn configured_password_wins_over_env() {
+        let mut t = target("auth_password = \"pw\"").unwrap();
+        t.resolve_auth_with(Some("from-env".into())).unwrap();
+        assert_eq!(args(&t), Some(vec!["pw"]));
+
+        let f = TempFile::new("wins", "file-pw\n");
+        let mut t = target(&f.toml()).unwrap();
+        t.resolve_auth_with(Some("from-env".into())).unwrap();
+        assert_eq!(args(&t), Some(vec!["file-pw"]));
+    }
+
+    #[test]
+    fn env_is_ignored_for_non_resp_protocols() {
+        let mut t = target("protocol = \"memcache\"").unwrap();
+        t.resolve_auth_with(Some("from-env".into())).unwrap();
+        assert!(t.auth_args().is_none());
+    }
+
+    #[test]
+    fn user_without_any_password_is_rejected() {
+        let mut t = target("auth_user = \"bench\"").unwrap();
+        let err = t.resolve_auth_with(None).unwrap_err().to_string();
+        assert!(err.contains("auth_user is set"), "{err}");
+        assert!(err.contains(AUTH_PASSWORD_ENV), "{err}");
     }
 }

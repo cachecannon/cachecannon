@@ -3,7 +3,7 @@
 //! Sends `CLUSTER SLOTS` to seed nodes via blocking TCP before ringline launches,
 //! builds a slot table mapping each of 16384 slots to an endpoint index.
 
-use resp_proto::{SLOT_COUNT, SlotMap, Value};
+use resp_proto::{Request, SLOT_COUNT, SlotMap, Value};
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::time::Duration;
@@ -19,15 +19,19 @@ const READ_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Discover Valkey/Redis Cluster topology from seed nodes.
 ///
+/// `auth` is the `AUTH` argument list (see `Target::auth_args`), sent before
+/// `CLUSTER SLOTS` when set.
+///
 /// Returns `(primary_endpoints, slot_table)` where `slot_table` maps each of
 /// 16384 hash slots to an index into `primary_endpoints`.
 pub fn discover_topology(
     seeds: &[SocketAddr],
+    auth: Option<&[&[u8]]>,
 ) -> Result<(Vec<SocketAddr>, Vec<u16>), Box<dyn std::error::Error>> {
     let mut last_err: Option<Box<dyn std::error::Error>> = None;
 
     for seed in seeds {
-        match try_discover(*seed) {
+        match try_discover(*seed, auth) {
             Ok(result) => return Ok(result),
             Err(e) => {
                 tracing::warn!(seed = %seed, error = %e, "cluster discovery failed for seed");
@@ -41,17 +45,36 @@ pub fn discover_topology(
 
 fn try_discover(
     seed: SocketAddr,
+    auth: Option<&[&[u8]]>,
 ) -> Result<(Vec<SocketAddr>, Vec<u16>), Box<dyn std::error::Error>> {
     // Connect to seed
     let mut stream = TcpStream::connect_timeout(&seed, CONNECT_TIMEOUT)?;
     stream.set_read_timeout(Some(READ_TIMEOUT))?;
     stream.set_nodelay(true)?;
 
+    if let Some(args) = auth {
+        let mut request = Request::cmd(b"AUTH");
+        for arg in args {
+            request = request.arg(arg);
+        }
+        let mut cmd = vec![0u8; request.encoded_len()];
+        request.encode(&mut cmd);
+        stream.write_all(&cmd)?;
+        stream.flush()?;
+        if let Value::Error(msg) = read_value(&mut stream, "AUTH")? {
+            return Err(format!("AUTH rejected: {}", String::from_utf8_lossy(&msg)).into());
+        }
+    }
+
     // Send CLUSTER SLOTS
     stream.write_all(CLUSTER_SLOTS_CMD)?;
     stream.flush()?;
 
-    // Read response
+    build_topology(&read_value(&mut stream, "CLUSTER SLOTS")?)
+}
+
+/// Read one complete RESP value from a blocking stream.
+fn read_value(stream: &mut TcpStream, what: &str) -> Result<Value, Box<dyn std::error::Error>> {
     let mut buf = Vec::with_capacity(8192);
     let mut tmp = [0u8; 4096];
     loop {
@@ -61,17 +84,11 @@ fn try_discover(
         }
         buf.extend_from_slice(&tmp[..n]);
 
-        // Try to parse
         match Value::parse(&buf) {
-            Ok((value, _consumed)) => {
-                return build_topology(&value);
-            }
-            Err(resp_proto::ParseError::Incomplete) => {
-                // Need more data
-                continue;
-            }
+            Ok((value, _consumed)) => return Ok(value),
+            Err(resp_proto::ParseError::Incomplete) => continue,
             Err(e) => {
-                return Err(format!("failed to parse CLUSTER SLOTS response: {}", e).into());
+                return Err(format!("failed to parse {what} response: {e}").into());
             }
         }
     }
@@ -143,4 +160,64 @@ fn build_topology(
     }
 
     Ok((endpoints, slot_table))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::TcpListener;
+    use std::sync::mpsc;
+
+    /// One node owning every slot.
+    const ALL_SLOTS: &[u8] = b"*1\r\n*3\r\n:0\r\n:16383\r\n*2\r\n$9\r\n127.0.0.1\r\n:7000\r\n";
+
+    /// A seed that answers each request with the next reply and reports the
+    /// bytes it received.
+    fn fake_seed(replies: Vec<&'static [u8]>) -> (SocketAddr, mpsc::Receiver<Vec<u8>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            for reply in replies {
+                let mut buf = [0u8; 1024];
+                let n = stream.read(&mut buf).unwrap();
+                tx.send(buf[..n].to_vec()).unwrap();
+                stream.write_all(reply).unwrap();
+            }
+        });
+        (addr, rx)
+    }
+
+    #[test]
+    fn sends_auth_before_cluster_slots() {
+        let (seed, rx) = fake_seed(vec![b"+OK\r\n", ALL_SLOTS]);
+        let args: [&[u8]; 2] = [b"bench", b"pw"];
+        let (endpoints, table) = discover_topology(&[seed], Some(&args[..])).unwrap();
+        assert_eq!(endpoints, vec!["127.0.0.1:7000".parse().unwrap()]);
+        assert_eq!(table.len(), SLOT_COUNT as usize);
+        assert_eq!(
+            rx.recv().unwrap(),
+            b"*3\r\n$4\r\nAUTH\r\n$5\r\nbench\r\n$2\r\npw\r\n"
+        );
+        assert_eq!(rx.recv().unwrap(), CLUSTER_SLOTS_CMD);
+    }
+
+    #[test]
+    fn no_auth_sends_cluster_slots_first() {
+        let (seed, rx) = fake_seed(vec![ALL_SLOTS]);
+        discover_topology(&[seed], None).unwrap();
+        assert_eq!(rx.recv().unwrap(), CLUSTER_SLOTS_CMD);
+    }
+
+    #[test]
+    fn rejected_auth_is_reported() {
+        let (seed, _rx) = fake_seed(vec![b"-WRONGPASS invalid username-password pair\r\n"]);
+        let args: [&[u8]; 1] = [b"bad"];
+        let err = discover_topology(&[seed], Some(&args[..]))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("AUTH rejected: WRONGPASS"), "{err}");
+        assert!(!err.contains("bad"), "{err}");
+    }
 }

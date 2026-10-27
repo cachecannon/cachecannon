@@ -97,7 +97,21 @@ cluster = false
 # configuration endpoint) with `config get cluster` and run against the nodes
 # it lists. Requires protocol memcache or memcache-binary; not with cluster.
 auto_discovery = false
+
+# AUTH on every new connection, before HELLO 3 and the precheck PING, and
+# before CLUSTER SLOTS in cluster mode. RESP protocols only. Without
+# auth_user, the one-argument `AUTH <password>` authenticates as the default
+# user. Give the password in at most one of auth_password and
+# auth_password_file (one trailing newline is ignored); with neither, the
+# CACHECANNON_AUTH_PASSWORD environment variable is used if set.
+# auth_user = "bench"
+# auth_password_file = "/run/secrets/valkey-password"
+# auth_password = "..."
 ```
+
+A password the server rejects fails the precheck with `the server rejected
+AUTH`, and the server's error is logged once at warn level. The password is
+never logged: `Debug` output of the config shows it as `<redacted>`.
 
 ### RESP Module Settings
 
@@ -817,6 +831,7 @@ Supported commands:
 - `DEL key` — Delete, for a nonzero `delete` ratio
 - `PING` — Connection health check
 - `HELLO 3` — Under `protocol = "resp3"`, once per connection
+- `AUTH [user] password` — When a password is configured, once per connection, first
 
 `[resp] module = "largeobj"` sends `BLOB.TCP_GET key` and
 `BLOB.TCP_SET key value` in place of `GET` and `SET`; see

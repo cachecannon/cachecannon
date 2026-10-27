@@ -106,6 +106,7 @@ pub fn run_benchmark_full(
         None => None,
     };
 
+    config.target.resolve_auth()?;
     let slot_table = resolve_endpoints(&mut config)?;
 
     let num_threads = config.general.threads;
@@ -587,6 +588,9 @@ pub fn run_benchmark_full(
                     }
                 }
 
+                if crate::worker::AUTH_REJECTED.load(Ordering::Relaxed) {
+                    return Err("precheck failed: the server rejected AUTH".into());
+                }
                 return Err("precheck failed: no connectivity".into());
             }
 
@@ -1258,7 +1262,9 @@ pub(crate) fn resolve_endpoints(
                 return Err(format!("cluster mode requires resp protocol, got {:?}", other).into());
             }
         }
-        let (endpoints, table) = crate::cluster::discover_topology(&config.target.endpoints)?;
+        let auth = config.target.auth_args();
+        let (endpoints, table) =
+            crate::cluster::discover_topology(&config.target.endpoints, auth.as_deref())?;
         config.target.endpoints = endpoints;
         Some(table)
     } else {
@@ -2122,6 +2128,9 @@ mod tls_tests {
             tls_key_file: None,
             cluster: false,
             auto_discovery: false,
+            auth_user: None,
+            auth_password: None,
+            auth_password_file: None,
         }
     }
 

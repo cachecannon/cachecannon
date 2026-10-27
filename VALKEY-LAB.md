@@ -62,6 +62,9 @@ Flag | Default | Description
 `--resp3` | off | Use RESP3 protocol
 `--tls-skip-verify` | off | Skip TLS certificate verification
 `--tls-hostname` | host value | TLS SNI hostname override
+`--user` | `default` | ACL username for `AUTH`
+`--pass`, `-a` | none | `AUTH` password (visible in the process list; prefer `--pass-file` or `CACHECANNON_AUTH_PASSWORD`)
+`--pass-file` | none | Read the `AUTH` password from a file
 `--connect-timeout` | `5s` | Connection timeout
 `--request-timeout` | `1s` | Request timeout
 `--color` | `auto` | Color mode: auto, always, never
@@ -139,6 +142,9 @@ valkey-lab -c 32 -P 64 -t 8
 
 # Cluster mode with TLS
 valkey-lab --cluster --tls -h cluster.example.com
+
+# ACL user, password from the environment
+CACHECANNON_AUTH_PASSWORD=... valkey-lab --user bench -h 10.0.0.1
 
 # Write-heavy workload with Zipfian distribution
 valkey-lab -r 20:80 --distribution zipf -s 512

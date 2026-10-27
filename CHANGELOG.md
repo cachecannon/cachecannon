@@ -8,6 +8,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- RESP `AUTH` for servers that require a password or an ACL user.
+  `target.auth_user` and one password source (`target.auth_password`,
+  `target.auth_password_file`, or the `CACHECANNON_AUTH_PASSWORD` environment
+  variable) make every new connection send `AUTH [user] password` before any
+  other command, cluster discovery included. valkey-lab takes `--user`,
+  `-a`/`--pass` and `--pass-file`. A rejected password fails the precheck with
+  `the server rejected AUTH` instead of `no connectivity`. RESP and RESP3
+  only; `Debug` output of the config redacts the password.
 - `workload.routing = "routed"` loads several nodes the way a client
   population does: each worker's dispatcher draws every request's key from
   the whole keyspace, routes it, and queues it for the owning node, so a node

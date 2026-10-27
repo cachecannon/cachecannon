@@ -145,6 +145,19 @@ struct BenchArgs {
     #[arg(long)]
     tls_hostname: Option<String>,
 
+    /// ACL username for AUTH (default: the `default` user).
+    #[arg(long)]
+    user: Option<String>,
+
+    /// Password for AUTH. Visible to other local users in the process list;
+    /// prefer --pass-file or the CACHECANNON_AUTH_PASSWORD environment variable.
+    #[arg(short = 'a', long = "pass", conflicts_with = "pass_file")]
+    pass: Option<String>,
+
+    /// Read the AUTH password from this file (one trailing newline is ignored).
+    #[arg(long)]
+    pass_file: Option<PathBuf>,
+
     /// Connection timeout (e.g. 5s, 500ms).
     #[arg(long, value_parser = parse_duration)]
     connect_timeout: Option<Duration>,
@@ -302,8 +315,8 @@ fn init_tracing() {
 // ---------------------------------------------------------------------------
 
 use cachecannon::config::{
-    Commands, Config, Connection, Distribution, General, Protocol, SaturationSearch, SloThresholds,
-    Target, Values, Workload,
+    Commands, Config, Connection, Distribution, General, Protocol, SaturationSearch, Secret,
+    SloThresholds, Target, Values, Workload,
 };
 
 /// Build a [`Config`] from the bench CLI flags, optionally layering on top of
@@ -390,6 +403,9 @@ fn load_base_config(args: &BenchArgs) -> Result<Config, Box<dyn std::error::Erro
                 tls_key_file: None,
                 cluster: false,
                 auto_discovery: false,
+                auth_user: None,
+                auth_password: None,
+                auth_password_file: None,
             },
             connection: Connection {
                 connections: args.connections.unwrap_or(1),
@@ -436,6 +452,18 @@ fn apply_bench_flags(
     }
     if let Some(ref hostname) = args.tls_hostname {
         config.target.tls_hostname = Some(hostname.clone());
+    }
+    if let Some(ref user) = args.user {
+        config.target.auth_user = Some(user.clone());
+    }
+    // A password flag replaces whichever password source the base config used.
+    if let Some(ref pass) = args.pass {
+        config.target.auth_password = Some(Secret::new(pass.clone()));
+        config.target.auth_password_file = None;
+    }
+    if let Some(ref path) = args.pass_file {
+        config.target.auth_password_file = Some(path.clone());
+        config.target.auth_password = None;
     }
 
     // General
@@ -633,6 +661,25 @@ mod tests {
         };
         let err = build_config_from_saturate(&args).unwrap_err().to_string();
         assert!(err.contains("saturation_search"), "{err}");
+    }
+
+    #[test]
+    fn auth_flags_set_the_target() {
+        let config = build_config(&bench(&["--user", "bench", "-a", "pw"])).unwrap();
+        assert_eq!(config.target.auth_user.as_deref(), Some("bench"));
+        assert_eq!(
+            config.target.auth_password.as_ref().map(Secret::expose),
+            Some("pw")
+        );
+
+        let config = build_config(&bench(&["--pass-file", "/run/pw"])).unwrap();
+        assert_eq!(
+            config.target.auth_password_file.as_deref(),
+            Some(std::path::Path::new("/run/pw"))
+        );
+        assert!(config.target.auth_password.is_none());
+
+        assert!(Cli::try_parse_from(["valkey-lab", "-a", "pw", "--pass-file", "/run/pw"]).is_err());
     }
 
     #[test]

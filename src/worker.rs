@@ -27,7 +27,7 @@ use std::net::SocketAddr;
 use std::pin::Pin;
 use std::rc::Rc;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
 use std::sync::{Mutex, OnceLock, RwLock};
 use std::task::{Context, Poll, Waker};
 use std::time::{Duration, Instant};
@@ -1561,6 +1561,40 @@ pub(crate) async fn establish_connection(
     }
 }
 
+/// Set once any server rejects `AUTH`, so a failed precheck reports the
+/// rejection rather than a connectivity problem.
+pub(crate) static AUTH_REJECTED: AtomicBool = AtomicBool::new(false);
+
+/// Send `AUTH [<user>] <password>` on a fresh RESP connection when the target
+/// has a password, before `HELLO 3` or any workload traffic. Logs the first
+/// rejection at warn level and later ones at debug; the server's error text
+/// is logged, never the arguments.
+async fn authenticate(
+    client: &mut ringline_redis::Client,
+    config: &Config,
+    worker_id: usize,
+    endpoint: SocketAddr,
+) -> Result<(), ringline_redis::Error> {
+    let Some(args) = config.target.auth_args() else {
+        return Ok(());
+    };
+    let mut request = resp_proto::Request::cmd(b"AUTH");
+    for arg in args {
+        request = request.arg(arg);
+    }
+    let result = client.cmd(&request).await.map(|_| ());
+    if let Err(ref e) = result {
+        let first = matches!(e, ringline_redis::Error::Redis(_))
+            && !AUTH_REJECTED.swap(true, Ordering::Relaxed);
+        if first {
+            tracing::warn!(worker = worker_id, endpoint = %endpoint, "AUTH rejected: {e}");
+        } else {
+            tracing::debug!(worker = worker_id, endpoint = %endpoint, "AUTH failed: {e}");
+        }
+    }
+    result
+}
+
 /// Closes the connection when dropped.
 ///
 /// Dropping a ringline `Connection`, or a client built on one, releases its
@@ -1759,6 +1793,19 @@ async fn resp_connection_task(state: Arc<SharedWorkerState>, endpoint_idx: usize
             conn_index = conn.index(),
             "connected (RESP)"
         );
+
+        if authenticate(&mut client, config, state.task_state.worker_id, endpoint)
+            .await
+            .is_err()
+        {
+            metrics::CONNECTIONS_ACTIVE.decrement();
+            metrics::CONNECTIONS_FAILED.increment();
+            if state.task_state.kv_replay.is_some() {
+                crate::kvreplay::note_connect_failed();
+            }
+            ringline::sleep(Duration::from_millis(100)).await;
+            continue;
+        }
 
         // RESP3: negotiate the protocol on every new connection before any
         // workload traffic. `HELLO 3` switches the server to RESP3, so its reply
@@ -3907,6 +3954,16 @@ async fn resp_append_task(state: Arc<SharedWorkerState>, endpoint_idx: usize, se
         let builder =
             ringline_redis::Client::builder(connection).on_result(make_resp_append_callback());
         let mut client = builder.max_batch_size(append.pipeline_depth).build();
+
+        if authenticate(&mut client, config, state.task_state.worker_id, endpoint)
+            .await
+            .is_err()
+        {
+            metrics::APPEND_CONNECTIONS_ACTIVE.decrement();
+            metrics::CONNECTIONS_FAILED.increment();
+            ringline::sleep(Duration::from_millis(100)).await;
+            continue;
+        }
 
         // Same RESP3 negotiation as the reader connections.
         if matches!(config.target.protocol, CacheProtocol::Resp3)

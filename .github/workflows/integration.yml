@@ -241,6 +241,82 @@ jobs:
       - name: Run benchmark against Valkey TLS
         run: ./target/release/cachecannon config/valkey-tls-ci.toml
 
+  valkey-auth:
+    name: Valkey AUTH
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install Valkey
+        run: |
+          # See the Valkey TLS job for why the Chrome source is dropped.
+          sudo rm -f /etc/apt/sources.list.d/google-chrome.list \
+                     /etc/apt/sources.list.d/google-chrome.sources
+          sudo apt-get update
+          sudo apt-get install -y valkey-server || {
+            curl -fsSL https://packages.valkey.io/gpg | sudo gpg --dearmor -o /usr/share/keyrings/valkey.gpg
+            echo "deb [signed-by=/usr/share/keyrings/valkey.gpg] https://packages.valkey.io/deb stable main" | sudo tee /etc/apt/sources.list.d/valkey.list
+            sudo apt-get update && sudo apt-get install -y valkey-server
+          }
+
+      - name: Start Valkey with a default password and an ACL user
+        run: |
+          mkdir -p /tmp/valkey-auth/cluster
+          echo benchpw > /tmp/valkey-auth/password
+          # Standalone on 6379, and a one-node cluster on 7000 owning every slot.
+          valkey-server --port 6379 --save '' --requirepass defaultpw \
+            --user bench on '>benchpw' '~*' '+@all' --daemonize yes \
+            --dir /tmp/valkey-auth
+          valkey-server --port 7000 --save '' --requirepass defaultpw \
+            --masterauth defaultpw --user bench on '>benchpw' '~*' '+@all' \
+            --cluster-enabled yes --cluster-announce-ip 127.0.0.1 \
+            --daemonize yes --dir /tmp/valkey-auth/cluster
+          for i in $(seq 1 30); do
+            if valkey-cli -p 6379 --user bench --pass benchpw --no-auth-warning ping 2>/dev/null | grep -q PONG &&
+               valkey-cli -p 7000 --user bench --pass benchpw --no-auth-warning ping 2>/dev/null | grep -q PONG; then
+              break
+            fi
+            sleep 1
+          done
+          valkey-cli -p 7000 --user bench --pass benchpw --no-auth-warning cluster addslotsrange 0 16383
+          for i in $(seq 1 30); do
+            if valkey-cli -p 7000 --user bench --pass benchpw --no-auth-warning cluster info | grep -q cluster_state:ok; then
+              echo "Valkey is ready"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "ERROR: Valkey never became ready"
+          exit 1
+
+      - name: Build
+        run: cargo build --release
+
+      - name: ACL user, password from a file
+        run: ./target/release/cachecannon config/valkey-auth-ci.toml
+
+      - name: Default user, password from the environment
+        run: CACHECANNON_AUTH_PASSWORD=defaultpw ./target/release/cachecannon config/valkey-ci.toml
+
+      - name: Cluster discovery and workers authenticate
+        run: |
+          sed -e 's/127.0.0.1:6379/127.0.0.1:7000/' \
+              -e 's/^protocol = "resp"/protocol = "resp"\ncluster = true/' \
+              config/valkey-auth-ci.toml > /tmp/valkey-auth/cluster.toml
+          ./target/release/cachecannon /tmp/valkey-auth/cluster.toml
+
+      - name: A wrong password fails the precheck and says so
+        run: |
+          if CACHECANNON_AUTH_PASSWORD=wrong ./target/release/cachecannon config/valkey-ci.toml > out.txt 2>&1; then
+            cat out.txt
+            echo "ERROR: run with a wrong password succeeded"
+            exit 1
+          fi
+          cat out.txt
+          grep -q "the server rejected AUTH" out.txt
+
   request-timeout:
     name: Request timeout (black-hole server)
     runs-on: ubuntu-latest
