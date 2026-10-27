@@ -301,16 +301,18 @@ thread_local! {
     /// process-wide gauge charged every response with whichever worker wrote
     /// last.
     static SLIP_NS: Cell<u64> = const { Cell::new(0) };
-    static SLIP_PUBLISH_TICK: Cell<u8> = const { Cell::new(0) };
+    // Starts at 255 so a worker's first update publishes.
+    static SLIP_PUBLISH_TICK: Cell<u8> = const { Cell::new(u8::MAX) };
 }
 
 /// Record this worker's current schedule slip.
 ///
-/// Every 256th call also refreshes the process-wide `current_slip_ns` gauge
-/// for `/metrics`. Keeping that gauge off the per-iteration path matters: with
-/// a limiter configured, 64 workers swapping it once per fire loop and loading
-/// it once per response put 87% of generator CPU on that one cache line and
-/// capped a process at ~14M req/s regardless of the configured rate.
+/// The first call on a thread, and every 256th after it, also refreshes the
+/// process-wide `current_slip_ns` gauge for `/metrics`. Keeping that gauge off
+/// the per-iteration path matters: with a limiter configured, 64 workers
+/// swapping it once per fire loop and loading it once per response put 87% of
+/// generator CPU on that one cache line and capped a process at ~14M req/s
+/// regardless of the configured rate.
 #[inline]
 pub fn set_worker_slip_ns(slip_ns: u64) {
     SLIP_NS.set(slip_ns);
