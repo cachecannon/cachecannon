@@ -48,7 +48,7 @@ cargo build --release
 # Binary is at ./target/release/cachecannon
 ```
 
-Requires Rust 1.76+ and Linux 6.0+ (for io_uring support).
+Requires Rust 1.89+ and Linux 6.0+ (for io_uring support).
 
 </details>
 

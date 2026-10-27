@@ -403,6 +403,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   or Atos TrustedRoot 2011 and gains SECOM TLS ECC/RSA Root CA 2024 and Telia
   EC/RSA TLS Root CA v3, so a server whose chain ends only at one of the two
   removed roots now fails verification.
+- arrow and parquet 58 → 60, metriken-query 0.36 → 0.37 and
+  metriken-storage 0.2 → 0.3 (the first releases on parquet 60).
+  parquet 58 depends on zstd 0.13, which RUSTSEC-2026-0391 and the
+  zstd-safe and zstd-sys advisories (RUSTSEC-2026-0395 to -0406, -0410)
+  cover with no fixed 0.13 release, and which failed `cargo audit` in CI.
+  The lockfile now holds zstd 0.14.3, zstd-safe 8.2.0 and zstd-sys 2.1.2,
+  the fixed releases. It also moves lru 0.12 → 0.18 (RUSTSEC-2026-0002,
+  RUSTSEC-2026-0253) and drops thrift 0.17. kvtrace and cachetrace move
+  to pelikan-io/cachesim 7fdb6de, which is on parquet 60.
+  In the viewer's query box, `rate(x[range])` now uses the whole
+  `[range]` (it used one step), and `deriv(x[range])` is the least-squares
+  slope over `[range]` (it used `[t - 2·step, t + step]`, and over a
+  counter it was the slope of the rate), as in Prometheus; `irate`, which
+  the dashboards use, is unchanged. (#263)
 
 ## [0.0.28] - 2026-09-28
 

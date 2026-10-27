@@ -12,7 +12,7 @@ description = "High-performance cache protocol benchmark tool"
 # archives and compiles SQLite; the viewer reads parquet only, so it is off
 # until the viewer opens `.dendro` (docs/journal/2026-10-08-dendro-recording.md,
 # step 5). `lz4` reads lz4-compressed parquet, which rezolus recordings may be.
-metriken-query = { version = "0.36", default-features = false, features = ["lz4"] }
+metriken-query = { version = "0.37", default-features = false, features = ["lz4"] }
 
 # Configuration
 toml = "0.8"
@@ -36,8 +36,8 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "net", "io-util", "sync", "time", "macros"] }
 
 # Viewer dependencies
-arrow = "58"
-parquet = "58"
+arrow = "60"
+parquet = "60"
 axum = "0.8"
 tower = "0.5"
 tower-http = { version = "0.6", features = ["compression-gzip", "decompression-gzip"] }
@@ -100,7 +100,7 @@ metriken = "0.11.3"
 # `/metrics/binary` snapshot.
 metriken-exposition = { version = "0.22", default-features = false, features = ["msgpack", "stream"] }
 # `MsgpackToParquet` for `--parquet`; `convert` alone compiles no SQLite.
-metriken-storage = { version = "0.2", default-features = false, features = ["convert"] }
+metriken-storage = { version = "0.3", default-features = false, features = ["convert"] }
 
 # TLS
 rustls = { version = "0.23", default-features = false, features = ["std", "ring"] }
@@ -109,10 +109,10 @@ webpki-roots = "1"
 # Request-level KV-cache traces, model geometry and the request-to-object
 # mapping (`[workload.kv_replay]`). Pinned to a commit of pelikan-io/cachesim
 # main; `hf-fetch` (an HTTP client for Hugging Face) is off.
-kvtrace = { git = "https://github.com/pelikan-io/cachesim", rev = "6789f4cdb8f7a0d5fdb4af0c2649fa591b44555a", default-features = false }
+kvtrace = { git = "https://github.com/pelikan-io/cachesim", rev = "7fdb6de2ab5b836977a20ea33386f328089306c8", default-features = false }
 # Object-level cache traces (`[workload.trace_replay]`), from the same
 # cachesim commit; the importers (`import`) are off.
-cachetrace = { git = "https://github.com/pelikan-io/cachesim", rev = "6789f4cdb8f7a0d5fdb4af0c2649fa591b44555a", default-features = false }
+cachetrace = { git = "https://github.com/pelikan-io/cachesim", rev = "7fdb6de2ab5b836977a20ea33386f328089306c8", default-features = false }
 
 # Rate limiting
 ratelimit = "2.0.0"
