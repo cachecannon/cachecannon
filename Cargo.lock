@@ -33,24 +33,18 @@ dependencies = [
 
 [[package]]
 name = "alloc-no-stdlib"
-version = "2.0.4"
+version = "3.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cc7bb162ec39d46ab1ca8c77bf72e890535becd1751bb45f64c597edb4c8c6b3"
+checksum = "c2fb6cfd47bf496ff64095c20eaba0c201404ee38714d4142fcfa1dc334fcc7a"
 
 [[package]]
 name = "alloc-stdlib"
-version = "0.2.4"
+version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0e76a019e91224d279006ff972f1e984179a6e9feb050adba6ce8274aef23195"
+checksum = "0b5c1865780388bfa186411ab5f247819487fc4864c6e9c3106611fa347586e1"
 dependencies = [
  "alloc-no-stdlib",
 ]
-
-[[package]]
-name = "allocator-api2"
-version = "0.2.21"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "683d7910e743518b0e34f1186f92494becacb047c7b6bf616c96772180fef923"
 
 [[package]]
 name = "android_system_properties"
@@ -119,9 +113,9 @@ checksum = "7f202df86484c868dbad7eaa557ef785d5c66295e41b460ef922eca0723b842c"
 
 [[package]]
 name = "arrow"
-version = "58.3.0"
+version = "60.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "378530e55cd479eda3c14eb345310799717e6f76d0c332041e8487022166b471"
+checksum = "234ce58e76c04e8162c2e4bc3fe53fa7c2418ef5fba7bb2838b8531b7d4fbf14"
 dependencies = [
  "arrow-arith",
  "arrow-array",
@@ -140,9 +134,9 @@ dependencies = [
 
 [[package]]
 name = "arrow-arith"
-version = "58.3.0"
+version = "60.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a0ab212d2c1886e802f51c5212d78ebbcbb0bec980fff9dadc1eb8d45cd0b738"
+checksum = "2303ebedb1071f4f72d71171e383859a9a285c94d99e4892685a96fca9890720"
 dependencies = [
  "arrow-array",
  "arrow-buffer",
@@ -154,9 +148,9 @@ dependencies = [
 
 [[package]]
 name = "arrow-array"
-version = "58.3.0"
+version = "60.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cfd33d3e92f207444098c75b42de99d329562be0cf686b307b097cc52b4e999e"
+checksum = "51dff6e4b9f158864a0aeb6a131ad53858ecbae7a2fc8989307b9b3c6b2f122e"
 dependencies = [
  "ahash",
  "arrow-buffer",
@@ -164,7 +158,7 @@ dependencies = [
  "arrow-schema",
  "chrono",
  "half",
- "hashbrown 0.17.1",
+ "hashbrown",
  "num-complex",
  "num-integer",
  "num-traits",
@@ -172,9 +166,9 @@ dependencies = [
 
 [[package]]
 name = "arrow-buffer"
-version = "58.3.0"
+version = "60.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0c6cd424c2693bcdbc150d843dc9d4d137dd2de4782ce6df491ad11a3a0416c0"
+checksum = "c7235b863533e9db3ab86905b4521251de11226275b436ff3cb2d0010558d1c5"
 dependencies = [
  "bytes",
  "half",
@@ -184,9 +178,9 @@ dependencies = [
 
 [[package]]
 name = "arrow-cast"
-version = "58.3.0"
+version = "60.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4c5aefb56a2c02e9e2b30746241058b85f8983f0fcff2ba0c6d09006e1cded7f"
+checksum = "d52cf840f0c34aeeb7e8b05aba72d66878e6c001827f423331f0b260209e7b7e"
 dependencies = [
  "arrow-array",
  "arrow-buffer",
@@ -205,10 +199,21 @@ dependencies = [
 ]
 
 [[package]]
-name = "arrow-csv"
-version = "58.3.0"
+name = "arrow-cmp"
+version = "60.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e94e8cf7e517657a52b91ea1263acf38c4ca62a84655d72458a3359b12ab97de"
+checksum = "73a0e9adb28d95739fabcdae637261a2c14e618caf58ba1b88857120f9ee2687"
+dependencies = [
+ "arrow-array",
+ "arrow-buffer",
+ "arrow-schema",
+]
+
+[[package]]
+name = "arrow-csv"
+version = "60.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2ad83176cc677f996096d694a3cccd7310069faeee4b3df9e2dabf92fdcf8b4b"
 dependencies = [
  "arrow-array",
  "arrow-cast",
@@ -221,9 +226,9 @@ dependencies = [
 
 [[package]]
 name = "arrow-data"
-version = "58.3.0"
+version = "60.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3c88210023a2bfee1896af366309a3028fc3bcbd6515fa29a7990ee1baa08ee0"
+checksum = "5aa06d5e22786c4966ffc4d2f171d0cb65d95f6bdea108a14e8c335e9faa437f"
 dependencies = [
  "arrow-buffer",
  "arrow-schema",
@@ -234,9 +239,9 @@ dependencies = [
 
 [[package]]
 name = "arrow-ipc"
-version = "58.3.0"
+version = "60.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "238438f0834483703d88896db6fe5a7138b2230debc31b34c0336c2996e3c64f"
+checksum = "86c523472d22e31f984df7a44fc36e6323d3c9b05ffe53d267ee4c3aa7c128d2"
 dependencies = [
  "arrow-array",
  "arrow-buffer",
@@ -248,9 +253,9 @@ dependencies = [
 
 [[package]]
 name = "arrow-json"
-version = "58.3.0"
+version = "60.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "205ca2119e6d679d5c133c6f30e68f027738d95ed948cf77677ea69c7800036b"
+checksum = "342fc6600a93a48038d853431803c941436b7b51f756763e76cad9784b7e3718"
 dependencies = [
  "arrow-array",
  "arrow-buffer",
@@ -273,12 +278,13 @@ dependencies = [
 
 [[package]]
 name = "arrow-ord"
-version = "58.3.0"
+version = "60.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1bffd8fd2579286a5d63bac898159873e5094a79009940bcb42bbfce4f19f1d0"
+checksum = "5a7ac2c6a9cdc782fa9548d3763461eaec8c93347e297fddbaa44807e70a3698"
 dependencies = [
  "arrow-array",
  "arrow-buffer",
+ "arrow-cmp",
  "arrow-data",
  "arrow-schema",
  "arrow-select",
@@ -286,9 +292,9 @@ dependencies = [
 
 [[package]]
 name = "arrow-row"
-version = "58.3.0"
+version = "60.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bab5994731204603c73ba69267616c50f80780774c6bb0476f1f830625115e0c"
+checksum = "758b87e9648d80001e0916c083334ed93074c677a81a96144d5c84bd2d8eab2a"
 dependencies = [
  "arrow-array",
  "arrow-buffer",
@@ -299,19 +305,20 @@ dependencies = [
 
 [[package]]
 name = "arrow-schema"
-version = "58.3.0"
+version = "60.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f633dbfdf39c039ada1bf9e34c694816eb71fbb7dc78f613993b7245e078a1ed"
+checksum = "f85a9a58cd03560526b0066487574aacb9008e413504fa0ee23d61141e96c338"
 
 [[package]]
 name = "arrow-select"
-version = "58.3.0"
+version = "60.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8cd065c54172ac787cf3f2f8d4107e0d3fdc26edba76fdf4f4cc170258942222"
+checksum = "ba3482b7d03bf4a3bf0b195f08a7f2b071595ccd54897e35b975ac63d3104977"
 dependencies = [
  "ahash",
  "arrow-array",
  "arrow-buffer",
+ "arrow-cmp",
  "arrow-data",
  "arrow-schema",
  "num-traits",
@@ -319,9 +326,9 @@ dependencies = [
 
 [[package]]
 name = "arrow-string"
-version = "58.3.0"
+version = "60.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "29dd7cda3ab9692f43a2e4acc444d760cc17b12bb6d8232ddf64e9bab7c06b42"
+checksum = "f300b4400b1e7cd58f7cbbd5dd2a0072cc59e73bfaee2a152b3ac660e46d9dd1"
 dependencies = [
  "arrow-array",
  "arrow-buffer",
@@ -354,9 +361,9 @@ dependencies = [
 
 [[package]]
 name = "atoi"
-version = "2.0.0"
+version = "3.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f28d99ec8bfea296261ca1af174f24225171fea9664ba9003cbebee704810528"
+checksum = "d12c37257553c19e9aee6cba77814fdc9e07844abfc8b3a2c377cd920ee5a993"
 dependencies = [
  "num-traits",
 ]
@@ -427,9 +434,9 @@ dependencies = [
 
 [[package]]
 name = "base64"
-version = "0.22.1"
+version = "0.23.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
+checksum = "ac07cdecf99051d9a5238b80f35af32cdeba5b336e55d957b318b50137e18da5"
 
 [[package]]
 name = "bincode"
@@ -486,9 +493,9 @@ dependencies = [
 
 [[package]]
 name = "brotli"
-version = "8.0.4"
+version = "9.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5cc91aac060a7a1e25823bdccbfb6af1875b88f17c6daac97894eed8207166b3"
+checksum = "627b7cfb0578f0eafce087a90fcd40add1231900b69e4d4de2d456260a4f5d81"
 dependencies = [
  "alloc-no-stdlib",
  "alloc-stdlib",
@@ -497,9 +504,9 @@ dependencies = [
 
 [[package]]
 name = "brotli-decompressor"
-version = "5.0.3"
+version = "6.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3a32acac15fe1967bc3986b2a6347dffc965602354ea6f450ad07e8bfd253583"
+checksum = "34c6783f42c21c952ad7112b354f0ba2f10760e9decea5b1b60523d6e270faaf"
 dependencies = [
  "alloc-no-stdlib",
  "alloc-stdlib",
@@ -510,12 +517,6 @@ name = "bumpalo"
 version = "3.20.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "72f5acc6cb2ba439de613abc23857ec3d78374d8ed5ac84e9d11336e87da8649"
-
-[[package]]
-name = "byteorder"
-version = "1.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1fd0f2584146f6f2ef48085050886acf353beff7305ebd1ae69500e27c67f64b"
 
 [[package]]
 name = "bytes"
@@ -583,7 +584,7 @@ dependencies = [
 [[package]]
 name = "cachetrace"
 version = "0.1.0"
-source = "git+https://github.com/pelikan-io/cachesim?rev=6789f4cdb8f7a0d5fdb4af0c2649fa591b44555a#6789f4cdb8f7a0d5fdb4af0c2649fa591b44555a"
+source = "git+https://github.com/pelikan-io/cachesim?rev=7fdb6de2ab5b836977a20ea33386f328089306c8#7fdb6de2ab5b836977a20ea33386f328089306c8"
 dependencies = [
  "arrow",
  "parquet",
@@ -725,9 +726,9 @@ checksum = "1d07550c9036bf2ae0c684c4297d503f838287c83c53686d05370d0e139ae570"
 
 [[package]]
 name = "comfy-table"
-version = "7.2.2"
+version = "8.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "958c5d6ecf1f214b4c2bbbbf6ab9523a864bd136dcf71a7e8904799acfe1ad47"
+checksum = "b96a46ad395a5e00676eddaca4a45ed78b29c08be5a878d35e4b071c625637dd"
 dependencies = [
  "unicode-segmentation",
  "unicode-width",
@@ -964,12 +965,6 @@ checksum = "3f9eec918d3f24069decb9af1554cad7c880e2da24a9afd88aca000531ab82c1"
 
 [[package]]
 name = "foldhash"
-version = "0.1.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d9c4f5dac5e15c24eb999c26181a6ca40b39fe946cbe4c263c7209467bc83af2"
-
-[[package]]
-name = "foldhash"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "77ce24cb58228fbb8aa041425bb1050850ac19177686ea6e0f41a70416f56fdb"
@@ -1090,20 +1085,12 @@ dependencies = [
 
 [[package]]
 name = "hashbrown"
-version = "0.15.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9229cfe53dfd69f0609a49f65461bd93001ea1ef889cd5529dd176593f5338a1"
-dependencies = [
- "allocator-api2",
- "equivalent",
- "foldhash 0.1.5",
-]
-
-[[package]]
-name = "hashbrown"
 version = "0.17.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ed5909b6e89a2db4456e54cd5f673791d7eca6732202bbf2a9cc504fe2f9b84a"
+dependencies = [
+ "foldhash",
+]
 
 [[package]]
 name = "hdf5-metno"
@@ -1332,14 +1319,8 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d466e9454f08e4a911e14806c24e16fba1b4c121d1ea474396f396069cf949d9"
 dependencies = [
  "equivalent",
- "hashbrown 0.17.1",
+ "hashbrown",
 ]
-
-[[package]]
-name = "integer-encoding"
-version = "3.0.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8bb03732005da905c88227371639bf1ad885cc712789c011c31c5fb3ab3ccf02"
 
 [[package]]
 name = "io-uring"
@@ -1428,7 +1409,7 @@ checksum = "02477b4e4b5454c404fa7ef505c85cacb89fee3987793f9a3a2bd9ab556c4e3b"
 [[package]]
 name = "kvtrace"
 version = "0.1.0"
-source = "git+https://github.com/pelikan-io/cachesim?rev=6789f4cdb8f7a0d5fdb4af0c2649fa591b44555a#6789f4cdb8f7a0d5fdb4af0c2649fa591b44555a"
+source = "git+https://github.com/pelikan-io/cachesim?rev=7fdb6de2ab5b836977a20ea33386f328089306c8#7fdb6de2ab5b836977a20ea33386f328089306c8"
 dependencies = [
  "arrow",
  "parquet",
@@ -1614,18 +1595,18 @@ dependencies = [
 
 [[package]]
 name = "lru"
-version = "0.12.5"
+version = "0.18.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "234cf4f4a04dc1f57e24b96cc0cd600cf2af460d4161ac5ecdd0af8e1f3b2a38"
+checksum = "ef9ac18847474e638e3702b76c65d4eb93428471a74778ef0f1be711717f89b5"
 dependencies = [
- "hashbrown 0.15.5",
+ "hashbrown",
 ]
 
 [[package]]
 name = "lz4_flex"
-version = "0.13.1"
+version = "0.14.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7ef0d4ed8669f8f8826eb00dc878084aa8f253506c4fd5e8f58f5bce72ddb97e"
+checksum = "ecbdfe44b1bd960b68170b417450a628c43f7cf56bb3c5317e61cb230ee7f226"
 dependencies = [
  "twox-hash",
 ]
@@ -1722,7 +1703,7 @@ dependencies = [
  "bytes",
  "chrono",
  "dendro",
- "foldhash 0.2.0",
+ "foldhash",
  "histogram 1.4.1",
  "humantime",
  "metriken",
@@ -1748,15 +1729,14 @@ dependencies = [
 
 [[package]]
 name = "metriken-query"
-version = "0.36.0"
+version = "0.37.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e543a028fbc58be0aa48c5fd8ac20ca9858bc6dc9a6f3b6d7beae2416f41c17e"
+checksum = "f1d87cb2ed0ea637f64e031776647e380a556ea6ec280c49306746f8d71039ad"
 dependencies = [
  "arrow",
  "bytes",
- "foldhash 0.2.0",
+ "foldhash",
  "histogram 1.4.1",
- "lru",
  "metriken-storage",
  "parquet",
  "promql-parser",
@@ -1769,13 +1749,13 @@ dependencies = [
 
 [[package]]
 name = "metriken-storage"
-version = "0.2.0"
+version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f9098faa6546d34d27aad587f307110f61fc773d610d2a73663a75311fde2b2f"
+checksum = "b44084e4230c3d927a3748f1c952526dacecd96778b22f2bdc735f3e8070023b"
 dependencies = [
  "arrow",
  "bytes",
- "foldhash 0.2.0",
+ "foldhash",
  "histogram 1.4.1",
  "lru",
  "metriken-model",
@@ -1879,9 +1859,9 @@ dependencies = [
 
 [[package]]
 name = "num-bigint"
-version = "0.4.6"
+version = "0.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a5e44f723f1133c9deac646763579fdb3ac745e418f2a7af9cd0c431da1f20b9"
+checksum = "93e7820bc0a80a0238e650327316f929ba18d5be054b647490a3a6a339f3e7c0"
 dependencies = [
  "num-integer",
  "num-traits",
@@ -1982,15 +1962,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "ordered-float"
-version = "2.10.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "68f19d67e5a2795c94e73e0bb1cc1a7edeb2e28efd39e2e1c9b7a40c1108b11c"
-dependencies = [
- "num-traits",
-]
-
-[[package]]
 name = "packedvec"
 version = "1.2.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2025,9 +1996,9 @@ dependencies = [
 
 [[package]]
 name = "parquet"
-version = "58.3.0"
+version = "60.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5dafa7d01085b62a47dd0c1829550a0a36710ea9c4fe358a05a85477cec8a908"
+checksum = "8af83d2940bc0510f9aef86d865f56fdc6095f87ab115ac885a80b7c5226d3ba"
 dependencies = [
  "ahash",
  "arrow-array",
@@ -2042,16 +2013,14 @@ dependencies = [
  "chrono",
  "flate2",
  "half",
- "hashbrown 0.17.1",
+ "hashbrown",
  "lz4_flex",
  "num-bigint",
  "num-integer",
  "num-traits",
- "paste",
  "seq-macro",
  "simdutf8",
  "snap",
- "thrift",
  "twox-hash",
  "zstd",
 ]
@@ -2785,17 +2754,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "thrift"
-version = "0.17.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7e54bc85fc7faa8bc175c4bab5b92ba8d9a3ce893d0e9f42cc455c8ab16a9e09"
-dependencies = [
- "byteorder",
- "integer-encoding",
- "ordered-float",
-]
-
-[[package]]
 name = "tikv-jemalloc-ctl"
 version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3493,27 +3451,27 @@ checksum = "b8848ee67ecc8aedbaf3e4122217aff892639231befc6a1b58d29fff4c2cabaa"
 
 [[package]]
 name = "zstd"
-version = "0.13.3"
+version = "0.14.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e91ee311a569c327171651566e07972200e76fcfe2242a4fa446149a3881c08a"
+checksum = "db3ae9bf90af6e40197bef767eeefc46ad6397420fe873830bd85e5fbbfb3c70"
 dependencies = [
  "zstd-safe",
 ]
 
 [[package]]
 name = "zstd-safe"
-version = "7.2.4"
+version = "8.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8f49c4d5f0abb602a93fb8736af2a4f4dd9512e36f7f570d66e65ff867ed3b9d"
+checksum = "ded520f16b29e1a9b771c722221b2b0a0398c2316d9bb3c42b458a5414d7434b"
 dependencies = [
  "zstd-sys",
 ]
 
 [[package]]
 name = "zstd-sys"
-version = "2.0.16+zstd.1.5.7"
+version = "2.1.2+zstd.1.5.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "91e19ebc2adc8f83e43039e79776e3fda8ca919132d68a1fed6a5faca2683748"
+checksum = "481ada9c543b2323cbb7bbdbb5249177fbf0188ed959ed2c15e4b22421c84ed3"
 dependencies = [
  "cc",
  "pkg-config",
