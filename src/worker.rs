@@ -5064,6 +5064,13 @@ mod tests {
     use super::*;
 
     #[test]
+    fn perceived_latency_adds_the_slip_only_when_tracked() {
+        metrics::set_worker_slip_ns(5_000);
+        assert_eq!(perceived_ns(1_000, true), 6_000);
+        assert_eq!(perceived_ns(1_000, false), 1_000);
+    }
+
+    #[test]
     fn a_failed_fire_requeues_the_discarded_keys_in_order() {
         let queues = build_prefill_queues(0, 16, &[], &None);
         let mut inflight = InFlight::new(std::time::Duration::ZERO, 8);
