@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- Latency histograms are sharded per worker thread and merged on read, so
+  workers no longer contend on shared buckets. On main, with this and the
+  slip change below, 64 threads at pipeline 64 on Graviton4 went from 21.8M
+  to 111M RPS. Each written histogram allocates one 58 KiB bucket array per
+  worker that records into it. Counter shards rise from 64 to 256. (#259)
+- With no rate limiter (neither `workload.rate_limit` nor
+  `[workload.saturation_search]`), RESP, memcache and ping workers no
+  longer write or read the shared `current_slip_ns` gauge and no longer
+  record `schedule_slip`, so `/metrics` and the parquet recording no
+  longer carry `schedule_slip` (before, they carried a histogram of
+  zeros). End-of-run output is unchanged. (#259)
+
 ## [0.0.33] - 2026-10-21
 
 ### Added

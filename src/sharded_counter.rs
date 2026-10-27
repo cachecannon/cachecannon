@@ -12,7 +12,10 @@ use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 
 const CACHE_LINE: usize = 128;
 const SLOTS: usize = CACHE_LINE / 8; // 16 counters per cache line
-const NUM_SHARDS: usize = 64;
+/// Number of per-thread shards. Worker threads above this count share shards
+/// (`id % NUM_SHARDS`), so it should stay at or above the largest worker
+/// count a single process is expected to run.
+pub(crate) const NUM_SHARDS: usize = 256;
 
 thread_local! {
     static SHARD_ID: Cell<Option<usize>> = const { Cell::new(None) };
@@ -201,7 +204,7 @@ impl metriken::Metric for Gauge {
 
 /// Get the shard index for the current thread.
 #[inline]
-fn shard_index() -> usize {
+pub(crate) fn shard_index() -> usize {
     SHARD_ID.get().unwrap_or_else(|| {
         thread_local! {
             static ID: u8 = const { 0 };
