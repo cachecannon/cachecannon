@@ -20,14 +20,14 @@ use ringline::{AsyncEventHandler, ConnCtx, Connection, DriverCtx, RegionId, Send
 use rand::prelude::*;
 use rand_xoshiro::Xoshiro256PlusPlus;
 use std::cell::{Cell, RefCell};
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::future::Future;
 use std::io;
 use std::net::SocketAddr;
 use std::pin::Pin;
 use std::rc::Rc;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
 use std::sync::{Mutex, OnceLock, RwLock};
 use std::task::{Context, Poll, Waker};
 use std::time::{Duration, Instant};
@@ -113,6 +113,59 @@ pub struct SharedState {
     /// Append stream: keys enqueued so far (cumulative). A batch is complete
     /// when confirmed catches up with this.
     append_keys_total: AtomicUsize,
+    /// AUTH outcome per endpoint (see [`AuthState`]).
+    auth: Mutex<HashMap<SocketAddr, AuthState>>,
+}
+
+/// Why a server refused a connection's handshake.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AuthFailureKind {
+    /// `AUTH` itself failed: wrong password, unknown or disabled user, or a
+    /// password sent to a server that has none.
+    Rejected,
+    /// The server answered `NOAUTH`: it needs a password and none was sent.
+    Required,
+    /// The server answered `NOPERM`: the user may not run the handshake
+    /// commands (`HELLO`, `PING`).
+    NoPerm,
+}
+
+/// One endpoint's refused handshake: what kind, and the server's reply.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AuthFailure {
+    pub endpoint: SocketAddr,
+    pub kind: AuthFailureKind,
+    pub message: String,
+}
+
+/// AUTH outcome for one endpoint. A failure is sticky: the server's answer to
+/// the same credentials does not change between connections.
+#[derive(Debug, Clone)]
+enum AuthState {
+    /// Some connection will authenticate to this endpoint; none has finished.
+    Pending,
+    Ok,
+    Failed(AuthFailureKind, String),
+}
+
+/// Classify a handshake error. Any server error reply to `AUTH` is a
+/// rejection; for `HELLO` and `PING` only `NOAUTH` and `NOPERM` are.
+pub(crate) fn auth_failure_kind(
+    e: &ringline_redis::Error,
+    is_auth: bool,
+) -> Option<AuthFailureKind> {
+    let ringline_redis::Error::Redis(msg) = e else {
+        return None;
+    };
+    if is_auth {
+        Some(AuthFailureKind::Rejected)
+    } else if msg.starts_with("NOAUTH") {
+        Some(AuthFailureKind::Required)
+    } else if msg.starts_with("NOPERM") {
+        Some(AuthFailureKind::NoPerm)
+    } else {
+        None
+    }
 }
 
 impl SharedState {
@@ -126,7 +179,74 @@ impl SharedState {
             prefill_keys_total: AtomicUsize::new(0),
             append_keys_confirmed: AtomicUsize::new(0),
             append_keys_total: AtomicUsize::new(0),
+            auth: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// Note that a connection will authenticate to `endpoint`, so precheck
+    /// waits for its outcome. Called before the connection task is spawned.
+    pub fn expect_auth(&self, endpoint: SocketAddr) {
+        self.auth
+            .lock()
+            .unwrap()
+            .entry(endpoint)
+            .or_insert(AuthState::Pending);
+    }
+
+    /// Record a successful `AUTH` to `endpoint`.
+    pub fn auth_ok(&self, endpoint: SocketAddr) {
+        let mut auth = self.auth.lock().unwrap();
+        let state = auth.entry(endpoint).or_insert(AuthState::Pending);
+        if matches!(state, AuthState::Pending) {
+            *state = AuthState::Ok;
+        }
+    }
+
+    /// Record a refused handshake on `endpoint`. Returns true for the first
+    /// failure on that endpoint.
+    pub fn auth_failed(&self, endpoint: SocketAddr, kind: AuthFailureKind, message: &str) -> bool {
+        let mut auth = self.auth.lock().unwrap();
+        let state = auth.entry(endpoint).or_insert(AuthState::Pending);
+        if matches!(state, AuthState::Failed(..)) {
+            return false;
+        }
+        *state = AuthState::Failed(kind, message.to_string());
+        true
+    }
+
+    /// Endpoints a connection will authenticate to that have no outcome yet,
+    /// in address order.
+    pub fn auth_pending(&self) -> Vec<SocketAddr> {
+        let mut pending: Vec<SocketAddr> = self
+            .auth
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(_, s)| matches!(s, AuthState::Pending))
+            .map(|(e, _)| *e)
+            .collect();
+        pending.sort();
+        pending
+    }
+
+    /// Every endpoint that refused a handshake, in address order.
+    pub fn auth_failures(&self) -> Vec<AuthFailure> {
+        let mut failures: Vec<AuthFailure> = self
+            .auth
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|(endpoint, state)| match state {
+                AuthState::Failed(kind, message) => Some(AuthFailure {
+                    endpoint: *endpoint,
+                    kind: *kind,
+                    message: message.clone(),
+                }),
+                _ => None,
+            })
+            .collect();
+        failures.sort_by_key(|f| f.endpoint);
+        failures
     }
 
     /// Append stream: keys confirmed written so far.
@@ -1333,6 +1453,7 @@ fn spawn_protocol_tasks(
     let protocol = worker_state.task_state.config.target.protocol;
     let seed = run_seed(&worker_state.task_state.config);
     let (my_start, my_endpoints) = my_connection_endpoints(worker_state, my_connections, worker_id);
+    expect_auth(worker_state, &my_endpoints);
 
     for (i, &endpoint_idx) in my_endpoints.iter().enumerate() {
         let global_conn_idx = my_start + i;
@@ -1370,6 +1491,26 @@ fn spawn_protocol_tasks(
             );
             metrics::CONNECTIONS_FAILED.increment();
         }
+    }
+}
+
+/// With a password configured, register the endpoints these connections
+/// authenticate to, so precheck waits for each one's AUTH outcome. Runs before
+/// the tasks are spawned and before the worker counts as started.
+fn expect_auth(worker_state: &SharedWorkerState, endpoint_idxs: &[usize]) {
+    let task_state = &worker_state.task_state;
+    if !matches!(
+        task_state.config.target.protocol,
+        CacheProtocol::Resp | CacheProtocol::Resp3
+    ) || task_state.config.target.auth_password.is_none()
+    {
+        return;
+    }
+    for endpoint in endpoint_idxs
+        .iter()
+        .filter_map(|&i| task_state.endpoints.get(i))
+    {
+        task_state.shared.expect_auth(*endpoint);
     }
 }
 
@@ -1561,38 +1702,73 @@ pub(crate) async fn establish_connection(
     }
 }
 
-/// Set once any server rejects `AUTH`, so a failed precheck reports the
-/// rejection rather than a connectivity problem.
-pub(crate) static AUTH_REJECTED: AtomicBool = AtomicBool::new(false);
-
 /// Send `AUTH [<user>] <password>` on a fresh RESP connection when the target
-/// has a password, before `HELLO 3` or any workload traffic. Logs the first
-/// rejection at warn level and later ones at debug; the server's error text
-/// is logged, never the arguments.
+/// has a password, before `HELLO 3` or any workload traffic, and record the
+/// outcome for the endpoint. The server's error text is logged, never the
+/// arguments.
 async fn authenticate(
     client: &mut ringline_redis::Client,
-    config: &Config,
-    worker_id: usize,
+    state: &SharedWorkerState,
     endpoint: SocketAddr,
-) -> Result<(), ringline_redis::Error> {
-    let Some(args) = config.target.auth_args() else {
+) -> Result<(), Option<AuthFailureKind>> {
+    let Some(request) = state.task_state.config.target.auth_request() else {
         return Ok(());
     };
-    let mut request = resp_proto::Request::cmd(b"AUTH");
-    for arg in args {
-        request = request.arg(arg);
-    }
-    let result = client.cmd(&request).await.map(|_| ());
-    if let Err(ref e) = result {
-        let first = matches!(e, ringline_redis::Error::Redis(_))
-            && !AUTH_REJECTED.swap(true, Ordering::Relaxed);
-        if first {
-            tracing::warn!(worker = worker_id, endpoint = %endpoint, "AUTH rejected: {e}");
-        } else {
-            tracing::debug!(worker = worker_id, endpoint = %endpoint, "AUTH failed: {e}");
+    match client.cmd(&request).await {
+        Ok(_) => {
+            state.task_state.shared.auth_ok(endpoint);
+            Ok(())
         }
+        Err(e) => Err(note_handshake_error(state, endpoint, "AUTH", &e, true)),
     }
-    result
+}
+
+/// Log a failed handshake command and, when it is an AUTH problem, record it
+/// for the endpoint. The first AUTH problem per endpoint is logged at warn.
+fn note_handshake_error(
+    state: &SharedWorkerState,
+    endpoint: SocketAddr,
+    what: &str,
+    e: &ringline_redis::Error,
+    is_auth: bool,
+) -> Option<AuthFailureKind> {
+    let worker = state.task_state.worker_id;
+    let kind = auth_failure_kind(e, is_auth);
+    match (kind, e) {
+        (Some(kind), ringline_redis::Error::Redis(msg))
+            if state.task_state.shared.auth_failed(endpoint, kind, msg) =>
+        {
+            tracing::warn!(worker, endpoint = %endpoint, "{what} refused: {msg}");
+        }
+        _ => tracing::debug!(worker, endpoint = %endpoint, "{what} failed: {e}"),
+    }
+    kind
+}
+
+/// Pause before reconnecting after a failed handshake: [`auth_backoff`] when
+/// the server refused it, 100 ms otherwise.
+async fn handshake_retry_pause(state: &SharedWorkerState, refused: Option<AuthFailureKind>) {
+    if refused.is_some() {
+        auth_backoff(state).await;
+    } else {
+        ringline::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+/// After a refused handshake: wait out precheck, which the runner fails as soon
+/// as it sees the failure, instead of retrying credentials the server has
+/// already refused. Later in the run, retry once a second.
+async fn auth_backoff(state: &SharedWorkerState) {
+    loop {
+        let phase = state.task_state.shared.phase();
+        if phase.should_stop() || !matches!(phase, Phase::Connect | Phase::Precheck) {
+            break;
+        }
+        ringline::sleep(Duration::from_millis(10)).await;
+    }
+    if !state.task_state.shared.phase().should_stop() {
+        ringline::sleep(Duration::from_secs(1)).await;
+    }
 }
 
 /// Closes the connection when dropped.
@@ -1794,16 +1970,13 @@ async fn resp_connection_task(state: Arc<SharedWorkerState>, endpoint_idx: usize
             "connected (RESP)"
         );
 
-        if authenticate(&mut client, config, state.task_state.worker_id, endpoint)
-            .await
-            .is_err()
-        {
+        if let Err(refused) = authenticate(&mut client, &state, endpoint).await {
             metrics::CONNECTIONS_ACTIVE.decrement();
             metrics::CONNECTIONS_FAILED.increment();
             if state.task_state.kv_replay.is_some() {
                 crate::kvreplay::note_connect_failed();
             }
-            ringline::sleep(Duration::from_millis(100)).await;
+            handshake_retry_pause(&state, refused).await;
             continue;
         }
 
@@ -1819,18 +1992,13 @@ async fn resp_connection_task(state: Arc<SharedWorkerState>, endpoint_idx: usize
                 .cmd(&resp_proto::Request::cmd(b"HELLO").arg(b"3"))
                 .await
         {
-            tracing::debug!(
-                worker = state.task_state.worker_id,
-                endpoint = %endpoint,
-                "HELLO 3 failed: {}",
-                e
-            );
+            let refused = note_handshake_error(&state, endpoint, "HELLO 3", &e, false);
             metrics::CONNECTIONS_ACTIVE.decrement();
             metrics::CONNECTIONS_FAILED.increment();
             if state.task_state.kv_replay.is_some() {
                 crate::kvreplay::note_connect_failed();
             }
-            ringline::sleep(Duration::from_millis(100)).await;
+            handshake_retry_pause(&state, refused).await;
             continue;
         }
 
@@ -1846,18 +2014,14 @@ async fn resp_connection_task(state: Arc<SharedWorkerState>, endpoint_idx: usize
                     state.mark_precheck_done();
                 }
                 Err(e) => {
-                    tracing::debug!(
-                        worker = state.task_state.worker_id,
-                        endpoint = %endpoint,
-                        "precheck PING failed: {}",
-                        e
-                    );
+                    let refused =
+                        note_handshake_error(&state, endpoint, "precheck PING", &e, false);
                     metrics::CONNECTIONS_ACTIVE.decrement();
                     metrics::CONNECTIONS_FAILED.increment();
                     if state.task_state.kv_replay.is_some() {
                         crate::kvreplay::note_connect_failed();
                     }
-                    ringline::sleep(Duration::from_millis(100)).await;
+                    handshake_retry_pause(&state, refused).await;
                     continue;
                 }
             }
@@ -3792,10 +3956,11 @@ fn spawn_append_tasks(worker_state: &Arc<SharedWorkerState>, worker_id: usize) {
     let (mine, start) = connection_share(append.connections, num_threads, worker_id);
     let protocol = worker_state.task_state.config.target.protocol;
     let run = run_seed(&worker_state.task_state.config);
+    let endpoint_idxs: Vec<usize> = (start..start + mine).map(|g| g % num_endpoints).collect();
+    expect_auth(worker_state, &endpoint_idxs);
 
-    for i in 0..mine {
+    for (i, &endpoint_idx) in endpoint_idxs.iter().enumerate() {
         let global_idx = start + i;
-        let endpoint_idx = global_idx % num_endpoints;
         let state = Arc::clone(worker_state);
         let seed = connection_seed(run, SeedRole::Append, worker_id, i);
 
@@ -3955,13 +4120,10 @@ async fn resp_append_task(state: Arc<SharedWorkerState>, endpoint_idx: usize, se
             ringline_redis::Client::builder(connection).on_result(make_resp_append_callback());
         let mut client = builder.max_batch_size(append.pipeline_depth).build();
 
-        if authenticate(&mut client, config, state.task_state.worker_id, endpoint)
-            .await
-            .is_err()
-        {
+        if let Err(refused) = authenticate(&mut client, &state, endpoint).await {
             metrics::APPEND_CONNECTIONS_ACTIVE.decrement();
             metrics::CONNECTIONS_FAILED.increment();
-            ringline::sleep(Duration::from_millis(100)).await;
+            handshake_retry_pause(&state, refused).await;
             continue;
         }
 
@@ -3971,15 +4133,11 @@ async fn resp_append_task(state: Arc<SharedWorkerState>, endpoint_idx: usize, se
                 .cmd(&resp_proto::Request::cmd(b"HELLO").arg(b"3"))
                 .await
         {
-            tracing::debug!(
-                worker = state.task_state.worker_id,
-                endpoint = %endpoint,
-                "append writer HELLO 3 failed: {}",
-                e
-            );
+            let refused =
+                note_handshake_error(&state, endpoint, "append writer HELLO 3", &e, false);
             metrics::APPEND_CONNECTIONS_ACTIVE.decrement();
             metrics::CONNECTIONS_FAILED.increment();
-            ringline::sleep(Duration::from_millis(100)).await;
+            handshake_retry_pause(&state, refused).await;
             continue;
         }
 
@@ -5688,5 +5846,72 @@ mod seed_tests {
         let b = keys(connection_seed(12, SeedRole::Reader, 3, 17), 1000);
         let equal = a.iter().zip(&b).filter(|(x, y)| x == y).count();
         assert!(equal < 100, "{equal}/1000 keys repeated across runs");
+    }
+}
+
+#[cfg(test)]
+mod auth_state_tests {
+    use super::*;
+
+    fn addr(port: u16) -> SocketAddr {
+        SocketAddr::from(([127, 0, 0, 1], port))
+    }
+
+    fn redis(msg: &str) -> ringline_redis::Error {
+        ringline_redis::Error::Redis(msg.to_string())
+    }
+
+    #[test]
+    fn classifies_handshake_errors() {
+        use AuthFailureKind::*;
+        let wrongpass = redis("WRONGPASS invalid username-password pair");
+        assert_eq!(auth_failure_kind(&wrongpass, true), Some(Rejected));
+        assert_eq!(auth_failure_kind(&wrongpass, false), None);
+        assert_eq!(
+            auth_failure_kind(&redis("NOAUTH Authentication required."), false),
+            Some(Required)
+        );
+        assert_eq!(
+            auth_failure_kind(&redis("NOPERM User bench has no permissions"), false),
+            Some(NoPerm)
+        );
+        assert_eq!(
+            auth_failure_kind(&redis("ERR unknown command"), false),
+            None
+        );
+        assert_eq!(
+            auth_failure_kind(&ringline_redis::Error::ConnectionClosed, true),
+            None
+        );
+    }
+
+    #[test]
+    fn pending_until_every_expected_endpoint_answers() {
+        let shared = SharedState::new();
+        assert!(shared.auth_pending().is_empty());
+        shared.expect_auth(addr(2));
+        shared.expect_auth(addr(1));
+        assert_eq!(shared.auth_pending(), vec![addr(1), addr(2)]);
+        shared.auth_ok(addr(1));
+        assert_eq!(shared.auth_pending(), vec![addr(2)]);
+        assert!(shared.auth_failed(addr(2), AuthFailureKind::Rejected, "WRONGPASS x"));
+        assert!(shared.auth_pending().is_empty());
+        // Registering again does not reset an outcome.
+        shared.expect_auth(addr(1));
+        assert!(shared.auth_pending().is_empty());
+    }
+
+    #[test]
+    fn a_failure_is_reported_once_per_endpoint_and_sticks() {
+        let shared = SharedState::new();
+        assert!(shared.auth_failed(addr(1), AuthFailureKind::Rejected, "WRONGPASS a"));
+        assert!(!shared.auth_failed(addr(1), AuthFailureKind::Rejected, "WRONGPASS b"));
+        assert!(shared.auth_failed(addr(2), AuthFailureKind::Rejected, "WRONGPASS c"));
+        shared.auth_ok(addr(1));
+        let failures = shared.auth_failures();
+        assert_eq!(failures.len(), 2);
+        assert_eq!(failures[0].endpoint, addr(1));
+        assert_eq!(failures[0].message, "WRONGPASS a");
+        assert_eq!(failures[1].endpoint, addr(2));
     }
 }

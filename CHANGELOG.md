@@ -13,9 +13,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `target.auth_password_file`, or the `CACHECANNON_AUTH_PASSWORD` environment
   variable) make every new connection send `AUTH [user] password` before any
   other command, cluster discovery included. valkey-lab takes `--user`,
-  `-a`/`--pass` and `--pass-file`. A rejected password fails the precheck with
-  `the server rejected AUTH` instead of `no connectivity`. RESP and RESP3
-  only; `Debug` output of the config redacts the password.
+  `-a`/`--pass` and `--pass-file`. RESP and RESP3 only; `Debug` output of
+  the config redacts the password.
+- The precheck fails at once, naming each endpoint and the server's reply,
+  when a server rejects `AUTH`, answers `NOAUTH` (a password is needed and
+  none is set) or answers `NOPERM` for the handshake, instead of retrying
+  every 100 ms and reporting `no connectivity`. With a password set it waits
+  for every endpoint's AUTH reply, so one cluster node that rejects AUTH fails
+  the run.
 - `workload.routing = "routed"` loads several nodes the way a client
   population does: each worker's dispatcher draws every request's key from
   the whole keyspace, routes it, and queues it for the owning node, so a node

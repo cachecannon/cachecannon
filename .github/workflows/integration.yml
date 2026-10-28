@@ -264,13 +264,13 @@ jobs:
       - name: Start Valkey with a default password and an ACL user
         run: |
           mkdir -p /tmp/valkey-auth/cluster
-          echo benchpw > /tmp/valkey-auth/password
+          (umask 077; echo benchpw > /tmp/valkey-auth/password)
           # Standalone on 6379, and a one-node cluster on 7000 owning every slot.
           valkey-server --port 6379 --save '' --requirepass defaultpw \
             --user bench on '>benchpw' '~*' '+@all' --daemonize yes \
             --dir /tmp/valkey-auth
           valkey-server --port 7000 --save '' --requirepass defaultpw \
-            --masterauth defaultpw --user bench on '>benchpw' '~*' '+@all' \
+            --user bench on '>benchpw' '~*' '+@all' \
             --cluster-enabled yes --cluster-announce-ip 127.0.0.1 \
             --daemonize yes --dir /tmp/valkey-auth/cluster
           for i in $(seq 1 30); do
@@ -297,6 +297,20 @@ jobs:
       - name: ACL user, password from a file
         run: ./target/release/cachecannon config/valkey-auth-ci.toml
 
+      - name: ACL user over RESP3 (AUTH before HELLO 3)
+        run: |
+          sed -e 's/^protocol = "resp"/protocol = "resp3"/' \
+              config/valkey-auth-ci.toml > /tmp/valkey-auth/resp3.toml
+          ./target/release/cachecannon /tmp/valkey-auth/resp3.toml
+
+      - name: Append writers authenticate
+        run: |
+          sed -e 's/^count = 10000/count = 10000\ndistribution = "recency"/' \
+              config/valkey-auth-ci.toml > /tmp/valkey-auth/append.toml
+          printf '\n[workload.append]\nbatch = 10\nevery = "1s"\nconnections = 1\n' \
+              >> /tmp/valkey-auth/append.toml
+          ./target/release/cachecannon /tmp/valkey-auth/append.toml
+
       - name: Default user, password from the environment
         run: CACHECANNON_AUTH_PASSWORD=defaultpw ./target/release/cachecannon config/valkey-ci.toml
 
@@ -316,6 +330,16 @@ jobs:
           fi
           cat out.txt
           grep -q "the server rejected AUTH" out.txt
+
+      - name: A missing password fails the precheck with an AUTH hint
+        run: |
+          if ./target/release/cachecannon config/valkey-ci.toml > out.txt 2>&1; then
+            cat out.txt
+            echo "ERROR: run without a password succeeded"
+            exit 1
+          fi
+          cat out.txt
+          grep -q "the server requires AUTH" out.txt
 
   request-timeout:
     name: Request timeout (black-hole server)

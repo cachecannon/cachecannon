@@ -6,12 +6,13 @@ use crate::metrics;
 use crate::output::{PrefillDiagnostics, PrefillSample, PrefillStallCause};
 use crate::saturation::SaturationSearchState;
 use crate::tracereplay::{TraceBaseline, TraceReplay};
-use crate::worker::{BenchWorkerConfig, Phase, init_config_channel};
+use crate::worker::{AuthFailure, AuthFailureKind, BenchWorkerConfig, Phase, init_config_channel};
 use crate::{
     AdminServer, LatencyStats, OutputFormatter, Results, Sample, SharedState, create_formatter,
     parse_cpu_list,
 };
 use ratelimit::Ratelimiter;
+use std::net::SocketAddr;
 
 use chrono::Utc;
 use metriken::histogram::Histogram;
@@ -487,7 +488,13 @@ pub fn run_benchmark_full(
         // Handle precheck -> prefill/warmup transition
         if current_phase == Phase::Precheck {
             let precheck_complete = shared.precheck_complete_count();
-            if precheck_complete >= num_threads {
+            // A refused handshake fails precheck at once; with a password set,
+            // precheck also waits for every endpoint's AUTH outcome.
+            let auth_failures = shared.auth_failures();
+            if precheck_complete >= num_threads
+                && auth_failures.is_empty()
+                && shared.auth_pending().is_empty()
+            {
                 let elapsed = precheck_start.map_or(Duration::ZERO, |t| t.elapsed());
                 formatter.print_precheck_ok(elapsed);
                 // A read error in the trace's first READ_AHEAD requests is
@@ -568,9 +575,28 @@ pub fn run_benchmark_full(
 
             // Timeout detection
             let elapsed = precheck_start.unwrap().elapsed();
-            if elapsed >= precheck_timeout {
-                let conns_failed = metrics::CONNECTIONS_FAILED.value();
-                formatter.print_precheck_failed(elapsed, conns_failed);
+            if elapsed >= precheck_timeout || !auth_failures.is_empty() {
+                let reason = if auth_failures.is_empty() {
+                    let pending = shared.auth_pending();
+                    // Every worker connected but some endpoint never answered AUTH.
+                    (precheck_complete >= num_threads && !pending.is_empty()).then(|| {
+                        format!(
+                            "no AUTH reply within {}ms from {}",
+                            elapsed.as_millis(),
+                            join_endpoints(&pending)
+                        )
+                    })
+                } else {
+                    Some(auth_failure_reason(
+                        &auth_failures,
+                        config.target.endpoints.len(),
+                    ))
+                };
+                match &reason {
+                    Some(reason) => formatter.print_precheck_auth_failed(reason),
+                    None => formatter
+                        .print_precheck_failed(elapsed, metrics::CONNECTIONS_FAILED.value()),
+                }
                 shared.set_phase(Phase::Stop);
 
                 // Shutdown workers cleanly
@@ -588,10 +614,10 @@ pub fn run_benchmark_full(
                     }
                 }
 
-                if crate::worker::AUTH_REJECTED.load(Ordering::Relaxed) {
-                    return Err("precheck failed: the server rejected AUTH".into());
-                }
-                return Err("precheck failed: no connectivity".into());
+                return Err(match reason {
+                    Some(reason) => format!("precheck failed: {reason}").into(),
+                    None => "precheck failed: no connectivity".into(),
+                });
             }
 
             continue;
@@ -1245,6 +1271,44 @@ fn max_from_histogram(hist: &Histogram) -> f64 {
         Ok(None) => {}
     }
     0.0
+}
+
+fn join_endpoints(endpoints: &[SocketAddr]) -> String {
+    endpoints
+        .iter()
+        .map(|e| e.to_string())
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// One line saying which endpoints refused the handshake and how, with a hint
+/// for the fix. Every failure is listed; `num_endpoints` gives the scale.
+pub(crate) fn auth_failure_reason(failures: &[AuthFailure], num_endpoints: usize) -> String {
+    let scope = if num_endpoints > 1 {
+        format!("{} of {num_endpoints} endpoints", failures.len())
+    } else {
+        "the server".to_string()
+    };
+    let details = failures
+        .iter()
+        .map(|f| format!("{} ({})", f.endpoint, f.message))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let (what, hint) = match failures[0].kind {
+        AuthFailureKind::Rejected => (
+            "rejected AUTH",
+            "check the user and password, and that the user exists and is enabled on every node",
+        ),
+        AuthFailureKind::Required => (
+            "requires AUTH",
+            "set target.auth_password, target.auth_password_file or CACHECANNON_AUTH_PASSWORD",
+        ),
+        AuthFailureKind::NoPerm => (
+            "denied the AUTH user a handshake command",
+            "the user needs permission for PING (and HELLO with resp3)",
+        ),
+    };
+    format!("{scope} {what}: {details}; {hint}")
 }
 
 /// Run cluster or auto discovery, replace `config.target.endpoints` with the
@@ -2104,6 +2168,53 @@ mod tests {
     fn absurd_connection_counts_stay_within_ringline_limits() {
         // ringline rejects >= 1 << 31 at config validation.
         assert!((standalone_task_capacity(usize::MAX, 1) as u64) < (1 << 31));
+    }
+}
+
+#[cfg(test)]
+mod auth_reason_tests {
+    use super::*;
+
+    fn failure(port: u16, kind: AuthFailureKind, message: &str) -> AuthFailure {
+        AuthFailure {
+            endpoint: SocketAddr::from(([10, 0, 0, 1], port)),
+            kind,
+            message: message.to_string(),
+        }
+    }
+
+    #[test]
+    fn names_each_refusing_endpoint() {
+        let reason = auth_failure_reason(
+            &[
+                failure(7000, AuthFailureKind::Rejected, "WRONGPASS invalid"),
+                failure(7002, AuthFailureKind::Rejected, "WRONGPASS invalid"),
+            ],
+            3,
+        );
+        assert!(
+            reason.starts_with("2 of 3 endpoints rejected AUTH"),
+            "{reason}"
+        );
+        assert!(
+            reason.contains("10.0.0.1:7000 (WRONGPASS invalid)"),
+            "{reason}"
+        );
+        assert!(reason.contains("10.0.0.1:7002"), "{reason}");
+    }
+
+    #[test]
+    fn noauth_hints_at_the_password_settings() {
+        let reason = auth_failure_reason(
+            &[failure(
+                6379,
+                AuthFailureKind::Required,
+                "NOAUTH Authentication required.",
+            )],
+            1,
+        );
+        assert!(reason.starts_with("the server requires AUTH"), "{reason}");
+        assert!(reason.contains("CACHECANNON_AUTH_PASSWORD"), "{reason}");
     }
 }
 

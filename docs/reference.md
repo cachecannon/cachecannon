@@ -100,19 +100,37 @@ cluster = false
 auto_discovery = false
 
 # AUTH on every new connection, before HELLO 3 and the precheck PING, and
-# before CLUSTER SLOTS in cluster mode. RESP protocols only. Without
-# auth_user, the one-argument `AUTH <password>` authenticates as the default
-# user. Give the password in at most one of auth_password and
-# auth_password_file (one trailing newline is ignored); with neither, the
-# CACHECANNON_AUTH_PASSWORD environment variable is used if set.
+# before CLUSTER SLOTS in cluster mode. Protocols resp and resp3 only (not
+# dma, although its control channel speaks RESP). Without auth_user, the
+# one-argument `AUTH <password>` authenticates as the default user. Give the
+# password in at most one of auth_password and auth_password_file (one
+# trailing newline is ignored; a file other users can read draws a warning);
+# with neither, the CACHECANNON_AUTH_PASSWORD environment variable is used if
+# set. Passwords are UTF-8.
 # auth_user = "bench"
 # auth_password_file = "/run/secrets/valkey-password"
 # auth_password = "..."
 ```
 
-A password the server rejects fails the precheck with `the server rejected
-AUTH`, and the server's error is logged once at warn level. The password is
-never logged: `Debug` output of the config shows it as `<redacted>`.
+The precheck fails as soon as any endpoint refuses the handshake, and the
+error names every endpoint that did, with the server's reply:
+
+- `rejected AUTH`: a wrong password, an unknown or disabled user, or a
+  password sent to a server that has none. Note that an exported
+  `CACHECANNON_AUTH_PASSWORD` applies to every RESP run, including one against
+  a server without a password; the run logs at info level when it uses it.
+- `requires AUTH`: the server answered `NOAUTH` and no password is configured.
+- `denied the AUTH user a handshake command`: `NOPERM` for `PING` (or `HELLO`
+  with resp3).
+
+With a password set, the precheck also waits for an AUTH reply from every
+endpoint a connection serves, so a node of a cluster that rejects or never
+answers AUTH fails the run instead of silently receiving no load. Each
+endpoint's first refusal is logged at warn level. Connections refused during
+precheck do not retry; later in the run they retry once a second.
+
+The password is never logged: `Debug` output of the config shows it as
+`<redacted>`.
 
 ### RESP Module Settings
 
