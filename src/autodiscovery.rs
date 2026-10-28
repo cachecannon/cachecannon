@@ -333,7 +333,7 @@ fn parse_node(entry: &str) -> Result<SocketAddr, Box<dyn std::error::Error>> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use std::net::TcpListener;
 
@@ -593,7 +593,7 @@ mod tests {
 
     /// A rustls server config with a fresh self-signed certificate, or None
     /// when openssl is unavailable.
-    fn tls_server_config() -> Option<Arc<rustls::ServerConfig>> {
+    pub(crate) fn tls_server_config() -> Option<Arc<rustls::ServerConfig>> {
         use rustls::pki_types::pem::PemObject;
         use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 

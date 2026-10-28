@@ -90,7 +90,8 @@ tls = false
 # tls_cert_file = "client.crt"
 # tls_key_file = "client.key"
 
-# Enable Valkey/Redis Cluster mode (see guide.md for details)
+# Enable Valkey/Redis Cluster mode (see guide.md for details). With tls,
+# discovery (CLUSTER SLOTS) also runs over TLS.
 cluster = false
 
 # ElastiCache for Memcached auto discovery: query the endpoints (a

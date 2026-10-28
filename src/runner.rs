@@ -1262,9 +1262,7 @@ pub(crate) fn resolve_endpoints(
                 return Err(format!("cluster mode requires resp protocol, got {:?}", other).into());
             }
         }
-        let auth = config.target.auth_args();
-        let (endpoints, table) =
-            crate::cluster::discover_topology(&config.target.endpoints, auth.as_deref())?;
+        let (endpoints, table) = crate::cluster::discover_topology(&config.target)?;
         config.target.endpoints = endpoints;
         Some(table)
     } else {

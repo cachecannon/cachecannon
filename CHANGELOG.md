@@ -302,6 +302,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     a `query worker:` error.
 
 ### Fixed
+- Cluster discovery (`CLUSTER SLOTS`) runs over TLS when `target.tls` is set.
+  It used plain TCP, so `cluster = true` with `tls = true` could not discover
+  a TLS cluster.
 - `cachecannon view` charts the whole recording. The frontend queried only
   the last hour (`Math.min(3600, duration)` in `script.js`), so a four-hour
   run showed its final hour. Charts now span the recording with a step of
