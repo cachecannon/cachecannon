@@ -8,6 +8,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- RESP `AUTH` for servers that require a password or an ACL user.
+  `target.auth_user` and one password source (`target.auth_password`,
+  `target.auth_password_file`, or the `CACHECANNON_AUTH_PASSWORD` environment
+  variable) make every new connection send `AUTH [user] password` before any
+  other command, cluster discovery included. valkey-lab takes `--user`,
+  `-a`/`--pass` and `--pass-file`. RESP and RESP3 only; `Debug` output of
+  the config redacts the password.
+- The precheck fails at once, naming each endpoint and the server's reply,
+  when a server rejects `AUTH`, answers `NOAUTH` (a password is needed and
+  none is set) or answers `NOPERM` for the handshake, instead of retrying
+  every 100 ms and reporting `no connectivity`. With a password set it waits
+  for every endpoint's AUTH reply, so one cluster node that rejects AUTH fails
+  the run.
 - `workload.routing = "routed"` loads several nodes the way a client
   population does: each worker's dispatcher draws every request's key from
   the whole keyspace, routes it, and queues it for the owning node, so a node
@@ -294,6 +307,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     a `query worker:` error.
 
 ### Fixed
+- Cluster discovery (`CLUSTER SLOTS`) runs over TLS when `target.tls` is set.
+  It used plain TCP, so `cluster = true` with `tls = true` could not discover
+  a TLS cluster.
 - `cachecannon view` charts the whole recording. The frontend queried only
   the last hour (`Math.min(3600, duration)` in `script.js`), so a four-hour
   run showed its final hour. Charts now span the recording with a step of

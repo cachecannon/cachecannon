@@ -233,6 +233,16 @@ impl OutputFormatter for CleanFormatter {
         let _ = io::stdout().flush();
     }
 
+    fn print_precheck_auth_failed(&self, reason: &str) {
+        let rule = "────────────────────────────────────────────────────────────────────────";
+        println!();
+        println!("{}", self.red(rule));
+        println!("{}", self.red("PRECHECK FAILED"));
+        println!("{}", self.red(rule));
+        println!("{}", self.red(reason));
+        let _ = io::stdout().flush();
+    }
+
     fn print_prefill(&self, key_count: usize) {
         use super::format::format_count;
         println!("[prefill {} keys]", format_count(key_count as u64));
