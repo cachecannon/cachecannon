@@ -62,8 +62,8 @@ Flag | Default | Description
 `--resp3` | off | Use RESP3 protocol
 `--tls-skip-verify` | off | Skip TLS certificate verification
 `--tls-hostname` | host value | TLS SNI hostname override
-`--user` | `default` | ACL username for `AUTH`
-`--pass`, `-a` | none | `AUTH` password (visible in the process list; prefer `--pass-file` or `CACHECANNON_AUTH_PASSWORD`)
+`--user` | none (the `default` user) | ACL username for `AUTH`; needs a password
+`--pass`, `-a` | none | `AUTH` password (visible in the process list, and warned about at startup; prefer `--pass-file` or `CACHECANNON_AUTH_PASSWORD`)
 `--pass-file` | none | Read the `AUTH` password from a file
 `--connect-timeout` | `5s` | Connection timeout
 `--request-timeout` | `1s` | Request timeout

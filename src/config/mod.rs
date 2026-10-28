@@ -204,7 +204,7 @@ impl Target {
     /// protocols only, so a shell that exports it does not break a memcache
     /// run. Call once before connecting.
     pub fn resolve_auth(&mut self) -> Result<(), ConfigError> {
-        let env = std::env::var(AUTH_PASSWORD_ENV).ok();
+        let env = env_password(std::env::var(AUTH_PASSWORD_ENV))?;
         self.resolve_auth_with(env)
     }
 
@@ -213,6 +213,7 @@ impl Target {
             let content = std::fs::read_to_string(path).map_err(|e| {
                 ConfigError::Io(format!("target.auth_password_file {}: {e}", path.display()))
             })?;
+            warn_if_readable_by_others(path);
             let password = content
                 .strip_suffix("\r\n")
                 .or_else(|| content.strip_suffix('\n'))
@@ -228,6 +229,7 @@ impl Target {
             && matches!(self.protocol, Protocol::Resp | Protocol::Resp3)
             && let Some(password) = env.filter(|p| !p.is_empty())
         {
+            tracing::info!("using the AUTH password from {AUTH_PASSWORD_ENV}");
             self.auth_password = Some(Secret::new(password));
         }
 
@@ -251,7 +253,48 @@ impl Target {
         args.push(password.expose().as_bytes());
         Some(args)
     }
+
+    /// The `AUTH [<user>] <password>` request, or `None` when no password is
+    /// configured. Valid after [`Target::resolve_auth`].
+    pub fn auth_request(&self) -> Option<resp_proto::Request<'_>> {
+        let args = self.auth_args()?;
+        Some(
+            args.into_iter()
+                .fold(resp_proto::Request::cmd(b"AUTH"), resp_proto::Request::arg),
+        )
+    }
 }
+
+/// The value of [`AUTH_PASSWORD_ENV`], refusing one that is not UTF-8 rather
+/// than treating it as unset.
+fn env_password(var: Result<String, std::env::VarError>) -> Result<Option<String>, ConfigError> {
+    match var {
+        Ok(v) => Ok(Some(v)),
+        Err(std::env::VarError::NotPresent) => Ok(None),
+        Err(std::env::VarError::NotUnicode(_)) => Err(ConfigError::Validation(format!(
+            "{AUTH_PASSWORD_ENV} is not valid UTF-8"
+        ))),
+    }
+}
+
+/// Warn when a password file can be read by its group or by other users.
+#[cfg(unix)]
+fn warn_if_readable_by_others(path: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    if let Ok(meta) = std::fs::metadata(path)
+        && meta.permissions().mode() & 0o077 != 0
+    {
+        tracing::warn!(
+            "target.auth_password_file {} is accessible by other users (mode {:o}); \
+             consider chmod 600",
+            path.display(),
+            meta.permissions().mode() & 0o777
+        );
+    }
+}
+
+#[cfg(not(unix))]
+fn warn_if_readable_by_others(_path: &Path) {}
 
 #[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
@@ -3181,6 +3224,32 @@ mod auth_tests {
         let mut t = target("protocol = \"memcache\"").unwrap();
         t.resolve_auth_with(Some("from-env".into())).unwrap();
         assert!(t.auth_args().is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn non_utf8_env_is_an_error() {
+        use std::os::unix::ffi::OsStringExt;
+        let bad = std::ffi::OsString::from_vec(vec![0xff, 0xfe]);
+        let err = env_password(Err(std::env::VarError::NotUnicode(bad)))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains(AUTH_PASSWORD_ENV), "{err}");
+        assert_eq!(
+            env_password(Err(std::env::VarError::NotPresent)).unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn auth_request_encodes_user_then_password() {
+        let mut t = target("auth_user = \"bench\"\nauth_password = \"pw\"").unwrap();
+        t.resolve_auth_with(None).unwrap();
+        let request = t.auth_request().unwrap();
+        let mut buf = vec![0u8; request.encoded_len()];
+        request.encode(&mut buf);
+        assert_eq!(buf, b"*3\r\n$4\r\nAUTH\r\n$5\r\nbench\r\n$2\r\npw\r\n");
+        assert!(target("").unwrap().auth_request().is_none());
     }
 
     #[test]

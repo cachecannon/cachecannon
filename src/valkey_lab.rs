@@ -458,6 +458,10 @@ fn apply_bench_flags(
     }
     // A password flag replaces whichever password source the base config used.
     if let Some(ref pass) = args.pass {
+        tracing::warn!(
+            "a password given with -a/--pass is visible in the process list; \
+             prefer --pass-file or CACHECANNON_AUTH_PASSWORD"
+        );
         config.target.auth_password = Some(Secret::new(pass.clone()));
         config.target.auth_password_file = None;
     }
