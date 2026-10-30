@@ -7,6 +7,14 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  # Oldest glibc the packaged binaries run on. cargo-zigbuild links against
+  # this version's symbols instead of the build host's glibc. Linking against
+  # the host's glibc records a version need on it (GLIBC_2.39 on Ubuntu 24.04,
+  # from std's weak pidfd_spawnp and pidfd_getpid references), and such a
+  # binary does not load on glibc 2.34 (Amazon Linux 2023, RHEL 9). 2.28 is
+  # the glibc of RHEL 8 and Debian 10. The "Check glibc floor and build-id"
+  # steps enforce it.
+  GLIBC_FLOOR: "2.28"
 
 permissions:
   contents: write
@@ -21,30 +29,51 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: release-amd64
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.17.0
+      - name: Install cargo-zigbuild
+        run: cargo install cargo-zigbuild --locked --version 0.24.0
       - name: Install cargo-deb
         run: cargo install cargo-deb
       - name: Build release binary
-        run: cargo build --release
+        # zig's linker writes no NT_GNU_BUILD_ID unless asked; debuginfod, perf
+        # and systemd-coredump identify the binary by it.
+        env:
+          RUSTFLAGS: "-C link-arg=-Wl,--build-id=sha1"
+        run: cargo zigbuild --release --target "x86_64-unknown-linux-gnu.$GLIBC_FLOOR"
+      - name: Check glibc floor and build-id
+        run: |
+          for bin in cachecannon valkey-lab; do
+            need=$(readelf -V --wide target/x86_64-unknown-linux-gnu/release/$bin | grep -oE 'GLIBC_[0-9]+\.[0-9]+' | sed 's/^GLIBC_//' | sort -V | tail -1)
+            echo "$bin needs glibc $need (floor $GLIBC_FLOOR)"
+            if [ "$(printf '%s\n' "$need" "$GLIBC_FLOOR" | sort -V | tail -1)" != "$GLIBC_FLOOR" ]; then
+              echo "::error::$bin needs glibc $need, newer than GLIBC_FLOOR $GLIBC_FLOOR"
+              exit 1
+            fi
+            readelf -n target/x86_64-unknown-linux-gnu/release/$bin | grep 'NT_GNU_BUILD_ID' >/dev/null \
+              || { echo "::error::$bin has no GNU build-id"; exit 1; }
+          done
       - name: Extract debug info and strip binaries
         run: |
           for bin in cachecannon valkey-lab; do
-            objcopy --only-keep-debug target/release/$bin target/release/$bin.debug
-            objcopy --add-gnu-debuglink=target/release/$bin.debug target/release/$bin
-            strip target/release/$bin
+            objcopy --only-keep-debug target/x86_64-unknown-linux-gnu/release/$bin target/x86_64-unknown-linux-gnu/release/$bin.debug
+            objcopy --add-gnu-debuglink=target/x86_64-unknown-linux-gnu/release/$bin.debug target/x86_64-unknown-linux-gnu/release/$bin
+            strip target/x86_64-unknown-linux-gnu/release/$bin
           done
       - name: Build cachecannon .deb package
-        run: cargo deb --no-build --no-strip
+        run: cargo deb --no-build --no-strip --target x86_64-unknown-linux-gnu
       - name: Build valkey-lab .deb package
-        run: cargo deb --no-build --no-strip --variant valkey-lab
+        run: cargo deb --no-build --no-strip --target x86_64-unknown-linux-gnu --variant valkey-lab
       - name: Build cachecannon-dbgsym .deb package
-        run: cargo deb --no-build --no-strip --variant cachecannon-dbgsym
+        run: cargo deb --no-build --no-strip --target x86_64-unknown-linux-gnu --variant cachecannon-dbgsym
       - name: Build valkey-lab-dbgsym .deb package
-        run: cargo deb --no-build --no-strip --variant valkey-lab-dbgsym
+        run: cargo deb --no-build --no-strip --target x86_64-unknown-linux-gnu --variant valkey-lab-dbgsym
       - name: Upload .deb artifacts
         uses: actions/upload-artifact@v4
         with:
           name: deb-amd64
-          path: target/debian/*.deb
+          path: target/x86_64-unknown-linux-gnu/debian/*.deb
           retention-days: 7
 
   build-deb-arm64:
@@ -58,12 +87,31 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: release-arm64
-      - name: Install cross
-        run: cargo install cross --git https://github.com/cross-rs/cross
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.17.0
+      - name: Install cargo-zigbuild
+        run: cargo install cargo-zigbuild --locked --version 0.24.0
       - name: Install cargo-deb
         run: cargo install cargo-deb
-      - name: Build release binary with cross
-        run: cross build --release --target aarch64-unknown-linux-gnu
+      - name: Build release binary
+        # zig's linker writes no NT_GNU_BUILD_ID unless asked; debuginfod, perf
+        # and systemd-coredump identify the binary by it.
+        env:
+          RUSTFLAGS: "-C link-arg=-Wl,--build-id=sha1"
+        run: cargo zigbuild --release --target "aarch64-unknown-linux-gnu.$GLIBC_FLOOR"
+      - name: Check glibc floor and build-id
+        run: |
+          for bin in cachecannon valkey-lab; do
+            need=$(readelf -V --wide target/aarch64-unknown-linux-gnu/release/$bin | grep -oE 'GLIBC_[0-9]+\.[0-9]+' | sed 's/^GLIBC_//' | sort -V | tail -1)
+            echo "$bin needs glibc $need (floor $GLIBC_FLOOR)"
+            if [ "$(printf '%s\n' "$need" "$GLIBC_FLOOR" | sort -V | tail -1)" != "$GLIBC_FLOOR" ]; then
+              echo "::error::$bin needs glibc $need, newer than GLIBC_FLOOR $GLIBC_FLOOR"
+              exit 1
+            fi
+            readelf -n target/aarch64-unknown-linux-gnu/release/$bin | grep 'NT_GNU_BUILD_ID' >/dev/null \
+              || { echo "::error::$bin has no GNU build-id"; exit 1; }
+          done
       - name: Install cross-arch binutils
         run: |
           # Drop the unused Chrome apt source; see the note in integration.yml.
@@ -102,30 +150,51 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: release-rpm-amd64
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.17.0
+      - name: Install cargo-zigbuild
+        run: cargo install cargo-zigbuild --locked --version 0.24.0
       - name: Install cargo-generate-rpm
         run: cargo install cargo-generate-rpm
       - name: Build release binary
-        run: cargo build --release
+        # zig's linker writes no NT_GNU_BUILD_ID unless asked; debuginfod, perf
+        # and systemd-coredump identify the binary by it.
+        env:
+          RUSTFLAGS: "-C link-arg=-Wl,--build-id=sha1"
+        run: cargo zigbuild --release --target "x86_64-unknown-linux-gnu.$GLIBC_FLOOR"
+      - name: Check glibc floor and build-id
+        run: |
+          for bin in cachecannon valkey-lab; do
+            need=$(readelf -V --wide target/x86_64-unknown-linux-gnu/release/$bin | grep -oE 'GLIBC_[0-9]+\.[0-9]+' | sed 's/^GLIBC_//' | sort -V | tail -1)
+            echo "$bin needs glibc $need (floor $GLIBC_FLOOR)"
+            if [ "$(printf '%s\n' "$need" "$GLIBC_FLOOR" | sort -V | tail -1)" != "$GLIBC_FLOOR" ]; then
+              echo "::error::$bin needs glibc $need, newer than GLIBC_FLOOR $GLIBC_FLOOR"
+              exit 1
+            fi
+            readelf -n target/x86_64-unknown-linux-gnu/release/$bin | grep 'NT_GNU_BUILD_ID' >/dev/null \
+              || { echo "::error::$bin has no GNU build-id"; exit 1; }
+          done
       - name: Extract debug info and strip binaries
         run: |
           for bin in cachecannon valkey-lab; do
-            objcopy --only-keep-debug target/release/$bin target/release/$bin.debug
-            objcopy --add-gnu-debuglink=target/release/$bin.debug target/release/$bin
-            strip target/release/$bin
+            objcopy --only-keep-debug target/x86_64-unknown-linux-gnu/release/$bin target/x86_64-unknown-linux-gnu/release/$bin.debug
+            objcopy --add-gnu-debuglink=target/x86_64-unknown-linux-gnu/release/$bin.debug target/x86_64-unknown-linux-gnu/release/$bin
+            strip target/x86_64-unknown-linux-gnu/release/$bin
           done
       - name: Build cachecannon .rpm package
-        run: cargo generate-rpm
+        run: cargo generate-rpm --target x86_64-unknown-linux-gnu
       - name: Build valkey-lab .rpm package
-        run: cargo generate-rpm -s 'name = "valkey-lab"' -s 'assets = [{source = "target/release/valkey-lab", dest = "/usr/bin/valkey-lab", mode = "0755"}]'
+        run: cargo generate-rpm --target x86_64-unknown-linux-gnu -s 'name = "valkey-lab"' -s 'assets = [{source = "target/x86_64-unknown-linux-gnu/release/valkey-lab", dest = "/usr/bin/valkey-lab", mode = "0755"}]'
       - name: Build cachecannon-debuginfo .rpm package
-        run: cargo generate-rpm -s 'name = "cachecannon-debuginfo"' -s 'assets = [{source = "target/release/cachecannon.debug", dest = "/usr/lib/debug/usr/bin/cachecannon.debug", mode = "0644"}]'
+        run: cargo generate-rpm --target x86_64-unknown-linux-gnu -s 'name = "cachecannon-debuginfo"' -s 'assets = [{source = "target/x86_64-unknown-linux-gnu/release/cachecannon.debug", dest = "/usr/lib/debug/usr/bin/cachecannon.debug", mode = "0644"}]'
       - name: Build valkey-lab-debuginfo .rpm package
-        run: cargo generate-rpm -s 'name = "valkey-lab-debuginfo"' -s 'assets = [{source = "target/release/valkey-lab.debug", dest = "/usr/lib/debug/usr/bin/valkey-lab.debug", mode = "0644"}]'
+        run: cargo generate-rpm --target x86_64-unknown-linux-gnu -s 'name = "valkey-lab-debuginfo"' -s 'assets = [{source = "target/x86_64-unknown-linux-gnu/release/valkey-lab.debug", dest = "/usr/lib/debug/usr/bin/valkey-lab.debug", mode = "0644"}]'
       - name: Upload .rpm artifacts
         uses: actions/upload-artifact@v4
         with:
           name: rpm-amd64
-          path: target/generate-rpm/*.rpm
+          path: target/x86_64-unknown-linux-gnu/generate-rpm/*.rpm
           retention-days: 7
 
   build-rpm-arm64:
@@ -139,12 +208,31 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: release-rpm-arm64
-      - name: Install cross
-        run: cargo install cross --git https://github.com/cross-rs/cross
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.17.0
+      - name: Install cargo-zigbuild
+        run: cargo install cargo-zigbuild --locked --version 0.24.0
       - name: Install cargo-generate-rpm
         run: cargo install cargo-generate-rpm
-      - name: Build release binary with cross
-        run: cross build --release --target aarch64-unknown-linux-gnu
+      - name: Build release binary
+        # zig's linker writes no NT_GNU_BUILD_ID unless asked; debuginfod, perf
+        # and systemd-coredump identify the binary by it.
+        env:
+          RUSTFLAGS: "-C link-arg=-Wl,--build-id=sha1"
+        run: cargo zigbuild --release --target "aarch64-unknown-linux-gnu.$GLIBC_FLOOR"
+      - name: Check glibc floor and build-id
+        run: |
+          for bin in cachecannon valkey-lab; do
+            need=$(readelf -V --wide target/aarch64-unknown-linux-gnu/release/$bin | grep -oE 'GLIBC_[0-9]+\.[0-9]+' | sed 's/^GLIBC_//' | sort -V | tail -1)
+            echo "$bin needs glibc $need (floor $GLIBC_FLOOR)"
+            if [ "$(printf '%s\n' "$need" "$GLIBC_FLOOR" | sort -V | tail -1)" != "$GLIBC_FLOOR" ]; then
+              echo "::error::$bin needs glibc $need, newer than GLIBC_FLOOR $GLIBC_FLOOR"
+              exit 1
+            fi
+            readelf -n target/aarch64-unknown-linux-gnu/release/$bin | grep 'NT_GNU_BUILD_ID' >/dev/null \
+              || { echo "::error::$bin has no GNU build-id"; exit 1; }
+          done
       - name: Install cross-arch binutils
         run: |
           # Drop the unused Chrome apt source; see the note in integration.yml.
