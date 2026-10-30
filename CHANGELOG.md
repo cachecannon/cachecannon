@@ -294,6 +294,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     a `query worker:` error.
 
 ### Fixed
+- The .deb and .rpm binaries run on glibc 2.28 and newer. They were linked on
+  the Ubuntu 24.04 runner and needed `GLIBC_2.39` (x86_64 in every release,
+  aarch64 since 0.0.16), so they failed to load on Amazon Linux 2023 and
+  RHEL 9 (glibc 2.34) with "version `GLIBC_2.39' not found". The release
+  builds now link with `cargo zigbuild` against glibc 2.28, and a step fails
+  the release if a binary needs a newer version.
 - `cachecannon view` charts the whole recording. The frontend queried only
   the last hour (`Math.min(3600, duration)` in `script.js`), so a four-hour
   run showed its final hour. Charts now span the recording with a step of
