@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- The packaged binaries run on glibc 2.28 and newer. They were linked against
+  glibc 2.39 (on the Ubuntu 24.04 runner for x86_64, in cross's image for
+  aarch64) and needed `GLIBC_2.39` (x86_64 in every release, aarch64 since
+  0.0.16), so they failed to load on Amazon Linux 2023 and RHEL 9 (glibc
+  2.34) with "version `GLIBC_2.39' not found". The release builds now link
+  with `cargo zigbuild` against glibc 2.28, and a step fails the release if a
+  binary needs a newer version. The .rpm packages require glibc 2.28. The
+  amd64 .deb declares `libc6 (>= 2.34)`, taken from Ubuntu 24.04's libc6
+  symbols file, so apt does not install it on Debian 11 or Ubuntu 20.04.
+  (#270)
+
 ## [0.0.34] - 2026-10-27
 
 ### Changed
