@@ -41,6 +41,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   keeps in the `.dendro` source's metadata, and the `[admin] parquet` file
   stores it under the same key. The Rezolus viewer renders the template the
   recording carries, so a change to it no longer needs a Rezolus release.
+  Its queries select by metric name and do not select by `source`: Rezolus 6
+  evaluates a recording's template against that recording's series (outside
+  an A/B comparison), so the section has data when the endpoint is recorded
+  under another `source` name.
 - `[workload.kv_replay]` replays a request-level KV-cache trace (the kvtrace
   request format from pelikan-io/cachesim) against a RESP server used as an
   LLM serving engine's KV-cache prefix store, and reports prompt tokens

@@ -117,21 +117,26 @@ mod tests {
         assert!(checked > 0, "no metric names found in the queries");
     }
 
-    /// Every metric a query names carries `source="cachecannon"`, the
-    /// handshake's source label (`stream::labels`): a recording names its
-    /// source after it, and a series without the matcher would also match
-    /// another source's series in the same archive.
+    /// No metric a query names selects by `source`. Rezolus evaluates a
+    /// recording's template against that recording's series only, so the
+    /// matcher is not needed to keep another source's series out, and it
+    /// would match nothing in a recording whose endpoint was given another
+    /// `source` name.
     #[test]
-    fn every_metric_selects_the_handshakes_source() {
-        let source = super::super::stream::labels()["source"].clone();
-        let wanted = format!("source=\"{source}\"");
+    fn no_metric_selects_a_source() {
         let doc = template();
         for kpi in doc["kpis"].as_array().unwrap() {
             let query = kpi["query"].as_str().unwrap();
             for (name, matchers) in metric_references(query) {
                 assert!(
-                    matchers.is_some_and(|m| m.split(',').any(|m| m.trim() == wanted)),
-                    "KPI {}: {name} does not select {wanted}",
+                    !matchers.is_some_and(|m| {
+                        m.split(',').any(|m| {
+                            m.split(['=', '!'])
+                                .next()
+                                .is_some_and(|k| k.trim().trim_matches('"') == "source")
+                        })
+                    }),
+                    "KPI {}: {name} selects by source",
                     kpi["title"]
                 );
             }
