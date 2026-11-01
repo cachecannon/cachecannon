@@ -715,20 +715,13 @@ key into the `[admin] parquet` file's metadata. The viewer renders the template
 a `.dendro` recording carries, so a template change reaches the viewer with a
 cachecannon release.
 
-Every query selects `source="cachecannon"`. Where that label is missing, the
-section renders with empty charts:
-
-- The `[admin] parquet` file on its own: its columns carry no `source` label
-  (the source is in the file metadata only), so the charts are empty until
-  rezolus attaches a single-source parquet's source to its series as a label.
-- `rezolus recording combine … -o out.parquet` drops the template in rezolus
-  up to 6.0.0-alpha.62. `rezolus recording combine … -o out.rez` keeps it,
-  and its charts have data.
-- A recording relabelled with another source, such as
-  `rezolus record --endpoint http://host:9090,source=cc-a`: the carried
-  template still selects `source="cachecannon"`, so its charts are empty.
-  Keep the source `cachecannon`, and tell two runs apart with another label
-  (`--label arm=a`).
+No query selects by `source`. Rezolus 6 evaluates a recording's template
+against that recording's series only (in an A/B comparison,
+`rezolus view --baseline/--experiment`, one template reads both arms'
+series), so the section has data whatever
+`source` the recording has (`rezolus record --endpoint
+http://host:9090,source=cc-a` included), and so does the `[admin] parquet`
+file once `rezolus recording upgrade` has converted it to `.dendro`.
 
 Rezolus's built-in copy of the template renders instead of the carried one:
 
@@ -736,11 +729,16 @@ Rezolus's built-in copy of the template renders instead of the carried one:
   from `/metrics` (which carries no metadata), or recorded by rezolus 5.x
   from `/metrics/binary`;
 - when the carried JSON does not parse;
-- for a parquet combined by a rezolus that drops the template (above);
+- for a recording upgraded from a combined parquet written by rezolus 5.x or
+  by a 6.0 build before iopsystems/rezolus#1501, since those builds'
+  `recording combine` drops the template;
 - with `rezolus view --registry-templates`, which prefers the built-in copy.
 
-Tests in `src/admin/template.rs` check that each query selects
-`source="cachecannon"` and only metrics cachecannon registers, that each KPI's
+The built-in copy is found by source name, so these cases apply only to a
+recording whose `source` is `cachecannon`.
+
+Tests in `src/admin/template.rs` check that no query selects by `source`
+and each names only metrics cachecannon registers, that each KPI's
 `type` is one the viewer charts and its `role` a lowercase word, and that every
 `unit_system` is one the viewer knows.
 
