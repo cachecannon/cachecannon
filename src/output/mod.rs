@@ -593,6 +593,11 @@ pub trait OutputFormatter: Send + Sync {
         );
     }
 
+    /// Print a precheck failure caused by the server refusing the handshake.
+    fn print_precheck_auth_failed(&self, reason: &str) {
+        println!("[precheck failed] {reason}");
+    }
+
     /// Print the prefill phase indicator.
     fn print_prefill(&self, key_count: usize) {
         println!("PREFILL: writing {} keys...", key_count);

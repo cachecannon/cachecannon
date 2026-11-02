@@ -1,0 +1,28 @@
+# CI configuration for AUTH against a Valkey ACL user. The password is read
+# from a file so it appears neither here nor in the process arguments.
+
+[general]
+duration = "5s"
+warmup = "2s"
+threads = 2
+
+[target]
+endpoints = ["127.0.0.1:6379"]
+protocol = "resp"
+auth_user = "bench"
+auth_password_file = "/tmp/valkey-auth/password"
+
+[connection]
+connections = 4
+pipeline_depth = 8
+
+[workload.keyspace]
+length = 16
+count = 10000
+
+[workload.commands]
+get = 80
+set = 20
+
+[workload.values]
+length = 64
