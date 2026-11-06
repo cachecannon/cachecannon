@@ -585,7 +585,7 @@ const fetchSectionHeatmapData = async (sectionRoute, groups, api, range) => {
                 const heatmapQuery = `histogram_heatmap(${metricSelector})`;
 
                 try {
-                    const result = await executePromQLRangeQuery(heatmapQuery, api, range);
+                    const result = await executePromQLRangeQuery(heatmapQuery, api, range ?? await recordingRange(api));
 
                     if (result.status === 'success' && result.data && result.data.resultType === 'histogram_heatmap') {
                         const heatmapResult = result.data.result;
@@ -735,21 +735,20 @@ const executePromQLRangeQuery = async (query, api, { start, end, step }) => {
     });
 };
 
+// The section's range, read once. Each plot asks inside its own try, so a failed
+// request loses that plot and the next one reads it again.
+const sectionRange = async (data) => {
+    data.range ??= await recordingRange(data.api);
+    return data.range;
+};
+
 // Process dashboard data and execute PromQL queries where needed
 const processDashboardData = async (data) => {
-    // Without a range each plot's query fails below, and the section draws with
-    // no charts.
-    try {
-        data.range = await recordingRange(data.api);
-    } catch (error) {
-        console.error('Failed to get metadata:', error);
-    }
-
     for (const group of data.groups || []) {
         for (const plot of group.plots || []) {
             if (plot.promql_query) {
                 try {
-                    const result = await executePromQLRangeQuery(plot.promql_query, data.api, data.range);
+                    const result = await executePromQLRangeQuery(plot.promql_query, data.api, await sectionRange(data));
 
                     if (
                         result.status === 'success' &&
