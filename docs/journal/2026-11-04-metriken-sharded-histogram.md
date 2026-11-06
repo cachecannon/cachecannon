@@ -35,7 +35,8 @@ Separately, `histogram` 1.4.1 and 1.6.5 `AtomicHistogram` at `(7, 64)` gave
 identical buckets, errors, bucket bounds and ten quantiles over 202M values, on
 arm64 and on x86_64 under Rosetta. That test is not in the tree.
 
-They differ in four ways, and none changes a reported number:
+`ShardedHistogram` and the `metriken` type differ in four ways, and none changes
+a reported number:
 
 - After only out-of-range writes, `ShardedHistogram` returned an empty histogram
   from `load()` and metriken's returns `None`. At `(7, 64)` every `u64` is in
