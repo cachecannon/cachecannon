@@ -907,7 +907,7 @@ Connection pool health:
 
 ### Server Metrics / Client Metrics
 
-When you provide `--server` or `--client` Rezolus parquet files, these sections display system-level telemetry (CPU utilization, network statistics, scheduler behavior, etc.) aligned to the benchmark timeline.
+When you provide `--server` or `--client` Rezolus parquet files, these sections display system-level telemetry (CPU utilization, network statistics, scheduler behavior, etc.). Each section's charts span its own recording, which can start and end at different times from the benchmark.
 
 ## Parquet Output
 

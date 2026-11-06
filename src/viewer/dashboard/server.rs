@@ -9,7 +9,7 @@ pub fn generate(
 ) -> View {
     // Use server data if available, otherwise use benchmark data for structure
     let data = server.expect("server::generate called without server data");
-    let mut view = View::new(data, sections);
+    let mut view = View::new(data, api::SERVER_ROOT, sections);
 
     // CPU utilization
     let mut cpu = Group::new("CPU Utilization", "cpu");
@@ -17,7 +17,7 @@ pub fn generate(
     cpu.plot(
         Plot::counter("CPU Usage %", "cpu-usage", Unit::Percentage)
             .with_style(ChartStyle::Line)
-            .build("sum(irate(cpu_usage{state=\"user|system\"}[5m])) / cpu_cores * 100"),
+            .build("sum(irate(cpu_usage{state=~\"user|system\"}[5m])) / cpu_cores / 1000000000"),
     );
 
     view.group(cpu);

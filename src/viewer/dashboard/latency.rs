@@ -6,7 +6,7 @@ pub fn generate(
     _client: Option<&Arc<ParquetReader>>,
     sections: Vec<Section>,
 ) -> View {
-    let mut view = View::new(data, sections);
+    let mut view = View::new(data, api::BENCHMARK_ROOT, sections);
 
     // All latency percentiles in one flat group
     let mut latency = Group::new("Latency Percentiles", "latency-percentiles");

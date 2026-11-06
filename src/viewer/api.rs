@@ -1,9 +1,9 @@
-//! The PromQL HTTP API the frontend reads (`/api/v1/...`).
+//! The PromQL HTTP API the frontend reads, mounted once per recording.
 //!
 //! metriken-query 0.9 served these routes itself (`promql::routes`, feature
-//! `http`); 0.36 has no HTTP layer, so they live here. Paths, parameters and
-//! response bodies are 0.9's, except that `/api/v1/metadata` also reports the
-//! snapshot interval, and a range query that is a single
+//! `http`); 0.36 has no HTTP layer, so they live here. Paths below the root,
+//! parameters and response bodies are 0.9's, except that `metadata` also
+//! reports the snapshot interval, and a range query that is a single
 //! `histogram_percentiles` or `histogram_quantiles` call with a step of 1.5
 //! snapshot intervals or more gets a stride derived from the step
 //! (`with_histogram_stride`), which changes its results.
@@ -18,6 +18,13 @@ use metriken_query::{ParquetReader, QueryError, QueryResult};
 use serde::{Deserialize, Serialize};
 
 type Source = Arc<ParquetReader>;
+
+/// Where `routes` is mounted for the benchmark recording.
+pub const BENCHMARK_ROOT: &str = "/api/v1";
+/// Where `routes` is mounted for the server's rezolus recording.
+pub const SERVER_ROOT: &str = "/server/api/v1";
+/// Where `routes` is mounted for the client's rezolus recording.
+pub const CLIENT_ROOT: &str = "/client/api/v1";
 
 #[derive(Debug, Deserialize)]
 struct QueryParams {
@@ -81,13 +88,16 @@ fn respond(result: Result<QueryResult, QueryError>) -> Json<ApiResponse<QueryRes
     }
 }
 
+/// The API over one recording, relative to its root. Each recording has its
+/// own metrics, time range and snapshot interval, so a section's queries go
+/// to the root its `View` names.
 pub fn routes(source: Source) -> Router {
     Router::new()
-        .route("/api/v1/query", get(instant_query))
-        .route("/api/v1/query_range", get(range_query))
-        .route("/api/v1/labels", get(label_names))
-        .route("/api/v1/label/{name}/values", get(label_values))
-        .route("/api/v1/metadata", get(metadata))
+        .route("/query", get(instant_query))
+        .route("/query_range", get(range_query))
+        .route("/labels", get(label_names))
+        .route("/label/{name}/values", get(label_values))
+        .route("/metadata", get(metadata))
         .with_state(source)
 }
 

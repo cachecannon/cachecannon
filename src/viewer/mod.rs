@@ -181,14 +181,15 @@ async fn serve(listener: std::net::TcpListener, state: AppState) {
 
 pub struct AppState {
     pub sections: HashMap<String, String>,
-    source: Arc<ParquetReader>,
+    /// Each recording and the root its API is mounted at.
+    sources: Vec<(&'static str, Arc<ParquetReader>)>,
 }
 
 impl AppState {
-    pub fn new(source: Arc<ParquetReader>) -> Self {
+    pub fn new(sources: Vec<(&'static str, Arc<ParquetReader>)>) -> Self {
         Self {
             sections: Default::default(),
-            source,
+            sources,
         }
     }
 }
@@ -196,11 +197,13 @@ impl AppState {
 fn app(livereload: LiveReloadLayer, state: AppState) -> Router {
     let state = Arc::new(state);
 
-    let router = Router::new()
-        .route("/about", get(about))
-        .route("/data/{path}", get(data))
-        .with_state(state.clone())
-        .merge(api::routes(state.source.clone()));
+    let router = state.sources.iter().fold(
+        Router::new()
+            .route("/about", get(about))
+            .route("/data/{path}", get(data))
+            .with_state(state.clone()),
+        |router, (root, source)| router.nest(root, api::routes(source.clone())),
+    );
 
     let router = router
         .route("/", get(index))
@@ -298,7 +301,161 @@ async fn lib(
 
 #[cfg(test)]
 mod tests {
-    use super::lib_asset;
+    use super::{LiveReloadLayer, ParquetReader, app, dashboard, lib_asset};
+    use arrow::array::{ArrayRef, Int64Array, UInt64Array};
+    use arrow::datatypes::{DataType, Field, Schema};
+    use arrow::record_batch::RecordBatch;
+    use axum::Router;
+    use axum::body::Body;
+    use http::Request;
+    use parquet::arrow::ArrowWriter;
+    use parquet::basic::Compression;
+    use parquet::file::metadata::KeyValue;
+    use parquet::file::properties::WriterProperties;
+    use std::collections::HashMap;
+    use std::sync::Arc;
+    use tower::ServiceExt;
+
+    const NS_PER_S: u64 = 1_000_000_000;
+    /// Snapshots per recording in `recording`.
+    const SNAPSHOTS: u64 = 10;
+
+    /// A recording of a host with two cores, one snapshot a second from
+    /// `start` seconds, using 250 ms of user time and 750 ms of system time
+    /// per second across them.
+    fn recording(start: u64) -> Arc<ParquetReader> {
+        let column = |name: &str, kind: &str, labels: &[(&str, &str)], ty| {
+            let mut metadata = HashMap::from([
+                ("metric".to_string(), name.to_string()),
+                ("metric_type".to_string(), kind.to_string()),
+            ]);
+            for (k, v) in labels {
+                metadata.insert(k.to_string(), v.to_string());
+            }
+            let column = labels
+                .iter()
+                .fold(name.to_string(), |c, (_, v)| c + "/" + v);
+            Field::new(column, ty, true).with_metadata(metadata)
+        };
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("timestamp", DataType::UInt64, false),
+            column(
+                "cpu_usage",
+                "counter",
+                &[("state", "user")],
+                DataType::UInt64,
+            ),
+            column(
+                "cpu_usage",
+                "counter",
+                &[("state", "system")],
+                DataType::UInt64,
+            ),
+            column("cpu_cores", "gauge", &[], DataType::Int64),
+        ]));
+        let seconds = 0..SNAPSHOTS;
+        let columns: Vec<ArrayRef> = vec![
+            Arc::new(UInt64Array::from_iter_values(
+                seconds.clone().map(|i| (start + i) * NS_PER_S),
+            )),
+            Arc::new(UInt64Array::from_iter_values(
+                seconds.clone().map(|i| i * NS_PER_S / 4),
+            )),
+            Arc::new(UInt64Array::from_iter_values(
+                seconds.clone().map(|i| i * NS_PER_S / 4 * 3),
+            )),
+            Arc::new(Int64Array::from_iter_values(seconds.map(|_| 2))),
+        ];
+
+        let props = WriterProperties::builder()
+            .set_compression(Compression::UNCOMPRESSED)
+            .set_key_value_metadata(Some(vec![KeyValue {
+                key: "sampling_interval_ms".to_string(),
+                value: Some("1000".to_string()),
+            }]))
+            .build();
+        let mut bytes = Vec::new();
+        let mut writer = ArrowWriter::try_new(&mut bytes, schema.clone(), Some(props)).unwrap();
+        writer
+            .write(&RecordBatch::try_new(schema, columns).unwrap())
+            .unwrap();
+        writer.close().unwrap();
+        Arc::new(ParquetReader::open_bytes(bytes).unwrap())
+    }
+
+    /// The viewer for three recordings starting at different times, with the
+    /// JSON of each section by name.
+    fn viewer() -> (Router, HashMap<String, serde_json::Value>) {
+        let mut state = dashboard::generate(
+            recording(1_000),
+            Some(recording(2_000)),
+            Some(recording(3_000)),
+        );
+        let sections = std::mem::take(&mut state.sections)
+            .into_iter()
+            .map(|(name, json)| (name, serde_json::from_str(&json).unwrap()))
+            .collect();
+        (app(LiveReloadLayer::new(), state), sections)
+    }
+
+    async fn get(router: &Router, uri: &str) -> serde_json::Value {
+        let request = Request::get(uri).body(Body::empty()).unwrap();
+        let response = router.clone().oneshot(request).await.unwrap();
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        serde_json::from_slice(&body).unwrap_or_else(|_| panic!("{uri} did not return JSON"))
+    }
+
+    /// Each recording has its own metrics and time range, so a section's `api`
+    /// must be the root of the recording its queries read.
+    #[tokio::test]
+    async fn each_section_names_the_api_of_its_recording() {
+        let (router, sections) = viewer();
+        for (section, start) in [
+            ("overview.json", 1_000.0),
+            ("throughput.json", 1_000.0),
+            ("latency.json", 1_000.0),
+            ("cache.json", 1_000.0),
+            ("connections.json", 1_000.0),
+            ("server.json", 2_000.0),
+            ("client.json", 3_000.0),
+        ] {
+            let api = sections[section]["api"].as_str().unwrap();
+            let metadata = get(&router, &format!("{api}/metadata")).await;
+            assert_eq!(metadata["data"]["minTime"], start, "{section}");
+        }
+    }
+
+    /// `Unit::Percentage` multiplies by 100 when drawing, so a host at half
+    /// of its cores must read 0.5. `recording` uses 1 s of CPU time per
+    /// second across two cores.
+    #[tokio::test]
+    async fn cpu_usage_is_a_fraction_of_the_hosts_cores() {
+        let (router, sections) = viewer();
+        for (section, start) in [("server.json", 2_000), ("client.json", 3_000)] {
+            let view = &sections[section];
+            let api = view["api"].as_str().unwrap();
+            let plot = &view["groups"][0]["plots"][0];
+            assert_eq!(plot["opts"]["id"], "cpu-usage");
+            let query = plot["promql_query"]
+                .as_str()
+                .unwrap()
+                .bytes()
+                .map(|b| format!("%{b:02X}"))
+                .collect::<String>();
+            let end = start + SNAPSHOTS - 1;
+            let uri = format!("{api}/query_range?query={query}&start={start}&end={end}&step=1");
+            let body = get(&router, &uri).await;
+            let values = body["data"]["result"][0]["values"].as_array();
+            let values = values.unwrap_or_else(|| panic!("{section}: {body}"));
+            assert!(!values.is_empty(), "{section}: {body}");
+            for point in values {
+                let value = point[1].as_f64().unwrap();
+                assert!((value - 0.5).abs() < 1e-9, "{section}: {value}");
+            }
+        }
+    }
 
     #[test]
     fn lib_serves_the_files_the_page_loads_from_metriken_charts() {

@@ -308,6 +308,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     a `query worker:` error.
 
 ### Fixed
+- The viewer's Server and Client sections draw their charts. Their queries
+  went to the benchmark recording, so every one returned `Metric not found`.
+  Each section now queries its own recording, over that recording's time range.
+- `CPU Usage %` in those sections is a share of the host's cores. Its query was
+  1e11 too high: `cpu_usage` counts nanoseconds, and the query multiplied by 100
+  where a percentage chart needs a fraction. It selects its two states with
+  `=~`, because `=` stops matching them in later `metriken-query` versions.
 - The viewer's RESET ZOOM button resets the zoom. It raised
   `chartsState.resetZoom is not a function`.
 - The .deb and .rpm binaries run on glibc 2.28 and newer. They were linked on

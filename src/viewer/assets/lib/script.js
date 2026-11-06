@@ -1,8 +1,9 @@
 import { ChartsState, Chart } from './charts/chart.js';
 import { setChartHost } from './charts/host.js';
 
-// The step of the last range query. A chart reads gaps against it, because a
-// long recording's points are further apart than its sampling interval.
+// The range query step of the section on screen. A chart reads gaps against
+// it, because a long recording's points are further apart than its sampling
+// interval.
 let chartStep = null;
 
 setChartHost({ redraw: () => m.redraw(), getStepOverride: () => chartStep });
@@ -48,7 +49,7 @@ let chartsState = new ChartsState();
 // below 1.5 intervals (`with_histogram_stride` in api.rs).
 const CHART_POINTS = 4000;
 
-// The range_query parameters for the whole recording, from /api/v1/metadata.
+// The range_query parameters for the whole recording, from its metadata.
 const fullRange = ({ minTime, maxTime, interval }) => ({
     start: minTime,
     end: maxTime,
@@ -128,8 +129,12 @@ const Sidebar = {
 // Main component
 const Main = {
     view({
-        attrs: { activeSection, groups, sections, source, version, filename, interval },
+        attrs: { activeSection, groups, sections, source, version, filename, interval, api, range },
     }) {
+        // Set here because charts draw after this view, and a section loading in
+        // the background has its own step.
+        chartStep = range?.step ?? null;
+
         // Format interval for display
         const intervalMs = interval ? Math.round(interval * 1000) : null;
         const intervalStr = intervalMs ? `${intervalMs}ms sampling` : '';
@@ -158,6 +163,8 @@ const Main = {
                     section: activeSection,
                     groups,
                     interval,
+                    api,
+                    range,
                 }),
             ]),
         ]);
@@ -559,7 +566,7 @@ const sectionHasHistogramCharts = (groups) => {
 };
 
 // Fetch heatmap data for all histogram charts in a section
-const fetchSectionHeatmapData = async (sectionRoute, groups) => {
+const fetchSectionHeatmapData = async (sectionRoute, groups, api, range) => {
     const state = sectionHeatmapState.get(sectionRoute) || { enabled: false, heatmapData: new Map(), loading: false };
     state.loading = true;
     sectionHeatmapState.set(sectionRoute, state);
@@ -578,7 +585,7 @@ const fetchSectionHeatmapData = async (sectionRoute, groups) => {
                 const heatmapQuery = `histogram_heatmap(${metricSelector})`;
 
                 try {
-                    const result = await executePromQLRangeQuery(heatmapQuery);
+                    const result = await executePromQLRangeQuery(heatmapQuery, api, range ?? await recordingRange(api));
 
                     if (result.status === 'success' && result.data && result.data.resultType === 'histogram_heatmap') {
                         const heatmapResult = result.data.result;
@@ -626,7 +633,7 @@ const SectionContent = {
 
             if (newEnabled && heatmapState.heatmapData.size === 0) {
                 // Fetch heatmap data for all histogram charts
-                await fetchSectionHeatmapData(sectionRoute, attrs.groups);
+                await fetchSectionHeatmapData(sectionRoute, attrs.groups, attrs.api, attrs.range);
             } else {
                 m.redraw();
             }
@@ -702,11 +709,11 @@ const Group = {
 
 const sectionResponseCache = {};
 
-// Execute a PromQL range query
-const executePromQLRangeQuery = async (query) => {
+// The range_query parameters for the recording served at `api`.
+const recordingRange = async (api) => {
     const metadataResponse = await m.request({
         method: 'GET',
-        url: '/api/v1/metadata',
+        url: `${api}/metadata`,
         withCredentials: true,
     });
 
@@ -714,10 +721,12 @@ const executePromQLRangeQuery = async (query) => {
         throw new Error('Failed to get metadata');
     }
 
-    const { start, end, step } = fullRange(metadataResponse.data);
-    chartStep = step;
+    return fullRange(metadataResponse.data);
+};
 
-    const url = `/api/v1/query_range?query=${encodeURIComponent(query)}&start=${start}&end=${end}&step=${step}`;
+// Execute a PromQL range query against the recording served at `api`
+const executePromQLRangeQuery = async (query, api, { start, end, step }) => {
+    const url = `${api}/query_range?query=${encodeURIComponent(query)}&start=${start}&end=${end}&step=${step}`;
 
     return m.request({
         method: 'GET',
@@ -726,13 +735,20 @@ const executePromQLRangeQuery = async (query) => {
     });
 };
 
+// The section's range, read once. Each plot asks inside its own try, so a failed
+// request loses that plot and the next one reads it again.
+const sectionRange = async (data) => {
+    data.range ??= await recordingRange(data.api);
+    return data.range;
+};
+
 // Process dashboard data and execute PromQL queries where needed
 const processDashboardData = async (data) => {
     for (const group of data.groups || []) {
         for (const plot of group.plots || []) {
             if (plot.promql_query) {
                 try {
-                    const result = await executePromQLRangeQuery(plot.promql_query);
+                    const result = await executePromQLRangeQuery(plot.promql_query, data.api, await sectionRange(data));
 
                     if (
                         result.status === 'success' &&

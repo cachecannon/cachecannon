@@ -8,6 +8,8 @@ use std::sync::Arc;
 pub struct View {
     // interval between consecutive datapoints as fractional seconds
     interval: f64,
+    // the root of the API serving this section's queries
+    api: String,
     source: String,
     version: String,
     filename: String,
@@ -19,7 +21,8 @@ pub struct View {
 }
 
 impl View {
-    pub fn new(data: &Arc<ParquetReader>, sections: Vec<Section>) -> Self {
+    /// A view of `data`, which is served at `api`.
+    pub fn new(data: &Arc<ParquetReader>, api: &str, sections: Vec<Section>) -> Self {
         let interval = data.interval();
         let source = data.source();
         let version = data.version();
@@ -27,6 +30,7 @@ impl View {
 
         Self {
             interval,
+            api: api.to_string(),
             source,
             version,
             filename,

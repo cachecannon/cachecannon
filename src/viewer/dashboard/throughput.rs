@@ -6,7 +6,7 @@ pub fn generate(
     _client: Option<&Arc<ParquetReader>>,
     sections: Vec<Section>,
 ) -> View {
-    let mut view = View::new(data, sections);
+    let mut view = View::new(data, api::BENCHMARK_ROOT, sections);
 
     // Request/Response rates
     let mut requests = Group::new("Request/Response Rates", "request-rates");

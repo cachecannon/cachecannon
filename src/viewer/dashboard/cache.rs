@@ -6,7 +6,7 @@ pub fn generate(
     _client: Option<&Arc<ParquetReader>>,
     sections: Vec<Section>,
 ) -> View {
-    let mut view = View::new(data, sections);
+    let mut view = View::new(data, api::BENCHMARK_ROOT, sections);
 
     // Cache hit/miss rates
     let mut rates = Group::new("Cache Rates", "cache-rates");
