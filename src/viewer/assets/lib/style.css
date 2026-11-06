@@ -59,6 +59,17 @@
     --chart-pink: #f472b6;
     --chart-purple: #a78bfa;
 
+    /* Read by the metriken-charts modules and charts.css */
+    --chart-area-top: rgba(88, 166, 255, 0.2);
+    --chart-area-mid: rgba(88, 166, 255, 0.08);
+    --chart-area-bottom: rgba(88, 166, 255, 0.01);
+    --chart-grid-line: rgba(48, 54, 61, 0.5);
+    --chart-shadow: rgba(0, 0, 0, 0.4);
+    --chart-shadow-strong: rgba(0, 0, 0, 0.5);
+    --bg-card-gradient: linear-gradient(180deg, var(--bg-card) 0%, var(--bg-void) 100%);
+    --danger-fg: #ffa198;
+    --fg-on-accent: #fff;
+
     /* Layout dimensions */
     --sidebar-width: 180px;
     --header-height: 56px;
@@ -581,64 +592,11 @@ main {
 
 .chart {
     height: 380px;
-    background: linear-gradient(180deg, var(--bg-card) 0%, var(--bg-void) 100%);
-    border: 1px solid var(--border-subtle);
-    border-radius: var(--card-radius);
-    overflow: hidden;
-    position: relative;
-    transition: all var(--transition-base);
-}
-
-.chart::before {
-    content: '';
-    position: absolute;
-    inset: 0;
-    background: linear-gradient(
-        180deg,
-        rgba(88, 166, 255, 0.03) 0%,
-        transparent 30%
-    );
-    pointer-events: none;
-    opacity: 0;
-    transition: opacity var(--transition-base);
-}
-
-.chart:hover {
-    border-color: var(--border-emphasis);
-    box-shadow:
-        var(--shadow-lg),
-        0 0 0 1px var(--accent-subtle),
-        inset 0 1px 0 rgba(255, 255, 255, 0.02);
-    transform: translateY(-1px);
-}
-
-.chart:hover::before {
-    opacity: 1;
 }
 
 .chart-full-width {
     grid-column: 1 / -1;
     height: 420px;
-}
-
-.chart-header {
-    display: flex;
-    justify-content: space-between;
-    align-items: flex-start;
-    padding: 0.75rem 1rem 0;
-    position: absolute;
-    top: 0;
-    left: 0;
-    right: 0;
-    z-index: 5;
-    pointer-events: none;
-}
-
-.chart-title {
-    font-family: var(--font-mono);
-    font-size: var(--font-size-sm);
-    font-weight: 600;
-    color: var(--fg);
 }
 
 .chart-query {

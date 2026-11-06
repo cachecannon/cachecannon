@@ -12,40 +12,46 @@ pub fn generate(
     let mut latency = Group::new("Latency Percentiles", "latency-percentiles");
 
     // Overall response latency
-    latency.plot_promql(
-        PlotOpts::scatter("Response", "response-latency-pct", Unit::Time).with_log_scale(true),
-        "histogram_percentiles([0.5, 0.9, 0.99, 0.999, 0.9999], response_latency)".to_string(),
-    );
+    latency.plot(latency_percentiles(
+        "Response",
+        "response-latency-pct",
+        "histogram_percentiles([0.5, 0.9, 0.99, 0.999, 0.9999], response_latency)",
+    ));
 
     // GET latency
-    latency.plot_promql(
-        PlotOpts::scatter("GET", "get-latency-pct", Unit::Time).with_log_scale(true),
-        "histogram_percentiles([0.5, 0.9, 0.99, 0.999, 0.9999], get_latency)".to_string(),
-    );
+    latency.plot(latency_percentiles(
+        "GET",
+        "get-latency-pct",
+        "histogram_percentiles([0.5, 0.9, 0.99, 0.999, 0.9999], get_latency)",
+    ));
 
     // SET latency
-    latency.plot_promql(
-        PlotOpts::scatter("SET", "set-latency-pct", Unit::Time).with_log_scale(true),
-        "histogram_percentiles([0.5, 0.9, 0.99, 0.999, 0.9999], set_latency)".to_string(),
-    );
+    latency.plot(latency_percentiles(
+        "SET",
+        "set-latency-pct",
+        "histogram_percentiles([0.5, 0.9, 0.99, 0.999, 0.9999], set_latency)",
+    ));
 
     // DELETE latency
-    latency.plot_promql(
-        PlotOpts::scatter("DELETE", "delete-latency-pct", Unit::Time).with_log_scale(true),
-        "histogram_percentiles([0.5, 0.9, 0.99, 0.999, 0.9999], delete_latency)".to_string(),
-    );
+    latency.plot(latency_percentiles(
+        "DELETE",
+        "delete-latency-pct",
+        "histogram_percentiles([0.5, 0.9, 0.99, 0.999, 0.9999], delete_latency)",
+    ));
 
     // Schedule slip (queueing the latency clock omits)
-    latency.plot_promql(
-        PlotOpts::scatter("Schedule Slip", "schedule-slip-pct", Unit::Time).with_log_scale(true),
-        "histogram_percentiles([0.5, 0.9, 0.99, 0.999, 0.9999], schedule_slip)".to_string(),
-    );
+    latency.plot(latency_percentiles(
+        "Schedule Slip",
+        "schedule-slip-pct",
+        "histogram_percentiles([0.5, 0.9, 0.99, 0.999, 0.9999], schedule_slip)",
+    ));
 
     // Perceived (arrival-relative, CO-honest) latency
-    latency.plot_promql(
-        PlotOpts::scatter("Perceived", "perceived-latency-pct", Unit::Time).with_log_scale(true),
-        "histogram_percentiles([0.5, 0.9, 0.99, 0.999, 0.9999], perceived_latency)".to_string(),
-    );
+    latency.plot(latency_percentiles(
+        "Perceived",
+        "perceived-latency-pct",
+        "histogram_percentiles([0.5, 0.9, 0.99, 0.999, 0.9999], perceived_latency)",
+    ));
 
     view.group(latency);
 

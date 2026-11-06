@@ -838,6 +838,8 @@ Sends `PING`, expects `PONG`. Useful for measuring baseline connection latency w
 
 The `view` subcommand launches an interactive web dashboard. All time-series charts share a synchronized time axis and support zooming, panning, and tooltips.
 
+Setting `CACHECANNON_NO_OPEN` to any value, including empty, stops `view` opening a browser. The URL is still logged.
+
 ### Overview
 
 A single-page summary with six key metrics:

@@ -16,7 +16,7 @@ use tower_http::decompression::RequestDecompressionLayer;
 use tower_livereload::LiveReloadLayer;
 use tracing::{error, info};
 
-static ASSETS: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/src/viewer/assets");
+static ASSETS: Dir<'static> = include_dir!("$CARGO_MANIFEST_DIR/src/viewer/assets");
 
 mod api;
 mod dashboard;
@@ -148,7 +148,9 @@ pub fn run(config: Config) {
     rt.spawn(async move {
         tokio::time::sleep(Duration::from_secs(1)).await;
 
-        if open::that(format!("http://{addr}")).is_err() {
+        if std::env::var_os("CACHECANNON_NO_OPEN").is_some() {
+            info!("Use your browser to view: http://{addr}");
+        } else if open::that(format!("http://{addr}")).is_err() {
             info!("Use your browser to view: http://{addr}");
         } else {
             info!("Launched browser to view: http://{addr}");
@@ -256,10 +258,18 @@ async fn index() -> (StatusCode, [(header::HeaderName, &'static str); 1], String
     )
 }
 
+/// The file behind `/lib/{path}`: the viewer's own assets, or the
+/// metriken-charts assets, which hold `charts/` and `charts.css`.
+fn lib_asset(path: &str) -> Option<&'static include_dir::File<'static>> {
+    ASSETS
+        .get_file(format!("lib/{path}"))
+        .or_else(|| metriken_charts::ASSETS.get_file(path))
+}
+
 async fn lib(
     axum::extract::Path(path): axum::extract::Path<String>,
 ) -> (StatusCode, [(header::HeaderName, &'static str); 1], String) {
-    if let Some(asset) = ASSETS.get_file(format!("lib/{path}")) {
+    if let Some(asset) = lib_asset(&path) {
         if let Some(body) = asset.contents_utf8() {
             let content_type = if path.ends_with(".js") {
                 "text/javascript"
@@ -284,4 +294,31 @@ async fn lib(
         [(header::CONTENT_TYPE, "text/plain")],
         "404 Not Found".to_string(),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::lib_asset;
+
+    #[test]
+    fn lib_serves_the_files_the_page_loads_from_metriken_charts() {
+        for path in [
+            "charts/chart.js",
+            "charts/host.js",
+            "charts/echarts.min.js",
+            "charts.css",
+        ] {
+            assert!(lib_asset(path).is_some(), "{path} is not served");
+        }
+    }
+
+    #[test]
+    fn lib_serves_the_viewers_own_assets() {
+        assert!(lib_asset("script.js").is_some());
+    }
+
+    #[test]
+    fn lib_returns_none_for_an_unknown_path() {
+        assert!(lib_asset("charts/missing.js").is_none());
+    }
 }
