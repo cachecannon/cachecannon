@@ -1,9 +1,10 @@
 # Viewer charts from `metriken-charts`
 
 - **Opened:** 2026-11-05
-- **Status:** CLOSED — shipped on `viewer-metriken-charts`, with the y-axis
-  floor restored through `metriken-charts` 0.1.1 and a heatmap zoom regression
-  fixed in 0.1.2.
+- **Status:** CLOSED — shipped in #273 (`53242aa`), with the y-axis floor
+  restored through `metriken-charts` 0.1.1 and a heatmap zoom regression fixed
+  in 0.1.2. The Server and Client sections, which never drew data, are fixed on
+  `viewer-section-sources`.
 
 The viewer carried a copy of the rezolus chart modules from the initial commit
 (`91b624c`) and its own plot spec types. `metriken-charts` 0.1.0 publishes the
@@ -46,8 +47,9 @@ Cache and Connections queries, the latest chart start and end were:
 | Long run | 14,400 s | 3.6 s | 6.3 s | 0.9 s before the end |
 
 After a drag zoom on the 300 s recording, charts in a section differed by under
-1 s. Reopen if a metric first appears mid-run: neither recording has one, and
-the Server and Client sections were not measured.
+1 s. The Server and Client sections were measured once they drew: chart extents
+there span 430 s to 431 s on the server recording and 424 s on the client's.
+Reopen if a metric first appears mid-run: none of these recordings has one.
 
 ## Percentage y-axis
 
@@ -70,14 +72,16 @@ double-click resets. RESET ZOOM raised `chartsState.resetZoom is not a function`
 on `main` and works here. On the 14,400 s recording the Latency section took
 250 s to load on both debug builds, run side by side.
 
-Those checks missed two regressions. On 0.1.1 a heatmap first drawn
+Those checks missed two problems. On 0.1.1 a heatmap first drawn
 as a heatmap took its narrowest zoom from its first cell, so after a drag charts
 read `[0,100]` and `[28.1,56.6]` and RESET ZOOM did nothing. `main` was not
 affected. iopsystems/metriken #373 fixed it in 0.1.2, and the same steps then
 read `[28.1,56.6]` on both charts and `[0,100]` after the reset.
 
-The second is gap handling, which `main` does not have. On a recording longer
-than 6,000 intervals the step exceeds 1.5 intervals. `scatter.js` gaps its
+The second is gap handling, which `main` does not have, and neither does it
+have percentile lines, so the regression from `main` is only the line charts'
+stepping. On a recording longer than 6,000 intervals the step exceeds 1.5
+intervals. `scatter.js` gaps its
 percentile lines by `chart.interval`, so they broke at every point. With the step
 forced to 3 s on the 300 s recording, each of the five lines on a Latency chart
 held 99 nulls among 100 points. Line charts use `seriesGapGeometry`, which judges
@@ -87,16 +91,36 @@ where `main` uses `step: 'start'`. `script.js` now passes the query step through
 charts stay stepped.
 
 On the same recording with `--server` and `--client`, the Server and Client
-sections draw no data on this branch or on `main`: see below. Not tested: the
+sections drew no data on this branch or on `main`: see below. Not tested: the
 `QueryExplorer` component, which has no section route.
 
 ## Server and Client sections show no data
 
 Found while checking `CPU Usage %`, and not caused by this change. `api::routes`
-queries only the benchmark file, so every query in those sections returns
-`Metric not found`. `main` draws empty charts; this branch hides them, so the
-sections show only their group headings. The CPU query also returns about 9e9 where the host used about
-9%, a factor of 1e9, and `state="user|system"` matches both states only because
-`metriken-query` 0.37 splits `=` on `|`, which it stopped doing in the 0.4x
-line. Those two stay untouched here because the routing fix is a separate
-change.
+queried only the benchmark file, so every query in those sections returned
+`Metric not found`. `main` drew empty charts; #273 hid them, which left only the
+group headings.
+
+`viewer-section-sources` mounts `api::routes` once per recording, at `/api/v1`,
+`/server/api/v1` and `/client/api/v1`, and each `View` names its root in `api`.
+A recording's time range and interval come from that root, so `script.js` reads
+`metadata` once per section. `chartStep` is now set in `Main.view`: charts read
+it at draw time, and a section preloading in the background has its own step.
+With the step forced by `CHART_POINTS = 100`, it read 3.0 on Overview, 4.32 on
+Server and 4.26 on Client, and kept those values after the preload and on
+returning to each section.
+
+Each section spans its own recording: 432 s and 426 s here, against 300 s for
+the benchmark. `docs/reference.md` said these sections were aligned to the
+benchmark timeline, which no version did.
+
+The CPU query was also wrong, which the routing had hidden. `cpu_usage` counts
+nanoseconds, and the query ended in `/ cpu_cores * 100`. Run directly against the
+client recording, it returned about 9e9 where the host used about 9%. A
+`Unit::Percentage` chart multiplies by 100 when it draws, so it needs a fraction,
+and the query was 1e11 too high. It now ends in `/ cpu_cores / 1000000000`, and
+reads a mean of 86.9% and a maximum of 93.3% on the server recording, and 9.05%
+and 10.5% on the client's. It also used `state="user|system"`, which matches both
+states only because `metriken-query` 0.37 splits `=` on `|`. That stopped in the
+0.4x line, so the query uses `=~`. Every `cpu_usage` state in these recordings is
+user or system, so the filter changes nothing today.

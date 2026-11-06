@@ -1,5 +1,5 @@
-use super::AppState;
 use super::plot::*;
+use super::{AppState, api};
 use metriken_query::ParquetReader;
 use std::sync::Arc;
 
@@ -24,7 +24,14 @@ pub fn generate(
     server: Option<Arc<ParquetReader>>,
     client: Option<Arc<ParquetReader>>,
 ) -> AppState {
-    let mut state = AppState::new(benchmark.clone());
+    let mut sources = vec![(api::BENCHMARK_ROOT, benchmark.clone())];
+    if let Some(server) = &server {
+        sources.push((api::SERVER_ROOT, server.clone()));
+    }
+    if let Some(client) = &client {
+        sources.push((api::CLIENT_ROOT, client.clone()));
+    }
+    let mut state = AppState::new(sources);
 
     // Build section metadata based on available data
     let mut section_meta: Vec<(&str, &str, Generator)> = vec![

@@ -9,7 +9,7 @@ pub fn generate(
 ) -> View {
     // Use client data
     let data = client.expect("client::generate called without client data");
-    let mut view = View::new(data, sections);
+    let mut view = View::new(data, api::CLIENT_ROOT, sections);
 
     // CPU utilization
     let mut cpu = Group::new("CPU Utilization", "cpu");
@@ -17,7 +17,7 @@ pub fn generate(
     cpu.plot(
         Plot::counter("CPU Usage %", "cpu-usage", Unit::Percentage)
             .with_style(ChartStyle::Line)
-            .build("sum(irate(cpu_usage{state=\"user|system\"}[5m])) / cpu_cores * 100"),
+            .build("sum(irate(cpu_usage{state=~\"user|system\"}[5m])) / cpu_cores / 1000000000"),
     );
 
     view.group(cpu);
