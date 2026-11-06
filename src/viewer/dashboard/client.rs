@@ -14,9 +14,10 @@ pub fn generate(
     // CPU utilization
     let mut cpu = Group::new("CPU Utilization", "cpu");
 
-    cpu.plot_promql(
-        PlotOpts::line("CPU Usage %", "cpu-usage", Unit::Percentage),
-        "sum(irate(cpu_usage{state=\"user|system\"}[5m])) / cpu_cores * 100".to_string(),
+    cpu.plot(
+        Plot::counter("CPU Usage %", "cpu-usage", Unit::Percentage)
+            .with_style(ChartStyle::Line)
+            .build("sum(irate(cpu_usage{state=\"user|system\"}[5m])) / cpu_cores * 100"),
     );
 
     view.group(cpu);
@@ -24,14 +25,16 @@ pub fn generate(
     // Network traffic
     let mut network = Group::new("Network", "network");
 
-    network.plot_promql(
-        PlotOpts::line("TX Bytes/sec", "network-tx", Unit::Datarate),
-        "sum(irate(network_bytes{direction=\"transmit\"}[5m]))".to_string(),
+    network.plot(
+        Plot::counter("TX Bytes/sec", "network-tx", Unit::Datarate)
+            .with_style(ChartStyle::Line)
+            .build("sum(irate(network_bytes{direction=\"transmit\"}[5m]))"),
     );
 
-    network.plot_promql(
-        PlotOpts::line("RX Bytes/sec", "network-rx", Unit::Datarate),
-        "sum(irate(network_bytes{direction=\"receive\"}[5m]))".to_string(),
+    network.plot(
+        Plot::counter("RX Bytes/sec", "network-rx", Unit::Datarate)
+            .with_style(ChartStyle::Line)
+            .build("sum(irate(network_bytes{direction=\"receive\"}[5m]))"),
     );
 
     view.group(network);

@@ -11,14 +11,18 @@ pub fn generate(
     // Request/Response rates
     let mut requests = Group::new("Request/Response Rates", "request-rates");
 
-    requests.plot_promql(
-        PlotOpts::line("Responses/sec", "responses-received", Unit::Rate),
-        "irate(responses_received[10s])".to_string(),
+    requests.plot(
+        Plot::counter("Responses/sec", "responses-received", Unit::Rate)
+            .with_style(ChartStyle::Line)
+            .build("irate(responses_received[10s])"),
     );
 
-    requests.plot_promql(
-        PlotOpts::line("Error Rate", "error-rate", Unit::Percentage),
-        "irate(request_errors[10s]) / irate(requests_sent[10s])".to_string(),
+    requests.plot(
+        Plot::counter("Error Rate", "error-rate", Unit::Percentage)
+            .percentage_range()
+            .with_min_y_span(0.001)
+            .with_style(ChartStyle::Line)
+            .build("irate(request_errors[10s]) / irate(requests_sent[10s])"),
     );
 
     view.group(requests);
@@ -26,14 +30,16 @@ pub fn generate(
     // Bytes throughput
     let mut bytes = Group::new("Network Throughput", "bytes");
 
-    bytes.plot_promql(
-        PlotOpts::line("TX Bytes/sec", "bytes-tx", Unit::Datarate),
-        "irate(bytes_tx[10s])".to_string(),
+    bytes.plot(
+        Plot::counter("TX Bytes/sec", "bytes-tx", Unit::Datarate)
+            .with_style(ChartStyle::Line)
+            .build("irate(bytes_tx[10s])"),
     );
 
-    bytes.plot_promql(
-        PlotOpts::line("RX Bytes/sec", "bytes-rx", Unit::Datarate),
-        "irate(bytes_rx[10s])".to_string(),
+    bytes.plot(
+        Plot::counter("RX Bytes/sec", "bytes-rx", Unit::Datarate)
+            .with_style(ChartStyle::Line)
+            .build("irate(bytes_rx[10s])"),
     );
 
     view.group(bytes);
@@ -41,19 +47,22 @@ pub fn generate(
     // Operation rates
     let mut ops = Group::new("Operation Rates", "operations");
 
-    ops.plot_promql(
-        PlotOpts::line("GET/sec", "get-rate", Unit::Rate),
-        "irate(get_count[10s])".to_string(),
+    ops.plot(
+        Plot::counter("GET/sec", "get-rate", Unit::Rate)
+            .with_style(ChartStyle::Line)
+            .build("irate(get_count[10s])"),
     );
 
-    ops.plot_promql(
-        PlotOpts::line("SET/sec", "set-rate", Unit::Rate),
-        "irate(set_count[10s])".to_string(),
+    ops.plot(
+        Plot::counter("SET/sec", "set-rate", Unit::Rate)
+            .with_style(ChartStyle::Line)
+            .build("irate(set_count[10s])"),
     );
 
-    ops.plot_promql(
-        PlotOpts::line("DELETE/sec", "delete-rate", Unit::Rate),
-        "irate(delete_count[10s])".to_string(),
+    ops.plot(
+        Plot::counter("DELETE/sec", "delete-rate", Unit::Rate)
+            .with_style(ChartStyle::Line)
+            .build("irate(delete_count[10s])"),
     );
 
     view.group(ops);

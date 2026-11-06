@@ -546,6 +546,7 @@ dependencies = [
  "kvtrace",
  "libc",
  "metriken",
+ "metriken-charts",
  "metriken-exposition",
  "metriken-query",
  "metriken-storage",
@@ -1667,6 +1668,16 @@ dependencies = [
  "metriken-types",
  "once_cell",
  "parking_lot",
+]
+
+[[package]]
+name = "metriken-charts"
+version = "0.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c548e02c317d31f1e63798390a8ff261118e6d859b4c25e5db94191c1e860085"
+dependencies = [
+ "include_dir",
+ "serde",
 ]
 
 [[package]]

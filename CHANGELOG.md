@@ -8,6 +8,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Setting `CACHECANNON_NO_OPEN` to any value, including empty, stops
+  `cachecannon view` opening a browser.
 - `workload.routing = "routed"` loads several nodes the way a client
   population does: each worker's dispatcher draws every request's key from
   the whole keyspace, routes it, and queues it for the owning node, so a node
@@ -184,6 +186,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   share and `key_share` connection count.
 
 ### Changed
+- The viewer draws its charts with the `metriken-charts` crate instead of its
+  own copy of the chart modules, and builds its plot specs with
+  `metriken_charts::plot`. `/lib/charts/` and `/lib/charts.css` are served from
+  the crate. ECharts moves from 5.4 to 6.1.0. A chart with no data is now hidden
+  instead of drawn as an empty card. Hit Rate keeps its minimum 1% y-axis span,
+  and Error Rate's minimum becomes 0.1%, so a small error rate draws larger.
+  Both spans now also hold when zoomed, and both charts draw a value outside
+  0 to 100% at the bound.
 - The request latency histograms (`response_latency`, the per-command
   latencies, `get_ttfb`, `schedule_slip`, `perceived_latency` and the
   others defined with `LatencyHistogram`) are sharded per worker thread
@@ -298,6 +308,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     a `query worker:` error.
 
 ### Fixed
+- The viewer's RESET ZOOM button resets the zoom. It raised
+  `chartsState.resetZoom is not a function`.
 - The .deb and .rpm binaries run on glibc 2.28 and newer. They were linked on
   the Ubuntu 24.04 runner and needed `GLIBC_2.39` (x86_64 in every release,
   aarch64 since 0.0.16), so they failed to load on Amazon Linux 2023 and

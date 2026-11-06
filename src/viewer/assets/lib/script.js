@@ -1,4 +1,41 @@
 import { ChartsState, Chart } from './charts/chart.js';
+import { setChartHost } from './charts/host.js';
+
+// The step of the last range query. A chart reads gaps against it, because a
+// long recording's points are further apart than its sampling interval.
+let chartStep = null;
+
+setChartHost({ redraw: () => m.redraw(), getStepOverride: () => chartStep });
+
+// Mithril component for one chart: m(ChartView, { spec, chartsState, interval }).
+// It owns a charts/chart.js Chart and drives it from the Mithril lifecycle.
+class ChartView {
+    constructor(vnode) {
+        this.chart = new Chart(vnode.attrs);
+    }
+
+    oncreate(vnode) {
+        this.chart.mount(vnode.dom);
+    }
+
+    onupdate(vnode) {
+        this.chart.update(vnode.attrs);
+    }
+
+    onremove() {
+        this.chart.destroy();
+    }
+
+    view() {
+        return m('div.chart');
+    }
+}
+
+// A chart and its title, which the chart modules do not draw.
+const chartCard = (attrs) => m('div.chart-wrapper', [
+    m('div.chart-header', m('div.chart-title-row', m('span.chart-title', attrs.spec.opts.title))),
+    m(ChartView, attrs),
+]);
 
 // Global charts state for zoom synchronization
 let chartsState = new ChartsState();
@@ -120,6 +157,7 @@ const Main = {
                 m(SectionContent, {
                     section: activeSection,
                     groups,
+                    interval,
                 }),
             ]),
         ]);
@@ -344,7 +382,7 @@ const QueryExplorer = {
                                                         'div.query-chart',
                                                         { key: chartKey },
                                                         [
-                                                            m(Chart, {
+                                                            chartCard({
                                                                 spec: chartSpec,
                                                                 chartsState: vnode.state.queryChartsState,
                                                             }),
@@ -391,7 +429,7 @@ const QueryExplorer = {
                                                         'div.query-chart',
                                                         { key: chartKey },
                                                         [
-                                                            m(Chart, {
+                                                            chartCard({
                                                                 spec: chartSpec,
                                                                 chartsState: vnode.state.queryChartsState,
                                                             }),
@@ -608,7 +646,7 @@ const SectionContent = {
             m('div.section-title', attrs.section.name),
             m(
                 'div#groups',
-                attrs.groups.map((group) => m(Group, { ...group, sectionRoute })),
+                attrs.groups.map((group) => m(Group, { ...group, sectionRoute, interval: attrs.interval })),
             ),
         ]);
     },
@@ -649,10 +687,10 @@ const Group = {
                                 min_value: heatmapData.min_value,
                                 max_value: heatmapData.max_value,
                             };
-                            return m(Chart, { spec: heatmapSpec, chartsState });
+                            return chartCard({ spec: heatmapSpec, chartsState, interval: attrs.interval });
                         }
 
-                        return m(Chart, { spec, chartsState });
+                        return chartCard({ spec, chartsState, interval: attrs.interval });
                     }),
                 ),
             ],
@@ -677,6 +715,7 @@ const executePromQLRangeQuery = async (query) => {
     }
 
     const { start, end, step } = fullRange(metadataResponse.data);
+    chartStep = step;
 
     const url = `/api/v1/query_range?query=${encodeURIComponent(query)}&start=${start}&end=${end}&step=${step}`;
 
@@ -921,23 +960,6 @@ m.route(document.body, '/overview', {
                     (section) => section.route === requestedPath,
                 );
 
-                // Ensure time info is set for cached data (async, non-blocking)
-                if (data.interval && !chartsState.interval) {
-                    m.request({
-                        method: 'GET',
-                        url: '/api/v1/metadata',
-                        withCredentials: true,
-                    }).then(metadataResponse => {
-                        if (metadataResponse.status === 'success' && metadataResponse.data) {
-                            chartsState.setTimeInfo(
-                                data.interval,
-                                metadataResponse.data.minTime,
-                                metadataResponse.data.maxTime
-                            );
-                        }
-                    }).catch(() => {});
-                }
-
                 return {
                     view() {
                         return m(Main, {
@@ -964,26 +986,6 @@ m.route(document.body, '/overview', {
                     const activeSection = processedData.sections.find(
                         (section) => section.route === requestedPath,
                     );
-
-                    // Set time info for minimum zoom calculation
-                    if (processedData.interval) {
-                        try {
-                            const metadataResponse = await m.request({
-                                method: 'GET',
-                                url: '/api/v1/metadata',
-                                withCredentials: true,
-                            });
-                            if (metadataResponse.status === 'success' && metadataResponse.data) {
-                                chartsState.setTimeInfo(
-                                    processedData.interval,
-                                    metadataResponse.data.minTime,
-                                    metadataResponse.data.maxTime
-                                );
-                            }
-                        } catch (e) {
-                            console.warn('Failed to fetch metadata for zoom limits:', e);
-                        }
-                    }
 
                     preloadSections(processedData.sections);
 

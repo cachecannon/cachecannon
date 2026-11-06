@@ -11,14 +11,16 @@ pub fn generate(
     // Connection metrics
     let mut connections = Group::new("Connections", "connections");
 
-    connections.plot_promql(
-        PlotOpts::line("Active Connections", "connections-active", Unit::Count),
-        "connections_active".to_string(),
+    connections.plot(
+        Plot::gauge("Active Connections", "connections-active", Unit::Count)
+            .with_style(ChartStyle::Line)
+            .build("connections_active"),
     );
 
-    connections.plot_promql(
-        PlotOpts::line("Connection Failures/sec", "connections-failed", Unit::Rate),
-        "irate(connections_failed[10s])".to_string(),
+    connections.plot(
+        Plot::counter("Connection Failures/sec", "connections-failed", Unit::Rate)
+            .with_style(ChartStyle::Line)
+            .build("irate(connections_failed[10s])"),
     );
 
     view.group(connections);
@@ -26,34 +28,40 @@ pub fn generate(
     // Disconnect reasons
     let mut disconnects = Group::new("Disconnect Reasons", "disconnects");
 
-    disconnects.plot_promql(
-        PlotOpts::line("EOF", "disconnect-eof", Unit::Rate),
-        "irate(disconnects_eof[10s])".to_string(),
+    disconnects.plot(
+        Plot::counter("EOF", "disconnect-eof", Unit::Rate)
+            .with_style(ChartStyle::Line)
+            .build("irate(disconnects_eof[10s])"),
     );
 
-    disconnects.plot_promql(
-        PlotOpts::line("Recv Error", "disconnect-recv-error", Unit::Rate),
-        "irate(disconnects_recv_error[10s])".to_string(),
+    disconnects.plot(
+        Plot::counter("Recv Error", "disconnect-recv-error", Unit::Rate)
+            .with_style(ChartStyle::Line)
+            .build("irate(disconnects_recv_error[10s])"),
     );
 
-    disconnects.plot_promql(
-        PlotOpts::line("Send Error", "disconnect-send-error", Unit::Rate),
-        "irate(disconnects_send_error[10s])".to_string(),
+    disconnects.plot(
+        Plot::counter("Send Error", "disconnect-send-error", Unit::Rate)
+            .with_style(ChartStyle::Line)
+            .build("irate(disconnects_send_error[10s])"),
     );
 
-    disconnects.plot_promql(
-        PlotOpts::line("Closed Event", "disconnect-closed-event", Unit::Rate),
-        "irate(disconnects_closed_event[10s])".to_string(),
+    disconnects.plot(
+        Plot::counter("Closed Event", "disconnect-closed-event", Unit::Rate)
+            .with_style(ChartStyle::Line)
+            .build("irate(disconnects_closed_event[10s])"),
     );
 
-    disconnects.plot_promql(
-        PlotOpts::line("Error Event", "disconnect-error-event", Unit::Rate),
-        "irate(disconnects_error_event[10s])".to_string(),
+    disconnects.plot(
+        Plot::counter("Error Event", "disconnect-error-event", Unit::Rate)
+            .with_style(ChartStyle::Line)
+            .build("irate(disconnects_error_event[10s])"),
     );
 
-    disconnects.plot_promql(
-        PlotOpts::line("Connect Failed", "disconnect-connect-failed", Unit::Rate),
-        "irate(disconnects_connect_failed[10s])".to_string(),
+    disconnects.plot(
+        Plot::counter("Connect Failed", "disconnect-connect-failed", Unit::Rate)
+            .with_style(ChartStyle::Line)
+            .build("irate(disconnects_connect_failed[10s])"),
     );
 
     view.group(disconnects);
