@@ -1340,7 +1340,7 @@ impl KvReplay {
     pub fn results(&self, base: &KvBaseline) -> KvReplayResults {
         let now = kv_counters();
         let d = |i: usize| now[i].saturating_sub(base.counters[i]);
-        let stats = |h: &metriken::AtomicHistogram, b: &Option<Histogram>| -> LatencyStats {
+        let stats = |h: &metriken::AtomicCounterHistogram, b: &Option<Histogram>| -> LatencyStats {
             crate::runner::delta_latency_stats(h, b)
         };
         KvReplayResults {

@@ -539,7 +539,7 @@ dependencies = [
  "ctrlc",
  "dendro",
  "hdf5-metno",
- "histogram 1.4.1",
+ "histogram 1.6.5",
  "http",
  "include_dir",
  "ketama 0.0.1",
@@ -1176,9 +1176,9 @@ dependencies = [
 
 [[package]]
 name = "histogram"
-version = "1.4.1"
+version = "1.6.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "78dbc692bf02314a491f06bb95ae039fe842c1e1179f0036df08800fba0fb29b"
+checksum = "f91d403226c8d40a2aa7d6ab8518dda3cc10e5a0327a695a21b3196c8cc06883"
 dependencies = [
  "serde",
  "thiserror",
@@ -1657,12 +1657,12 @@ checksum = "88904434abc2901f197fe8cc55f0445e7ded921dba5911dad2e2b39b48e663c4"
 
 [[package]]
 name = "metriken"
-version = "0.11.3"
+version = "0.11.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6b775d1c8fa624fbf8e3a553a09cd2b48311e076301a48f2c968b6a52d7a52e1"
+checksum = "a0676b2808e00333434d81269305df6ecb880caa3e1ead3b251a85a8b6c0afc5"
 dependencies = [
  "getrandom 0.3.4",
- "histogram 1.4.1",
+ "histogram 1.6.5",
  "metriken-core",
  "metriken-derive",
  "metriken-types",
@@ -1682,11 +1682,11 @@ dependencies = [
 
 [[package]]
 name = "metriken-core"
-version = "0.3.3"
+version = "0.3.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "475f9a727147e3b088eadebda0572fb49f81aae39993d9dd1e6bac4556a18da0"
+checksum = "ea14270e8d9a5b4269ce1aed137d1e7274242ea59df5609b0a8f48cf1f60dfd3"
 dependencies = [
- "histogram 1.4.1",
+ "histogram 1.6.5",
  "linkme",
  "metriken-types",
  "parking_lot",
@@ -1715,7 +1715,7 @@ dependencies = [
  "chrono",
  "dendro",
  "foldhash",
- "histogram 1.4.1",
+ "histogram 1.6.5",
  "humantime",
  "metriken",
  "metriken-model",
@@ -1731,7 +1731,7 @@ version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "76482d52c12b2d4096f225a7dfcc4091c162e570e6696c3252e313251014d971"
 dependencies = [
- "histogram 1.4.1",
+ "histogram 1.6.5",
  "metriken-types",
  "rmp",
  "rmp-serde",
@@ -1747,7 +1747,7 @@ dependencies = [
  "arrow",
  "bytes",
  "foldhash",
- "histogram 1.4.1",
+ "histogram 1.6.5",
  "metriken-storage",
  "parquet",
  "promql-parser",
@@ -1767,7 +1767,7 @@ dependencies = [
  "arrow",
  "bytes",
  "foldhash",
- "histogram 1.4.1",
+ "histogram 1.6.5",
  "lru",
  "metriken-model",
  "metriken-types",

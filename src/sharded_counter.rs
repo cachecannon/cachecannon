@@ -15,7 +15,7 @@ const SLOTS: usize = CACHE_LINE / 8; // 16 counters per cache line
 /// Number of per-thread shards. Worker threads above this count share shards
 /// (`id % NUM_SHARDS`), so it should stay at or above the largest worker
 /// count a single process is expected to run.
-pub(crate) const NUM_SHARDS: usize = 256;
+const NUM_SHARDS: usize = 256;
 
 thread_local! {
     static SHARD_ID: Cell<Option<usize>> = const { Cell::new(None) };
@@ -27,6 +27,9 @@ thread_local! {
 /// shard assignment and avoid false sharing between workers.
 pub fn set_thread_shard(id: usize) {
     SHARD_ID.set(Some(id % NUM_SHARDS));
+    // ringline sets metriken's shard id on its workers. This covers any other
+    // caller.
+    metriken::set_thread_shard(id);
 }
 
 #[repr(C, align(128))]
@@ -204,7 +207,7 @@ impl metriken::Metric for Gauge {
 
 /// Get the shard index for the current thread.
 #[inline]
-pub(crate) fn shard_index() -> usize {
+fn shard_index() -> usize {
     SHARD_ID.get().unwrap_or_else(|| {
         thread_local! {
             static ID: u8 = const { 0 };

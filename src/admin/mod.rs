@@ -316,19 +316,18 @@ fn generate_prometheus_output() -> String {
                     }
                 }
             }
-            // metriken-core 0.2 carries histograms in a dedicated `Histogram`
-            // variant, so this -- not the `Other` arm below -- is what every
-            // AtomicHistogram reaches. `create_snapshot` was fixed for the same
-            // reason (#117); this endpoint was left behind, and until now
-            // served no latency data at all.
+            // metriken-core carries counting histograms in the `Histogram`
+            // variant, so `AtomicCounterHistogram` and `ShardedCounterHistogram`
+            // reach this arm and not the `Other` arm below.
             metriken::Value::Histogram(h) => {
                 if let Some(snapshot) = h.load() {
                     write_histogram_summary(&mut output, name, description, &snapshot);
                 }
             }
             metriken::Value::Other(any) => {
-                // Retained for histograms that still surface as `Other`.
-                if let Some(histogram) = any.downcast_ref::<metriken::AtomicHistogram>()
+                // No `metriken` histogram surfaces as `Other`; this covers a
+                // foreign metric that wraps one.
+                if let Some(histogram) = any.downcast_ref::<metriken::AtomicCounterHistogram>()
                     && let Some(snapshot) = histogram.load()
                 {
                     write_histogram_summary(&mut output, name, description, &snapshot);
@@ -532,11 +531,14 @@ fn create_snapshot() -> Snapshot {
                     ));
                 }
             }
-            // Retained for metrics that still surface as `Other`.
+            // No `metriken` histogram surfaces as `Other`; this covers a foreign
+            // metric that wraps one.
             Some(metriken::Value::Other(other)) => {
-                let histogram = if let Some(h) = other.downcast_ref::<metriken::AtomicHistogram>() {
+                let histogram = if let Some(h) =
+                    other.downcast_ref::<metriken::AtomicCounterHistogram>()
+                {
                     h.load()
-                } else if let Some(h) = other.downcast_ref::<metriken::RwLockHistogram>() {
+                } else if let Some(h) = other.downcast_ref::<metriken::RwLockCounterHistogram>() {
                     h.load()
                 } else {
                     None

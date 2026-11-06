@@ -96,7 +96,7 @@ ofi-libfabric-sys = { version = "0.2", optional = true }
 histogram = "1.1"
 # metriken-core declares `links`, so the graph holds one metriken-core: every
 # metriken crate moves together (core 0.3 here).
-metriken = "0.11.3"
+metriken = "0.11.7"
 # `stream`: the `/metrics/stream` route (`src/admin/mod.rs`); dendro's wire
 # without its `archive` feature, so no SQLite. `msgpack`: the
 # `/metrics/binary` snapshot.
