@@ -316,19 +316,19 @@ fn generate_prometheus_output() -> String {
                     }
                 }
             }
-            // metriken-core 0.2 carries histograms in a dedicated `Histogram`
-            // variant, so this -- not the `Other` arm below -- is what every
-            // AtomicHistogram reaches. `create_snapshot` was fixed for the same
-            // reason (#117); this endpoint was left behind, and until now
-            // served no latency data at all.
+            // metriken-core carries counting histograms in the `Histogram`
+            // variant, so `AtomicCounterHistogram` and `ShardedCounterHistogram`
+            // reach this arm and not the `Other` arm below.
             metriken::Value::Histogram(h) => {
                 if let Some(snapshot) = h.load() {
                     write_histogram_summary(&mut output, name, description, &snapshot);
                 }
             }
             metriken::Value::Other(any) => {
-                // Retained for histograms that still surface as `Other`.
-                if let Some(histogram) = any.downcast_ref::<metriken::AtomicHistogram>()
+                // No `metriken` histogram surfaces as `Other`; this reads a foreign
+                // metric that passes an `AtomicCounterHistogram` itself as
+                // `Value::Other`.
+                if let Some(histogram) = any.downcast_ref::<metriken::AtomicCounterHistogram>()
                     && let Some(snapshot) = histogram.load()
                 {
                     write_histogram_summary(&mut output, name, description, &snapshot);
@@ -486,11 +486,9 @@ fn create_snapshot() -> Snapshot {
             Some(metriken::Value::Gauge(v)) => {
                 gauges.push(SnapGauge::new(name.to_string(), v, metadata));
             }
-            // metriken-core 0.2 carries histograms in a dedicated `Histogram`
-            // variant. Without this arm every latency histogram fell through to
-            // the catch-all below and was silently dropped, so neither the
-            // parquet recording nor the Prometheus endpoint carried any latency
-            // data -- it existed only in the terminal summary.
+            // metriken-core carries counting histograms in the `Histogram`
+            // variant, so `AtomicCounterHistogram` and `ShardedCounterHistogram`
+            // reach this arm.
             Some(metriken::Value::Histogram(h)) => {
                 if let Some(hist) = h.load() {
                     metadata.insert(
@@ -532,11 +530,15 @@ fn create_snapshot() -> Snapshot {
                     ));
                 }
             }
-            // Retained for metrics that still surface as `Other`.
+            // No `metriken` histogram surfaces as `Other`; this reads a foreign
+            // metric that passes an `AtomicCounterHistogram` or
+            // `RwLockCounterHistogram` itself as `Value::Other`.
             Some(metriken::Value::Other(other)) => {
-                let histogram = if let Some(h) = other.downcast_ref::<metriken::AtomicHistogram>() {
+                let histogram = if let Some(h) =
+                    other.downcast_ref::<metriken::AtomicCounterHistogram>()
+                {
                     h.load()
-                } else if let Some(h) = other.downcast_ref::<metriken::RwLockHistogram>() {
+                } else if let Some(h) = other.downcast_ref::<metriken::RwLockCounterHistogram>() {
                     h.load()
                 } else {
                     None

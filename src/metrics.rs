@@ -2,10 +2,9 @@
 
 pub use crate::sharded_counter::set_thread_shard;
 use crate::sharded_counter::{Counter, CounterGroup, Gauge as ShardedGauge};
-use crate::sharded_histogram::ShardedHistogram;
 use std::cell::Cell;
 
-use metriken::{AtomicHistogram, Gauge, metric};
+use metriken::{AtomicCounterHistogram, Gauge, metric};
 
 // Counter groups
 static REQUEST: CounterGroup = CounterGroup::new();
@@ -210,7 +209,7 @@ pub static APPEND_SET_ERRORS: Counter = Counter::new(&APPEND, append::ERRORS);
     name = "append_set_latency",
     description = "Append-stream SET latency histogram (nanoseconds)"
 )]
-pub static APPEND_SET_LATENCY: LatencyHistogram = LatencyHistogram::new();
+pub static APPEND_SET_LATENCY: LatencyHistogram = LatencyHistogram::new(7, 64);
 
 #[metric(
     name = "append_head",
@@ -405,31 +404,31 @@ pub static KV_LOADS_WITH_CACHED: Counter = Counter::new(&KV, kv::LOADS_WITH_CACH
     name = "kv_lookup_time",
     description = "KV replay: per request, first EXISTS sent to last EXISTS reply (nanoseconds)"
 )]
-pub static KV_LOOKUP_TIME: AtomicHistogram = AtomicHistogram::new(7, 64);
+pub static KV_LOOKUP_TIME: AtomicCounterHistogram = AtomicCounterHistogram::new(7, 64);
 
 #[metric(
     name = "kv_load_time",
     description = "KV replay: per request, first GET sent to last GET reply (nanoseconds)"
 )]
-pub static KV_LOAD_TIME: AtomicHistogram = AtomicHistogram::new(7, 64);
+pub static KV_LOAD_TIME: AtomicCounterHistogram = AtomicCounterHistogram::new(7, 64);
 
 #[metric(
     name = "kv_store_time",
     description = "KV replay: per request, first SET sent to last SET reply (nanoseconds)"
 )]
-pub static KV_STORE_TIME: AtomicHistogram = AtomicHistogram::new(7, 64);
+pub static KV_STORE_TIME: AtomicCounterHistogram = AtomicCounterHistogram::new(7, 64);
 
 #[metric(
     name = "kv_load_time_per_1k_tokens",
     description = "KV replay: per request with cached tokens, load time per 1,000 cached tokens (nanoseconds)"
 )]
-pub static KV_LOAD_TIME_PER_1K_TOKENS: AtomicHistogram = AtomicHistogram::new(7, 64);
+pub static KV_LOAD_TIME_PER_1K_TOKENS: AtomicCounterHistogram = AtomicCounterHistogram::new(7, 64);
 
 #[metric(
     name = "kv_schedule_lag",
     description = "KV replay, open loop: per request, start minus the time the trace scheduled it (nanoseconds)"
 )]
-pub static KV_SCHEDULE_LAG: AtomicHistogram = AtomicHistogram::new(7, 64);
+pub static KV_SCHEDULE_LAG: AtomicCounterHistogram = AtomicCounterHistogram::new(7, 64);
 
 // Cluster metrics
 static CLUSTER: CounterGroup = CounterGroup::new();
@@ -456,64 +455,64 @@ pub fn slip_ns(available: u64, rate: u64) -> u64 {
     available.saturating_mul(1_000_000_000) / rate
 }
 
-// Latency histograms: one shard per worker thread, merged on load (see
-// sharded_histogram). A single process-wide AtomicHistogram would make every
-// worker contend on the same few hot buckets.
-pub type LatencyHistogram = ShardedHistogram<7, 64>;
+// Latency histograms: one shard per worker thread, merged on load. A single
+// process-wide histogram would make every worker contend on the same few hot
+// buckets.
+pub type LatencyHistogram = metriken::ShardedCounterHistogram;
 #[metric(
     name = "response_latency",
     description = "Response latency histogram (nanoseconds)"
 )]
-pub static RESPONSE_LATENCY: LatencyHistogram = LatencyHistogram::new();
+pub static RESPONSE_LATENCY: LatencyHistogram = LatencyHistogram::new(7, 64);
 
 #[metric(
     name = "get_latency",
     description = "GET response latency histogram (nanoseconds)"
 )]
-pub static GET_LATENCY: LatencyHistogram = LatencyHistogram::new();
+pub static GET_LATENCY: LatencyHistogram = LatencyHistogram::new(7, 64);
 
 #[metric(
     name = "set_latency",
     description = "SET response latency histogram (nanoseconds)"
 )]
-pub static SET_LATENCY: LatencyHistogram = LatencyHistogram::new();
+pub static SET_LATENCY: LatencyHistogram = LatencyHistogram::new(7, 64);
 
 #[metric(
     name = "delete_latency",
     description = "DELETE response latency histogram (nanoseconds)"
 )]
-pub static DELETE_LATENCY: LatencyHistogram = LatencyHistogram::new();
+pub static DELETE_LATENCY: LatencyHistogram = LatencyHistogram::new(7, 64);
 
 #[metric(
     name = "get_ttfb",
     description = "GET time-to-first-byte histogram (nanoseconds)"
 )]
-pub static GET_TTFB: LatencyHistogram = LatencyHistogram::new();
+pub static GET_TTFB: LatencyHistogram = LatencyHistogram::new(7, 64);
 
 #[metric(
     name = "routed_queue_wait",
     description = "Routed requests: time from the dispatcher funding a request to a connection sending it (nanoseconds); included in response_latency"
 )]
-pub static ROUTED_QUEUE_WAIT: LatencyHistogram = LatencyHistogram::new();
+pub static ROUTED_QUEUE_WAIT: LatencyHistogram = LatencyHistogram::new(7, 64);
 
 #[metric(
     name = "backfill_set_latency",
     description = "Backfill SET latency histogram (nanoseconds)"
 )]
-pub static BACKFILL_SET_LATENCY: LatencyHistogram = LatencyHistogram::new();
+pub static BACKFILL_SET_LATENCY: LatencyHistogram = LatencyHistogram::new(7, 64);
 
 // ── Coordinated-omission metrics ─────────────────────────────────────────
 #[metric(
     name = "schedule_slip",
     description = "Per-request schedule slip histogram (nanoseconds): queueing time the latency clock omits, from the rate limiter backlog"
 )]
-pub static SCHEDULE_SLIP: LatencyHistogram = LatencyHistogram::new();
+pub static SCHEDULE_SLIP: LatencyHistogram = LatencyHistogram::new(7, 64);
 
 #[metric(
     name = "perceived_latency",
     description = "Arrival-relative (CO-honest) response latency histogram (nanoseconds): response_latency + schedule slip"
 )]
-pub static PERCEIVED_LATENCY: LatencyHistogram = LatencyHistogram::new();
+pub static PERCEIVED_LATENCY: LatencyHistogram = LatencyHistogram::new(7, 64);
 
 #[metric(
     name = "current_slip_ns",

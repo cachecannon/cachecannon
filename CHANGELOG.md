@@ -202,6 +202,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   one 58 KiB bucket array per worker that records into it. With the
   no-limiter slip change below, 64 threads at pipeline 64 on Graviton4
   went from 21.8M to 111M RPS without a rate limit. (#259)
+- The latency histograms use `metriken::ShardedCounterHistogram` from
+  `metriken` 0.11.7, and `cachecannon::sharded_histogram` is removed. The bump
+  from `metriken` 0.11.3 moves `histogram` from 1.4.1 to 1.6.5. Recorded buckets
+  are the same at the `(7, 64)` configuration these histograms use. Against the
+  previous type, on one Zen 1 guest over loopback, the medians of GET p50 and
+  p99 at 1.38M/s and of closed-loop throughput stayed within the round-to-round
+  spread of two identical binaries. Latency beyond p99 varied too much between
+  identical binaries to compare, and ARM is unmeasured. (#275)
 - With no rate limiter (neither `workload.rate_limit` nor
   `[workload.saturation_search]`), `schedule_slip` is no longer recorded,
   so `/metrics` and the parquet recording no longer carry it (before, they
