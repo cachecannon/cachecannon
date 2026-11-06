@@ -325,8 +325,9 @@ fn generate_prometheus_output() -> String {
                 }
             }
             metriken::Value::Other(any) => {
-                // No `metriken` histogram surfaces as `Other`; this covers a
-                // foreign metric that wraps one.
+                // No `metriken` histogram surfaces as `Other`; this reads a foreign
+                // metric that passes an `AtomicCounterHistogram` itself as
+                // `Value::Other`.
                 if let Some(histogram) = any.downcast_ref::<metriken::AtomicCounterHistogram>()
                     && let Some(snapshot) = histogram.load()
                 {
@@ -485,11 +486,9 @@ fn create_snapshot() -> Snapshot {
             Some(metriken::Value::Gauge(v)) => {
                 gauges.push(SnapGauge::new(name.to_string(), v, metadata));
             }
-            // metriken-core 0.2 carries histograms in a dedicated `Histogram`
-            // variant. Without this arm every latency histogram fell through to
-            // the catch-all below and was silently dropped, so neither the
-            // parquet recording nor the Prometheus endpoint carried any latency
-            // data -- it existed only in the terminal summary.
+            // metriken-core carries counting histograms in the `Histogram`
+            // variant, so `AtomicCounterHistogram` and `ShardedCounterHistogram`
+            // reach this arm.
             Some(metriken::Value::Histogram(h)) => {
                 if let Some(hist) = h.load() {
                     metadata.insert(
@@ -531,8 +530,9 @@ fn create_snapshot() -> Snapshot {
                     ));
                 }
             }
-            // No `metriken` histogram surfaces as `Other`; this covers a foreign
-            // metric that wraps one.
+            // No `metriken` histogram surfaces as `Other`; this reads a foreign
+            // metric that passes an `AtomicCounterHistogram` or
+            // `RwLockCounterHistogram` itself as `Value::Other`.
             Some(metriken::Value::Other(other)) => {
                 let histogram = if let Some(h) =
                     other.downcast_ref::<metriken::AtomicCounterHistogram>()

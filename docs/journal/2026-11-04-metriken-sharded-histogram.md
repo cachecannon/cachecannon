@@ -1,7 +1,7 @@
 # Latency histograms from `metriken`
 
 - **Opened:** 2026-11-04
-- **Status:** CLOSED — `ShardedHistogram` is replaced by
+- **Status:** CLOSED — shipped in #275. `ShardedHistogram` is replaced by
   `metriken::ShardedCounterHistogram`, after a change to `metriken` released as
   0.11.7. Against `main` at `53242aa`, GET p50 and p99 at 1.38M/s and
   closed-loop throughput stayed inside the A-vs-A range. Zen 1 only.
@@ -28,7 +28,12 @@ and `metriken` 0.11.7's type produced identical buckets for 300 threads and 60M
 values including `0`, `1`, `2^63` and `u64::MAX`, with one thread in ten setting
 no shard id. A second run at `(5, 10)`, with values masked to 0-2047, gave
 identical buckets and identical errors. This was a release build on macOS, and
-the test is not in the tree.
+the test is not in the tree. Both types in that test were built on `histogram`
+1.6.5, so it does not compare `histogram` versions.
+
+Separately, `histogram` 1.4.1 and 1.6.5 `AtomicHistogram` at `(7, 64)` gave
+identical buckets, errors, bucket bounds and ten quantiles over 202M values, on
+arm64 and on x86_64 under Rosetta. That test is not in the tree.
 
 They differ in four ways, and none changes a reported number:
 
@@ -67,14 +72,14 @@ thread per core, where C/B was 0.977 and 1.000 (`01a1a93d`). Removing the check
 changes about 47 instructions and 8 branches per increment to about 44 and 7
 (`01a1a93d`, `perf stat`).
 
-**Refuted: D is the fix.** D was faster in the benchmark and slower in the real
-binary. The larger `add` stopped being inlined: 32 sites called an outlined
-`add`, and one increment took 47 instructions, three pushes and pops among them,
-against 38 for B and C (cross-compiled x86 build, `RESPONSE_LATENCY` in
-`record_routed_latency`). The benchmark has one call site, so `add` stayed
-inlined and the benchmark did not show this. A second benchmark with three call
-sites and the `Result` discarded, the shape of `src/worker.rs`, gave D/B 0.815
-(`01a1ab8b`).
+**Refuted: D is the fix.** D was faster in the one-call-site benchmark and was
+not run end to end. In the real binary the larger `add` stopped being inlined:
+32 sites called an outlined `add`, and one increment took 47 instructions, three
+pushes and pops among them, against 38 for B and C (cross-compiled x86 build,
+`RESPONSE_LATENCY` in `record_routed_latency`). The benchmark has one call site,
+so `add` stayed inlined and the benchmark did not show this. A second benchmark
+with three call sites and the `Result` discarded, the shape of `src/worker.rs`,
+gave D/B 0.815 (`01a1ab8b`).
 
 **Refuted: D2, a `#[cold]` function that does the add and returns `Result`.**
 Prediction: at least 1.005 of B at one call site. Measured 0.893, and 0.892 on
@@ -139,7 +144,7 @@ Modes: rl, 8 workers on vCPUs 0-7 at 1,378,588/s. cl8, closed loop, 8 workers on
 | rl | GET p99 | 942 µs | 1.0000 [0.974, 1.021] | 1.0084 [0.979, 1.022] | 1.0000 [0.983, 1.013] |
 | cl8 | throughput | 2.907M/s | 0.9998 [0.993, 1.006] | 1.0005 [0.991, 1.008] | 1.0001 [0.995, 1.005] |
 | cl2 | throughput | 776,848/s | 0.9972 [0.992, 1.009] | 0.9949 [0.978, 1.011] | 0.9992 [0.990, 1.013] |
-| cl2 | cycles | | 0.9958 [0.980, 1.010] | 1.0190 [1.010, 1.037] | 0.9949 [0.988, 1.014] |
+| cl2 | cycles:u | | 0.9958 [0.980, 1.010] | 1.0190 [1.010, 1.037] | 0.9949 [0.988, 1.014] |
 
 Reported latency values are bucket ends, so rl p50 resolves about 0.7% and p99
 about 0.4%. A 1.0000 median can come from rounds one bucket either side: S/A p99
@@ -161,14 +166,15 @@ generator was the limit.
 Latency beyond p99 varies too much between identical binaries to compare. In rl,
 A2/A alone spans 0.666 to 1.301 at p99.9, and S/A 0.778 to 1.205 sits inside it.
 
-Cycles counted by `perf stat` cover the whole process, including prefill and
-warmup, so the per-response values are useful only as ratios.
+`perf stat` counted user-mode cycles (`cycles:u`) for the whole process,
+including prefill and warmup, so the per-response values are useful only as
+ratios. Kernel-mode cycles are not counted.
 
-B's 1.9% more cycles than A in cl2 is outside A-vs-A and S does not have it. B
-also read 1.0125 in rl and 1.0145 in cl8, both above the A2/A range. I do not know
-why B costs cycles here, and B's throughput stays inside the A-vs-A range. The
-microbenchmark measured a 6.7% gain for a similar dependency bump at 8 threads on
-4 cores and none at 1 thread, on the increment loop alone.
+B's 1.9% more user-mode cycles than A in cl2 is outside A-vs-A and S does not
+have it. B also read 1.0125 in rl and 1.0145 in cl8, both above the A2/A range.
+I do not know why B costs cycles here, and B's throughput stays inside the
+A-vs-A range. The microbenchmark measured a 6.7% gain for a similar dependency
+bump at 8 threads on 4 cores and none at 1 thread, on the increment loop alone.
 
 ## Not measured
 
