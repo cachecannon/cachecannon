@@ -82,12 +82,12 @@ The second is gap handling, which `main` does not have, and neither does it
 have percentile lines, so the regression from `main` is only the line charts'
 stepping. On a recording longer than 6,000 intervals the step exceeds 1.5
 intervals. `scatter.js` gaps its percentile lines by `chart.interval`, so they
-broke at every point. With the step forced to 3 s on the 300 s recording, each of the five lines on a Latency chart
-held 99 nulls among 100 points. Line charts use `seriesGapGeometry`, which judges
-gaps against their median spacing, so they kept their points but drew unstepped,
-where `main` uses `step: 'start'`. `script.js` now passes the query step through
-`getStepOverride`, and on that run the percentile lines hold no nulls and line
-charts stay stepped.
+broke at every point. With the step forced to 3 s on the 300 s recording, each
+of the five lines on a Latency chart held 99 nulls among 100 points. Line charts
+use `seriesGapGeometry`, which judges gaps against their median spacing, so they
+kept their points but drew unstepped, where `main` uses `step: 'start'`.
+`script.js` now passes the query step through `getStepOverride`, and on that run
+the percentile lines hold no nulls and line charts stay stepped.
 
 On the same recording with `--server` and `--client`, the Server and Client
 sections drew no data on this branch or on `main`: see below. Not tested: the
@@ -103,8 +103,9 @@ group headings.
 `viewer-section-sources` mounts `api::routes` once per recording, at `/api/v1`,
 `/server/api/v1` and `/client/api/v1`, and each `View` names its root in `api`.
 A recording's time range and interval come from that root, so `script.js` reads
-`metadata` once per section, on the first plot that gets a response. `chartStep` is now set in `Main.view`: charts read
-it at draw time, and a section preloading in the background has its own step.
+`metadata` per section until a request succeeds. `chartStep` is now set in
+`Main.view`: charts read it at draw time, and a section preloading in the
+background has its own step.
 With the step forced by `CHART_POINTS = 100`, it read 3.0 on Overview, 4.32 on
 Server and 4.26 on Client, and kept those values after the preload and on
 returning to each section.
