@@ -76,12 +76,15 @@ read `[0,100]` and `[28.1,56.6]` and RESET ZOOM did nothing. `main` was not
 affected. iopsystems/metriken #373 fixed it in 0.1.2, and the same steps then
 read `[28.1,56.6]` on both charts and `[0,100]` after the reset.
 
-The second is gap handling, which `main` does not have. `insertGapNulls` compared
-point spacing with the sampling interval, so a step above 1.5 intervals, which
-means a recording longer than 6,000 intervals, broke every line at every point.
-With the step forced to 3 s on the 300 s recording, each of the five percentile
-lines on a Latency chart held 99 nulls among 100 points. `script.js` now passes
-the query step through `getStepOverride`, and the same lines hold none.
+The second is gap handling, which `main` does not have. On a recording longer
+than 6,000 intervals the step exceeds 1.5 intervals. `scatter.js` gaps its
+percentile lines by `chart.interval`, so they broke at every point. With the step
+forced to 3 s on the 300 s recording, each of the five lines on a Latency chart
+held 99 nulls among 100 points. Line charts use `seriesGapGeometry`, which judges
+gaps against their median spacing, so they kept their points but drew unstepped,
+where `main` uses `step: 'start'`. `script.js` now passes the query step through
+`getStepOverride`, and on that run the percentile lines hold no nulls and line
+charts stay stepped.
 
 On the same recording with `--server` and `--client`, the Server and Client
 sections draw no data on this branch or on `main`: see below. Not tested: the
@@ -92,8 +95,8 @@ sections draw no data on this branch or on `main`: see below. Not tested: the
 Found while checking `CPU Usage %`, and not caused by this change. `api::routes`
 queries only the benchmark file, so every query in those sections returns
 `Metric not found`. `main` draws empty charts; this branch hides them, so the
-sections show only their group headings. The CPU query also returns 9,821,811,112 where the host used
-9.82%, and `state="user|system"` matches both states only because
+sections show only their group headings. The CPU query also returns about 9e9 where the host used about
+9%, a factor of 1e9, and `state="user|system"` matches both states only because
 `metriken-query` 0.37 splits `=` on `|`, which it stopped doing in the 0.4x
 line. Those two stay untouched here because the routing fix is a separate
 change.
