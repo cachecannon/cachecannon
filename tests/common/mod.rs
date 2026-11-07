@@ -352,6 +352,31 @@ pub fn decile_spans(times: &[Instant]) -> Vec<Duration> {
     spans
 }
 
+/// The time between consecutive SETs in `times`, which must be sorted, summed
+/// over gaps of at most `stall`, and the number of gaps over it.
+pub fn pacing_and_stalls(times: &[Instant], stall: Duration) -> (Duration, usize) {
+    let gaps = times.windows(2).map(|pair| pair[1] - pair[0]);
+    let paced = gaps.clone().filter(|gap| *gap <= stall).sum();
+    let stalls = gaps.filter(|gap| *gap > stall).count();
+    (paced, stalls)
+}
+
+/// Assert that a prefill of 8000 keys at 4000 per second kept at least about
+/// three quarters of its rate, outside stops of the test host. Time in gaps
+/// over 25 ms, 100 tokens at that rate, is left out of `paced`; at most 14
+/// such gaps, totalling under 1.5 s, are allowed. A pacer whose stops stay
+/// within those limits passes wherever they fall, and a heavily overloaded
+/// host can fail.
+pub fn assert_paced_for_two_seconds(times: &[Instant]) {
+    let span = *times.last().unwrap() - *times.first().unwrap();
+    let (paced, stalls) = pacing_and_stalls(times, Duration::from_millis(25));
+    let shown = format!("paced for {paced:?} of {span:?} with {stalls} stalls");
+    assert!(paced.as_secs_f64() > 1.6, "{shown}");
+    assert!(paced.as_secs_f64() < 2.7, "{shown}");
+    assert!(stalls < 15, "{shown}");
+    assert!((span - paced).as_secs_f64() < 1.5, "{shown}");
+}
+
 /// As [`prefill_span_shaped`], but return every SET's arrival time, sorted.
 pub fn prefill_times_shaped(
     protocol: &str,

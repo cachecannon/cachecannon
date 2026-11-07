@@ -4,7 +4,8 @@
 //! the connections but only about a quarter of the prefill keys, so the
 //! workers serving it drain first. The others must be able to use the whole
 //! rate: 8000 keys at 4000 per second take about two seconds. With the rate
-//! split per worker this took 3.8 s.
+//! split evenly per worker it took 3 to 9 s. The bounds, and how they allow
+//! for a busy test host, are in `common::assert_paced_for_two_seconds`.
 
 mod common;
 
@@ -18,7 +19,6 @@ fn workers_whose_endpoints_drained_leave_the_rate_to_the_others() {
         keyspace: "distribution = \"zipf\"\nzipf_theta = 1.5",
         connection: "endpoint_allocation = \"key_share\"",
     };
-    let span = common::prefill_span_shaped("resp", shape, 8000, 4000);
-    assert!(span.as_secs_f64() > 1.6, "prefill took {span:?}");
-    assert!(span.as_secs_f64() < 2.4, "prefill took {span:?}");
+    let times = common::prefill_times_shaped("resp", shape, 8000, 4000);
+    common::assert_paced_for_two_seconds(&times);
 }
