@@ -452,6 +452,21 @@ pub struct KvReplay {
     /// Write one CSV row per completed trace request to this file.
     #[serde(default)]
     pub requests_out: Option<PathBuf>,
+    /// Connections, out of `connection.connections`, that only send SETs.
+    /// 0 (the default) runs each request's lookup, load and store in order
+    /// on one connection. Above 0, a request's store is queued once its load
+    /// has finished and is sent by one of these connections, so the next
+    /// request can start on the connection that loaded. Each worker needs at
+    /// least one store connection and one other.
+    #[serde(default)]
+    pub store_connections: usize,
+    /// With `store_connections`: stores each worker may hold queued, not yet
+    /// started. A store that finds the queue full is dropped whole and
+    /// counted in `kv_stores_dropped`. A store put back after it reached a
+    /// closed store connection goes in even when the queue is full. Unset
+    /// (the default) is no limit.
+    #[serde(default)]
+    pub store_queue: Option<usize>,
 }
 
 /// Which objects a KV replay request SETs after its lookup.
@@ -1521,6 +1536,7 @@ impl Config {
         if self.connection.pipeline_depth == 0 {
             return bad("needs connection.pipeline_depth >= 1");
         }
+        self.validate_kv_store_connections(kv)?;
         // The lookup is one pipeline of EXISTS per connection, so every key a
         // request touches must live on the server that connection reaches.
         if !matches!(self.target.protocol, Protocol::Resp | Protocol::Resp3) {
@@ -1547,6 +1563,49 @@ impl Config {
         ] {
             if set {
                 return bad(&format!("cannot be combined with {key}"));
+            }
+        }
+        Ok(())
+    }
+
+    /// `store_connections` and `store_queue`.
+    fn validate_kv_store_connections(&self, kv: &KvReplay) -> Result<(), ConfigError> {
+        let bad = |msg: String| {
+            Err(ConfigError::Validation(format!(
+                "workload.kv_replay: {msg}"
+            )))
+        };
+        match kv.store_queue {
+            Some(_) if kv.store_connections == 0 => {
+                return bad("store_queue needs store_connections".into());
+            }
+            Some(0) => return bad("store_queue must be >= 1 (unset for no limit)".into()),
+            _ => {}
+        }
+        if kv.store_connections == 0 {
+            return Ok(());
+        }
+        let total = self.connection.total_connections();
+        if kv.store_connections >= total {
+            return bad(format!(
+                "store_connections ({}) must be fewer than connection.connections ({total})",
+                kv.store_connections
+            ));
+        }
+        // Each worker queues its own requests' stores for its own store
+        // connections, so a worker with connections needs both kinds.
+        let threads = self.general.threads.max(1);
+        for worker in 0..threads {
+            let (mine, _) = crate::worker::connection_share(total, threads, worker);
+            let (stores, _) =
+                crate::worker::connection_share(kv.store_connections, threads, worker);
+            if mine > 0 && (stores == 0 || stores == mine) {
+                return bad(format!(
+                    "every worker with connections needs at least one store connection and one \
+                     other; worker {worker} of {threads} would have {mine} connections, {stores} \
+                     of them store connections (store_connections = {}, connections = {total})",
+                    kv.store_connections
+                ));
             }
         }
         Ok(())
@@ -1803,6 +1862,58 @@ mod validation_tests {
         .unwrap();
         assert_eq!(kv.write_rule, KvWriteRule::InsertIfAbsent);
         assert_eq!(kv.key_format, KvKeyFormat::Decimal);
+    }
+
+    #[test]
+    fn kv_replay_store_connections() {
+        let kv = kv_config("kv_bytes_per_token = 4", "")
+            .unwrap()
+            .workload
+            .kv_replay
+            .unwrap();
+        assert_eq!((kv.store_connections, kv.store_queue), (0, None));
+        let kv = kv_config(
+            "kv_bytes_per_token = 4\nstore_connections = 2\nstore_queue = 8",
+            "[general]\nthreads = 2\n[connection]\nconnections = 4",
+        )
+        .unwrap()
+        .workload
+        .kv_replay
+        .unwrap();
+        assert_eq!((kv.store_connections, kv.store_queue), (2, Some(8)));
+
+        for (kv, extra, want) in [
+            // Every connection would store; none would look up.
+            (
+                "store_connections = 4",
+                "[connection]\nconnections = 4",
+                "fewer than connection.connections",
+            ),
+            // Worker 1 would have no store connection: 1 over 2 threads.
+            (
+                "store_connections = 1",
+                "[general]\nthreads = 2\n[connection]\nconnections = 4",
+                "every worker",
+            ),
+            // Worker 1 would have no lookup connection: 3 connections over 2
+            // threads give it 1, and 2 store connections give it 1.
+            (
+                "store_connections = 2",
+                "[general]\nthreads = 2\n[connection]\nconnections = 3",
+                "every worker",
+            ),
+            ("store_queue = 4", "", "store_queue needs store_connections"),
+            (
+                "store_connections = 1\nstore_queue = 0",
+                "[connection]\nconnections = 2",
+                "store_queue must be >= 1",
+            ),
+        ] {
+            let err = kv_config(&format!("kv_bytes_per_token = 4\n{kv}"), extra)
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains(want), "{kv} {extra}: {err}");
+        }
     }
 
     #[test]

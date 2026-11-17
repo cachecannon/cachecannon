@@ -8,6 +8,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `[workload.kv_replay]` gains `store_connections`: that many of the
+  connections send only SETs, and a trace request's store is queued on its
+  worker once its load has finished, so the connection that loaded starts the
+  next request at once. `store_queue` bounds the stores a worker holds
+  queued; a store that finds it full is dropped whole and counted in
+  `kv_stores_dropped`. The result reports `store_queue` (queued to first SET sent), and `store` then
+  runs from the store being queued. The default, 0, keeps each request's
+  lookup, load and store on one connection.
+- KV replay reports `ready` (`kv_ready_time`): from the time the trace
+  scheduled a request (open loop) or its start (closed loop) to the end of
+  its load. In open loop it includes the time the request waited for a
+  connection, which `load` does not. `requests_out` gains the columns
+  `store_queue_ns`, `ready_ns` and `store_dropped`, after `recorded`.
 - Setting `CACHECANNON_NO_OPEN` to any value, including empty, stops
   `cachecannon view` opening a browser.
 - `workload.routing = "routed"` loads several nodes the way a client

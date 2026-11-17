@@ -253,6 +253,7 @@ pub mod kv {
     pub const STORES: usize = 12;
     pub const LOADS_WITH_CACHED: usize = 13;
     pub const TRACE_READ_WAITS: usize = 14;
+    pub const STORES_DROPPED: usize = 15;
 }
 
 #[metric(
@@ -315,6 +316,20 @@ pub static KV_GET_NIL: Counter = Counter::new(&KV, kv::GET_NIL);
                    because the trace reader had not read the next one yet"
 )]
 pub static KV_TRACE_READ_WAITS: Counter = Counter::new(&KV, kv::TRACE_READ_WAITS);
+
+#[metric(
+    name = "kv_stores_dropped",
+    description = "KV replay with store_connections: stores dropped whole because the worker's \
+                   store queue was full (store_queue)"
+)]
+pub static KV_STORES_DROPPED: Counter = Counter::new(&KV, kv::STORES_DROPPED);
+
+#[metric(
+    name = "kv_store_queue_depth",
+    description = "KV replay with store_connections: stores queued and not yet started, over \
+                   all workers"
+)]
+pub static KV_STORE_QUEUE_DEPTH: ShardedGauge = ShardedGauge::new();
 
 // ── Object trace replay metrics ──────────────────────────────────────────
 //
@@ -414,9 +429,25 @@ pub static KV_LOAD_TIME: AtomicCounterHistogram = AtomicCounterHistogram::new(7,
 
 #[metric(
     name = "kv_store_time",
-    description = "KV replay: per request, first SET sent to last SET reply (nanoseconds)"
+    description = "KV replay: per request, first SET sent to last SET reply; with \
+                   store_connections, store queued to last SET reply (nanoseconds)"
 )]
 pub static KV_STORE_TIME: AtomicCounterHistogram = AtomicCounterHistogram::new(7, 64);
+
+#[metric(
+    name = "kv_store_queue_time",
+    description = "KV replay with store_connections: per request with SETs, store queued to \
+                   its first SET sent (nanoseconds)"
+)]
+pub static KV_STORE_QUEUE_TIME: AtomicCounterHistogram = AtomicCounterHistogram::new(7, 64);
+
+#[metric(
+    name = "kv_ready_time",
+    description = "KV replay: per request, the time the trace scheduled it (open loop) or its \
+                   start (closed loop) to its last GET reply, or to its last EXISTS reply when it \
+                   loads nothing (nanoseconds)"
+)]
+pub static KV_READY_TIME: AtomicCounterHistogram = AtomicCounterHistogram::new(7, 64);
 
 #[metric(
     name = "kv_load_time_per_1k_tokens",

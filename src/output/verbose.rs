@@ -228,7 +228,16 @@ impl OutputFormatter for VerboseFormatter {
                 ("load", &kv.load_time),
                 ("load_per_1k_cached_tokens", &kv.load_time_per_1k_tokens),
                 ("store", &kv.store_time),
+                ("ready", &kv.ready_time),
             ];
+            if kv.store_connections > 0 {
+                rows.push(("store_queue", &kv.store_queue_time));
+                tracing::info!(
+                    "kv_replay stores: connections={} dropped={}",
+                    kv.store_connections,
+                    kv.stores_dropped
+                );
+            }
             if !kv.closed_loop {
                 rows.push(("schedule_lag", &kv.schedule_lag));
             }

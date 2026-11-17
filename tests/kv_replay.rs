@@ -220,6 +220,8 @@ fn kv_replay_rejects_a_hybrid_model() {
             key_prefix: "kv:".into(),
             key_format: Default::default(),
             requests_out: None,
+            store_connections: 0,
+            store_queue: None,
         };
         cachecannon::kvreplay::geometry(&cfg).unwrap();
         std::fs::remove_file(&dense).unwrap();
@@ -750,6 +752,200 @@ fn kv_replay_trace_finished_during_warmup_fails_the_run() {
             let err = result.unwrap_err();
             assert!(err.contains("finished before recording started"), "{err}");
             assert_eq!(rows.len(), 2, "{rows:?}");
+        },
+    );
+}
+
+/// Where the server read `cmd` for `chunk`'s rank-0 object first.
+fn first_at(server: &Server, cmd: &str, chunk: u64) -> std::time::Instant {
+    server
+        .log()
+        .into_iter()
+        .find(|o| o.cmd == cmd && o.key == key(chunk, 0))
+        .unwrap_or_else(|| panic!("no {cmd} of chunk {chunk}"))
+        .at
+}
+
+/// KV replay with `store_connections`: a request's SETs go to a store
+/// connection, so the next request's lookup does not wait for them, and a
+/// store queued behind a slow one records the wait as queue time.
+#[test]
+fn kv_replay_store_connections_take_stores_off_the_lookup_path() {
+    common::kv::isolated(
+        "kv_replay_store_connections_take_stores_off_the_lookup_path",
+        || {
+            let ct = CHUNK_TOKENS;
+            let hold = Duration::from_millis(500);
+            let server = Server::with_hooks(Hooks {
+                delay_set: Some((key(1, 0), hold)),
+                ..Default::default()
+            });
+            let rows = replay_on(
+                &server,
+                &[request(1, 0, &[1], ct), request(2, 0, &[2], ct)],
+                "store_connections = 1",
+                2,
+            );
+            assert_eq!(rows.len(), 2, "{rows:?}");
+            // The run ends only once every queued store has finished.
+            assert_eq!(server.sets(), vec![key(1, 0), key(2, 0)]);
+
+            // Request 2's lookup reached the server while request 1's SET was
+            // held.
+            let gap = first_at(&server, "EXISTS", 2).duration_since(first_at(&server, "SET", 1));
+            assert!(gap < hold / 2, "lookup 2 came {gap:?} after SET 1");
+
+            let row = |id: u64| rows.iter().find(|r| r.req_id == id).unwrap();
+            let (r1, r2) = (row(1), row(2));
+            assert_eq!((r1.sets, r2.sets), (1, 1));
+            assert!(!r1.store_dropped && !r2.store_dropped);
+            // Store time runs from queued to the last SET reply, so request
+            // 1's includes the hold, and request 2's includes waiting for
+            // the writer behind it.
+            assert!(r1.store_ns >= hold.as_nanos() as u64, "{r1:?}");
+            let q2 = r2
+                .store_queue_ns
+                .expect("queue time with store_connections");
+            assert!(q2 >= (hold / 2).as_nanos() as u64, "{r2:?}");
+            assert!(r2.store_ns >= q2, "{r2:?}");
+            // Ready is the end of the load, before any store.
+            for r in [r1, r2] {
+                assert!(r.ready_ns >= r.lookup_ns + r.load_ns, "{r:?}");
+                assert!(r.ready_ns < (hold / 2).as_nanos() as u64, "{r:?}");
+            }
+            assert_eq!(metrics::KV_REQUESTS.value(), 2);
+            assert_eq!(metrics::KV_STORES.value(), 2);
+        },
+    );
+}
+
+/// The control for `kv_replay_store_connections_take_stores_off_the_lookup_path`:
+/// on one connection without `store_connections`, the next request's lookup
+/// waits for the held SET's reply, and no queue time is recorded.
+#[test]
+fn kv_replay_without_store_connections_a_lookup_waits_for_the_store() {
+    common::kv::isolated(
+        "kv_replay_without_store_connections_a_lookup_waits_for_the_store",
+        || {
+            let ct = CHUNK_TOKENS;
+            let hold = Duration::from_millis(500);
+            let server = Server::with_hooks(Hooks {
+                delay_set: Some((key(1, 0), hold)),
+                ..Default::default()
+            });
+            let rows = replay(
+                &server,
+                &[request(1, 0, &[1], ct), request(2, 0, &[2], ct)],
+                "",
+            );
+            assert_eq!(rows.len(), 2, "{rows:?}");
+            let gap = first_at(&server, "EXISTS", 2).duration_since(first_at(&server, "SET", 1));
+            assert!(gap >= hold, "lookup 2 came {gap:?} after SET 1");
+            for r in &rows {
+                assert_eq!(r.store_queue_ns, None, "{r:?}");
+                assert!(!r.store_dropped, "{r:?}");
+                assert!(r.ready_ns >= r.lookup_ns + r.load_ns, "{r:?}");
+            }
+        },
+    );
+}
+
+/// KV replay with `store_queue`: a store that finds the worker's queue full
+/// is dropped whole, its request still completes, and nothing of it is sent.
+#[test]
+fn kv_replay_a_full_store_queue_drops_the_whole_store() {
+    common::kv::isolated("kv_replay_a_full_store_queue_drops_the_whole_store", || {
+        let ct = CHUNK_TOKENS;
+        let server = Server::with_hooks(Hooks {
+            delay_set: Some((key(1, 0), Duration::from_millis(600))),
+            ..Default::default()
+        });
+        // Due at 0, 100 and 200 ms. Request 1's store holds the writer;
+        // request 2's waits in the queue, which then is full for request 3's.
+        let rows = replay_on(
+            &server,
+            &[
+                request(1, 0, &[1], ct),
+                request(2, 100, &[2], ct),
+                request(3, 200, &[3, 4], 2 * ct),
+            ],
+            "speedup = 1\nstore_connections = 1\nstore_queue = 1",
+            2,
+        );
+        assert_eq!(rows.len(), 3, "{rows:?}");
+        let row = |id: u64| rows.iter().find(|r| r.req_id == id).unwrap();
+        assert!(!row(1).store_dropped && !row(2).store_dropped, "{rows:?}");
+        let r3 = row(3);
+        assert!(r3.store_dropped, "{r3:?}");
+        assert_eq!((r3.sets, r3.store_ns, r3.store_queue_ns), (0, 0, None));
+        assert_eq!(server.sets(), vec![key(1, 0), key(2, 0)]);
+        assert_eq!(metrics::KV_STORES_DROPPED.value(), 1);
+        assert_eq!(metrics::KV_REQUESTS.value(), 3);
+        assert_eq!(metrics::KV_STORES.value(), 2);
+    });
+}
+
+/// KV replay with `store_connections` when the server closes the idle store
+/// connection: the next store reaches it closed with nothing sent, goes back
+/// on the queue, and runs once the store connection has reconnected.
+#[test]
+fn kv_replay_store_on_a_closed_store_connection_runs_after_it_reconnects() {
+    common::kv::isolated(
+        "kv_replay_store_on_a_closed_store_connection_runs_after_it_reconnects",
+        || {
+            let ct = CHUNK_TOKENS;
+            let server = Server::with_hooks(Hooks {
+                close_after_sets: Some((1, Duration::from_millis(50))),
+                ..Default::default()
+            });
+            let rows = replay_on(
+                &server,
+                &[request(1, 0, &[1], ct), request(2, 300, &[2], ct)],
+                "speedup = 1\nstore_connections = 1",
+                2,
+            );
+            let mut ids: Vec<u64> = rows.iter().map(|r| r.req_id).collect();
+            ids.sort();
+            assert_eq!(ids, [1, 2], "{rows:?}");
+            assert_eq!(server.sets(), vec![key(1, 0), key(2, 0)]);
+            assert_eq!(metrics::KV_REQUESTS_FAILED.value(), 0);
+        },
+    );
+}
+
+/// KV replay with `store_connections` when the store connection closes and
+/// cannot reconnect while the lookup connection stays open: the queued store
+/// is failed once a reconnect has failed, and the run ends instead of waiting
+/// for `duration`.
+#[test]
+fn kv_replay_store_fails_when_no_store_connection_reconnects() {
+    common::kv::isolated(
+        "kv_replay_store_fails_when_no_store_connection_reconnects",
+        || {
+            let ct = CHUNK_TOKENS;
+            let server = Server::with_hooks(Hooks {
+                close_after_sets: Some((1, Duration::from_millis(50))),
+                refuse_after_close: true,
+                ..Default::default()
+            });
+            let started = std::time::Instant::now();
+            let rows = replay_on(
+                &server,
+                &[request(1, 0, &[1], ct), request(2, 300, &[2], ct)],
+                "speedup = 1\nstore_connections = 1",
+                2,
+            );
+            let took = started.elapsed();
+            assert_eq!(
+                rows.iter().map(|r| r.req_id).collect::<Vec<_>>(),
+                [1],
+                "{rows:?}"
+            );
+            // Request 2's lookup ran on the connection that stayed open.
+            assert!(server.ops("EXISTS").contains(&key(2, 0)));
+            assert_eq!(server.sets(), vec![key(1, 0)]);
+            assert_eq!(metrics::KV_REQUESTS_FAILED.value(), 1);
+            assert!(took < RUN_BOUND, "the run took {took:?}");
         },
     );
 }

@@ -408,6 +408,21 @@ The lookup, load and store times here are those of one pipelined connection
 per trace request; for `resp://` and `valkey://` they would be spread over
 several connections or threads.
 
+With `store_connections` the replay models an engine whose saves run apart
+from its loads, such as vLLM's file-system offloading tier
+(`DualQueueThreadPool`, `vllm/v1/kv_offload/tiering/fs/thread_pool.py`). That
+pool's load threads take stores and its store threads take loads when their
+own queue is empty; a store connection here sends only stores, and the other
+connections never store. Each worker queues a request's SETs once its load has
+finished, and its store connections send them in queue order, so a slow store
+does not hold the connection the next request needs. The engine's
+scheduling is not modelled: a store is queued as soon as the load finishes,
+not when the engine would have computed the KV it stores. vLLM's
+backpressure policies (vLLM main as of 2026-11,
+`vllm/v1/kv_offload/tiering/backpressure.py`) drop some or all
+stores when a tier's store latency is high; `store_queue` drops a store when
+the worker's queue is full.
+
 ### What is not modelled
 
 - LMCache's local CPU tier. `local_cpu` defaults to true with
@@ -437,6 +452,15 @@ several connections or threads.
   Without that it could keep the run going until `duration`.
 - Multiple endpoints and cluster mode: every key of a request must be on the
   server its connection reaches.
+- With `store_connections`, a store whose connection fails after sending any
+  SET fails its request, which is not retried. One that reaches a store
+  connection already closed, with nothing sent, runs on the next store
+  connection, at most once per store connection on the worker. A queued
+  store is counted as failed when none of its worker's store connections is
+  in the store loop and a connect attempt has failed since it was queued, so
+  a store connection that cannot reconnect does not keep the run going until
+  `duration`. Stores still queued when the run reaches `duration` are not
+  sent.
 
 ## Prefill
 

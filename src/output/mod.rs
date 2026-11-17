@@ -305,6 +305,18 @@ pub struct KvReplayResults {
     pub load_time_per_1k_tokens: LatencyStats,
     /// Open loop: request start minus the time the trace scheduled it.
     pub schedule_lag: LatencyStats,
+    /// `store_connections`: 0 when each request stores on the connection
+    /// that loaded.
+    pub store_connections: usize,
+    /// Stores dropped whole at a full store queue.
+    pub stores_dropped: u64,
+    /// With store connections: store queued to its first SET sent; `stores`
+    /// samples.
+    pub store_queue_time: LatencyStats,
+    /// The time the trace scheduled a request (open loop) or its start
+    /// (closed loop) to the end of its load, or of its lookup when it loads
+    /// nothing; `lookups` samples.
+    pub ready_time: LatencyStats,
 }
 
 impl KvReplayResults {

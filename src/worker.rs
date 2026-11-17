@@ -1124,11 +1124,20 @@ impl AsyncEventHandler for BenchHandler {
             // Likewise the KV replay dispatcher, which hands trace requests to
             // the connection tasks spawned next.
             if let Some(kv) = worker_state.task_state.kv_replay.clone() {
+                // This worker's share of the store connections, split the
+                // way the connections are; config validation guarantees at
+                // least one of each kind on every worker with connections.
+                let (my_stores, _) = connection_share(
+                    kv.store_connections(),
+                    worker_state.task_state.config.general.threads,
+                    worker_id,
+                );
                 crate::kvreplay::start_dispatcher(
                     kv,
                     Arc::clone(&worker_state.task_state.shared),
                     worker_id,
                     my_connections,
+                    my_stores,
                 );
             }
             match protocol {
