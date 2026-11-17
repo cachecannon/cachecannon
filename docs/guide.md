@@ -418,7 +418,8 @@ finished, and its store connections send them in queue order, so a slow store
 does not hold the connection the next request needs. The engine's
 scheduling is not modelled: a store is queued as soon as the load finishes,
 not when the engine would have computed the KV it stores. vLLM's
-backpressure policies (on its main branch, not yet released) drop some or all
+backpressure policies (vLLM main as of 2026-11,
+`vllm/v1/kv_offload/tiering/backpressure.py`) drop some or all
 stores when a tier's store latency is high; `store_queue` drops a store when
 the worker's queue is full.
 

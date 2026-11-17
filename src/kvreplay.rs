@@ -730,9 +730,9 @@ impl KvDispatcher {
 
     /// Put back a store that reached a closed store connection with nothing
     /// sent, to run next. It goes in even when the queue holds `store_queue`
-    /// stores already: it was accepted once. Returns false, and keeps nothing, once it has
-    /// reached as many closed connections as the worker has store
-    /// connections: the caller counts its request as failed.
+    /// stores already. Returns false, and keeps nothing, once it has reached
+    /// as many closed connections as the worker has store connections: the
+    /// caller counts its request as failed.
     fn requeue_store(&self, job: StoreJob) -> bool {
         if job.dead_handovers as usize >= self.store_target.get().max(1) {
             return false;
