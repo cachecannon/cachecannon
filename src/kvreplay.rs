@@ -24,6 +24,18 @@
 //!    `lmcache/integration/vllm/vllm_v1_adapter.py:193,247`) and skips that
 //!    many leading tokens when it stores (`:326`).
 //!
+//! With `store_connections` set, step 3 leaves the connection: the request's
+//! SETs are queued on its worker once the load has finished and are sent, in
+//! queue order, by one of the worker's store connections, which send nothing
+//! else. The connection that looked up and loaded takes the next request at
+//! once, as an engine whose loads and saves run on separate threads does. A
+//! request is finished, and its samples and `requests_out` row recorded, when
+//! its store has finished, or at once when it has nothing to store or its
+//! store was dropped at a full queue (`store_queue`). A store queued after its
+//! load can reach the server after a later request's lookup of the same
+//! objects, which then misses them; an engine saving asynchronously has the
+//! same race.
+//!
 //! Token accounting is in [`cached_tokens`].
 //!
 //! Timing: the trace's timestamps divided by `speedup` (open loop), or as
@@ -61,7 +73,7 @@ use std::time::{Duration, Instant};
 /// completed; see `docs/reference.md` "KV-cache replay" for the columns.
 pub const REQUESTS_OUT_HEADER: &str = "req_id,timestamp_ns,lag_ns,input_tokens,chunks,\
 lookup_hit_chunks,hit_chunks,cached_tokens,new_tokens,gets,get_nil,sets,lookup_ns,load_ns,\
-store_ns,recorded";
+store_ns,recorded,store_queue_ns,ready_ns,store_dropped";
 
 /// Trace requests the reader thread may hold ready ahead of the replay.
 /// The replay holds at most this many requests in the channel, plus one in
@@ -90,6 +102,10 @@ pub struct KvReplay {
     write_rule: KvWriteRule,
     /// 0 for closed loop.
     speedup: f64,
+    /// `store_connections`: 0 stores on the connection that loaded.
+    store_connections: usize,
+    /// `store_queue`: stores each worker may hold queued; `None` is no limit.
+    store_queue: Option<usize>,
     /// Objects of the request with the most, for sizing the send pool.
     max_objects: usize,
     /// When trace time 0 is, set by the runner as warmup starts.
@@ -172,6 +188,8 @@ impl KvReplay {
             key_format: cfg.key_format,
             write_rule: cfg.write_rule,
             speedup: cfg.speedup,
+            store_connections: cfg.store_connections,
+            store_queue: cfg.store_queue,
             max_objects,
             start: OnceLock::new(),
             finished: AtomicUsize::new(0),
@@ -209,6 +227,12 @@ impl KvReplay {
 
     pub fn closed_loop(&self) -> bool {
         self.speedup == 0.0
+    }
+
+    /// Connections, over all workers, that only send stores; 0 when each
+    /// request stores on the connection that loaded.
+    pub fn store_connections(&self) -> usize {
+        self.store_connections
     }
 
     /// The largest object, in bytes: the SET value length the send pool is
@@ -290,10 +314,11 @@ impl KvReplay {
             return;
         };
         let lag = lag_ns.map_or(String::new(), |l| l.to_string());
+        let queue = o.store_queue_ns.map_or(String::new(), |q| q.to_string());
         let mut w = log.lock().unwrap();
         if let Err(e) = writeln!(
             w,
-            "{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
+            "{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
             req.req_id,
             req.timestamp,
             lag,
@@ -310,6 +335,9 @@ impl KvReplay {
             o.load_ns,
             o.store_ns,
             u8::from(recorded),
+            queue,
+            o.ready_ns,
+            u8::from(o.store_dropped),
         ) {
             tracing::error!("kv_replay requests_out: {e}");
         }
@@ -472,7 +500,17 @@ struct Outcome {
     sets: usize,
     lookup_ns: u64,
     load_ns: u64,
+    /// First SET sent to last SET reply; with store connections, queued to
+    /// last SET reply.
     store_ns: u64,
+    /// With store connections: queued to first SET sent.
+    store_queue_ns: Option<u64>,
+    /// The time the trace scheduled the request (open loop) or its start
+    /// (closed loop) to the end of its load, or of its lookup when it loads
+    /// nothing.
+    ready_ns: u64,
+    /// The store was dropped at a full store queue; nothing of it was sent.
+    store_dropped: bool,
 }
 
 /// Why a trace request did not complete.
@@ -525,16 +563,41 @@ enum HandBack {
     LookupSent,
 }
 
-/// One idle connection waiting for a trace request.
-struct KvSlot {
-    job: Cell<Option<KvJob>>,
+/// A request's store, queued for this worker's store connections.
+#[derive(Debug)]
+struct StoreJob {
+    req: Request,
+    lag_ns: Option<u64>,
+    /// The lookup and load; the store fills in the rest.
+    outcome: Outcome,
+    /// Indices into the request's objects (`ObjectMapper::objects` order) of
+    /// the SETs to send.
+    sets: Vec<usize>,
+    queued_at: Instant,
+    /// Times it reached a store connection already closed, before anything
+    /// was sent. Bounded by the worker's store connection count.
+    dead_handovers: u32,
+}
+
+/// One idle connection waiting for a trace request, or a store connection
+/// waiting for a store.
+struct Slot<T> {
+    job: Cell<Option<T>>,
     /// Set when the dispatcher is done with the slot, with or without a job.
     done: Cell<bool>,
     waker: RefCell<Option<Waker>>,
 }
 
-impl KvSlot {
-    fn complete(&self, job: Option<KvJob>) {
+impl<T> Slot<T> {
+    fn new() -> Rc<Self> {
+        Rc::new(Self {
+            job: Cell::new(None),
+            done: Cell::new(false),
+            waker: RefCell::new(None),
+        })
+    }
+
+    fn complete(&self, job: Option<T>) {
         self.job.set(job);
         self.done.set(true);
         if let Some(w) = self.waker.borrow_mut().take() {
@@ -549,7 +612,7 @@ impl KvSlot {
 /// only timer.
 #[derive(Default)]
 struct KvDispatcher {
-    waiting: RefCell<VecDeque<Rc<KvSlot>>>,
+    waiting: RefCell<VecDeque<Rc<Slot<KvJob>>>>,
     /// Set once the run stopped, or the dispatcher task failed to start.
     /// Sticky, so a connection that asks later does not wait for a dispatcher
     /// that is gone.
@@ -569,6 +632,15 @@ struct KvDispatcher {
     live: Cell<usize>,
     /// Failed connect attempts on this worker so far.
     connect_failures: Cell<u64>,
+    /// Store connections this worker runs; 0 stores on the loading
+    /// connection.
+    store_target: Cell<usize>,
+    /// Connections on this worker in the store loop.
+    storing: Cell<usize>,
+    /// Stores queued and not yet handed to a store connection, oldest first.
+    stores: RefCell<VecDeque<StoreJob>>,
+    /// Store connections waiting for a store.
+    store_waiting: RefCell<VecDeque<Rc<Slot<StoreJob>>>>,
 }
 
 impl KvDispatcher {
@@ -579,11 +651,7 @@ impl KvDispatcher {
         if self.closed.get() {
             return None;
         }
-        let slot = Rc::new(KvSlot {
-            job: Cell::new(None),
-            done: Cell::new(false),
-            waker: RefCell::new(None),
-        });
+        let slot = Slot::new();
         self.waiting.borrow_mut().push_back(Rc::clone(&slot));
         if self.wants_slot.get()
             && let Some(w) = self.idle.borrow_mut().take()
@@ -639,20 +707,81 @@ impl KvDispatcher {
         true
     }
 
-    /// Release every waiting connection without a job, for good.
+    /// Queue a request's store for this worker's store connections: to a
+    /// waiting one at once, otherwise at the back of the queue. When the
+    /// queue already holds `limit` stores the store is dropped, and the job
+    /// is returned.
+    fn queue_store(&self, job: StoreJob, limit: Option<usize>) -> Option<StoreJob> {
+        if let Some(slot) = self.store_waiting.borrow_mut().pop_front() {
+            slot.complete(Some(job));
+            return None;
+        }
+        let mut stores = self.stores.borrow_mut();
+        if limit.is_some_and(|l| stores.len() >= l) {
+            return Some(job);
+        }
+        stores.push_back(job);
+        metrics::KV_STORE_QUEUE_DEPTH.increment();
+        None
+    }
+
+    /// Put back a store that reached a closed store connection with nothing
+    /// sent, to run next. Returns false, and keeps nothing, once it has
+    /// reached as many closed connections as the worker has store
+    /// connections: the caller counts its request as failed.
+    fn requeue_store(&self, job: StoreJob) -> bool {
+        if job.dead_handovers as usize >= self.store_target.get().max(1) {
+            return false;
+        }
+        let job = StoreJob {
+            dead_handovers: job.dead_handovers + 1,
+            ..job
+        };
+        if let Some(slot) = self.store_waiting.borrow_mut().pop_front() {
+            slot.complete(Some(job));
+            return true;
+        }
+        self.stores.borrow_mut().push_front(job);
+        metrics::KV_STORE_QUEUE_DEPTH.increment();
+        true
+    }
+
+    /// Wait for the next queued store. Returns `None` once the run stops.
+    async fn next_store(&self) -> Option<StoreJob> {
+        if self.closed.get() {
+            return None;
+        }
+        if let Some(job) = self.stores.borrow_mut().pop_front() {
+            metrics::KV_STORE_QUEUE_DEPTH.decrement();
+            return Some(job);
+        }
+        let slot = Slot::new();
+        self.store_waiting.borrow_mut().push_back(Rc::clone(&slot));
+        SlotWait {
+            slot: Rc::clone(&slot),
+        }
+        .await;
+        slot.job.take()
+    }
+
+    /// Release every waiting connection without a job, for good. Stores
+    /// still queued are not sent.
     fn close(&self) {
         self.closed.set(true);
         for slot in self.waiting.borrow_mut().drain(..) {
             slot.complete(None);
         }
+        for slot in self.store_waiting.borrow_mut().drain(..) {
+            slot.complete(None);
+        }
     }
 }
 
-struct SlotWait {
-    slot: Rc<KvSlot>,
+struct SlotWait<T> {
+    slot: Rc<Slot<T>>,
 }
 
-impl Future for SlotWait {
+impl<T> Future for SlotWait<T> {
     type Output = ();
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
         if self.slot.done.get() {
@@ -670,14 +799,20 @@ thread_local! {
 
 /// Install this worker's dispatcher and spawn its task. Called from the
 /// worker's `on_start`, before any connection task runs.
+///
+/// `stores` of the worker's `connections` are store connections: the first
+/// connections to enter [`drive`] take that role, and a connection entering
+/// it again after a reconnect takes it while fewer than `stores` hold it.
 pub(crate) fn start_dispatcher(
     kv: Arc<KvReplay>,
     shared: Arc<SharedState>,
     worker_id: usize,
     connections: usize,
+    stores: usize,
 ) {
     let dispatch = Rc::new(KvDispatcher::default());
-    dispatch.connections.set(connections);
+    dispatch.connections.set(connections - stores);
+    dispatch.store_target.set(stores);
     DISPATCHER.with(|d| *d.borrow_mut() = Some(Rc::clone(&dispatch)));
     if let Err(e) = ringline::spawn(run_dispatcher(dispatch, kv, shared)) {
         // Without it no connection on this worker gets a trace request, and
@@ -731,6 +866,22 @@ impl Live {
 impl Drop for Live {
     fn drop(&mut self) {
         self.0.live.set(self.0.live.get() - 1);
+    }
+}
+
+/// Marks a connection as a store connection for as long as it lives.
+struct Storing(Rc<KvDispatcher>);
+
+impl Storing {
+    fn new(d: &Rc<KvDispatcher>) -> Self {
+        d.storing.set(d.storing.get() + 1);
+        Self(Rc::clone(d))
+    }
+}
+
+impl Drop for Storing {
+    fn drop(&mut self) {
+        self.0.storing.set(self.0.storing.get() - 1);
     }
 }
 
@@ -863,6 +1014,7 @@ async fn run_dispatcher(dispatch: Rc<KvDispatcher>, kv: Arc<KvReplay>, shared: A
 // ── Connection side ──────────────────────────────────────────────────────
 
 /// Per-connection buffers reused across trace requests.
+#[derive(Default)]
 struct Scratch {
     objects: Vec<KvObject>,
     /// Every object's key, back to back; `key_ends[i]` is where key `i` ends.
@@ -877,6 +1029,24 @@ impl Scratch {
     fn key(&self, i: usize) -> &[u8] {
         let start = if i == 0 { 0 } else { self.key_ends[i - 1] };
         &self.keys[start..self.key_ends[i]]
+    }
+
+    /// Fill `objects` and the keys with `req`'s objects.
+    fn fill(&mut self, kv: &KvReplay, req: &Request) {
+        // RequestReader rejects chunk ids that do not fit an object id (2^48
+        // or more) as it reads each row.
+        self.objects.clear();
+        self.objects.extend(
+            kv.mapper
+                .objects(&req.chunks)
+                .expect("RequestReader rejects chunk ids >= 2^48"),
+        );
+        self.keys.clear();
+        self.key_ends.clear();
+        for obj in &self.objects {
+            kv.push_key(&mut self.keys, obj.obj_id);
+            self.key_ends.push(self.keys.len());
+        }
     }
 }
 
@@ -901,15 +1071,14 @@ pub(crate) async fn drive(
         // `on_start` installs it before spawning connections.
         unreachable!("kv replay connection without a dispatcher");
     };
+    if dispatch.storing.get() < dispatch.store_target.get() {
+        let _storing = Storing::new(&dispatch);
+        return drive_stores(client, conn, ctx, rng, &dispatch).await;
+    }
     let _live = Live::new(&dispatch);
+    let store_inline = dispatch.store_target.get() == 0;
     let mut inflight = InFlight::new(ctx.request_timeout, ctx.pipeline_depth);
-    let mut scratch = Scratch {
-        objects: Vec::new(),
-        keys: Vec::new(),
-        key_ends: Vec::new(),
-        exists: Vec::new(),
-        sets: Vec::new(),
-    };
+    let mut scratch = Scratch::default();
     let mut ran_any = false;
     loop {
         if ctx.shared.phase().should_stop() {
@@ -957,6 +1126,8 @@ pub(crate) async fn drive(
             &mut inflight,
             &mut scratch,
             &job.req,
+            job.scheduled.unwrap_or(started),
+            store_inline,
         )
         .await;
         if let Err(Failure::Closed) = result {
@@ -968,23 +1139,102 @@ pub(crate) async fn drive(
             }
             return Err(DisconnectReason::Eof);
         }
-        ctx.kv.mark_finished();
-        let req = &job.req;
         match result {
-            Ok(outcome) => {
-                // Recorded with the rest of the request's samples, when it
-                // finishes, so all of them fall in the same phase.
-                if let Some(lag) = lag_ns {
-                    let _ = metrics::KV_SCHEDULE_LAG.increment(lag);
+            Ok(outcome) if !store_inline && !scratch.sets.is_empty() => {
+                let store = StoreJob {
+                    req: job.req,
+                    lag_ns,
+                    outcome,
+                    sets: std::mem::take(&mut scratch.sets),
+                    queued_at: Instant::now(),
+                    dead_handovers: 0,
+                };
+                // A queued store is finished by the store connection that
+                // sends it.
+                if let Some(dropped) = dispatch.queue_store(store, ctx.kv.store_queue) {
+                    let mut outcome = dropped.outcome;
+                    outcome.store_dropped = true;
+                    finish(ctx, &dropped.req, lag_ns, &outcome);
                 }
-                record_outcome(req, &outcome);
-                let recorded = ctx.shared.phase() == Phase::Running;
-                ctx.kv.write_row(req, lag_ns, &outcome, recorded);
             }
-            Err(Failure::Request) => metrics::KV_REQUESTS_FAILED.increment(),
+            Ok(outcome) => finish(ctx, &job.req, lag_ns, &outcome),
+            Err(Failure::Request) => {
+                ctx.kv.mark_finished();
+                metrics::KV_REQUESTS_FAILED.increment();
+            }
             Err(Failure::Closed) => unreachable!("handled above"),
             Err(Failure::Disconnect(reason)) => {
+                ctx.kv.mark_finished();
                 metrics::KV_REQUESTS_FAILED.increment();
+                return Err(reason);
+            }
+        }
+    }
+}
+
+/// Count a request finished and record it: its samples, all together so they
+/// fall in the same phase, and its `requests_out` row.
+fn finish(ctx: &KvConn<'_>, req: &Request, lag_ns: Option<u64>, o: &Outcome) {
+    ctx.kv.mark_finished();
+    if let Some(lag) = lag_ns {
+        let _ = metrics::KV_SCHEDULE_LAG.increment(lag);
+    }
+    record_outcome(req, o);
+    let recorded = ctx.shared.phase() == Phase::Running;
+    ctx.kv.write_row(req, lag_ns, o, recorded);
+}
+
+/// Send this worker's queued stores on one connected RESP client until the
+/// run stops or the connection fails.
+async fn drive_stores(
+    client: &mut ringline_redis::Client,
+    conn: ConnCtx,
+    ctx: &KvConn<'_>,
+    rng: &mut Xoshiro256PlusPlus,
+    dispatch: &Rc<KvDispatcher>,
+) -> Result<(), DisconnectReason> {
+    let mut inflight = InFlight::new(ctx.request_timeout, ctx.pipeline_depth);
+    let mut scratch = Scratch::default();
+    loop {
+        if ctx.shared.phase().should_stop() {
+            return Ok(());
+        }
+        if !client.is_alive() {
+            return Err(DisconnectReason::Eof);
+        }
+        let Some(mut job) = dispatch.next_store().await else {
+            // `None` only once the run stops.
+            return Ok(());
+        };
+        // Closed while it waited (a server closes idle connections): nothing
+        // was sent, so the store runs on another store connection.
+        if !client.is_alive() {
+            let req_failed = !dispatch.requeue_store(job);
+            if req_failed {
+                ctx.kv.mark_finished();
+                metrics::KV_REQUESTS_FAILED.increment();
+            }
+            return Err(DisconnectReason::Eof);
+        }
+        let started = Instant::now();
+        job.outcome.store_queue_ns =
+            Some(started.saturating_duration_since(job.queued_at).as_nanos() as u64);
+        scratch.fill(ctx.kv, &job.req);
+        match store(client, conn, ctx, rng, &mut inflight, &scratch, &job.sets).await {
+            Ok(()) => {
+                job.outcome.sets = job.sets.len();
+                job.outcome.store_ns = job.queued_at.elapsed().as_nanos() as u64;
+                finish(ctx, &job.req, job.lag_ns, &job.outcome);
+            }
+            Err(failure) => {
+                // Some of its SETs may have reached the server; the request
+                // is failed, not retried.
+                ctx.kv.mark_finished();
+                metrics::KV_REQUESTS_FAILED.increment();
+                let reason = match failure {
+                    Failure::Disconnect(reason) => reason,
+                    Failure::Request | Failure::Closed => DisconnectReason::SendError,
+                };
                 return Err(reason);
             }
         }
@@ -1002,6 +1252,10 @@ fn record_outcome(req: &Request, o: &Outcome) {
     }
     metrics::KV_LOOKUPS.increment();
     let _ = metrics::KV_LOOKUP_TIME.increment(o.lookup_ns);
+    let _ = metrics::KV_READY_TIME.increment(o.ready_ns);
+    if o.store_dropped {
+        metrics::KV_STORES_DROPPED.increment();
+    }
     if o.lookup_hit == 0 {
         metrics::KV_CHUNK0_MISSES.increment();
     }
@@ -1021,10 +1275,17 @@ fn record_outcome(req: &Request, o: &Outcome) {
     if o.sets > 0 {
         metrics::KV_STORES.increment();
         let _ = metrics::KV_STORE_TIME.increment(o.store_ns);
+        if let Some(q) = o.store_queue_ns {
+            let _ = metrics::KV_STORE_QUEUE_TIME.increment(q);
+        }
     }
 }
 
-/// Look up, load and store one trace request.
+/// Look up and load one trace request, and choose its SETs (`s.sets`).
+/// With `store_inline` also send them; otherwise the caller queues them, and
+/// `o.sets` and `o.store_ns` are left 0. `ready_from` is where `ready_ns`
+/// starts.
+#[allow(clippy::too_many_arguments)]
 async fn run_request(
     client: &mut ringline_redis::Client,
     conn: ConnCtx,
@@ -1033,6 +1294,8 @@ async fn run_request(
     inflight: &mut InFlight,
     s: &mut Scratch,
     req: &Request,
+    ready_from: Instant,
+    store_inline: bool,
 ) -> Result<Outcome, Failure> {
     let kv = ctx.kv;
     let input = u64::from(req.input_tokens);
@@ -1040,24 +1303,12 @@ async fn run_request(
         new_tokens: input,
         ..Default::default()
     };
+    s.sets.clear();
     if req.chunks.is_empty() {
         return Ok(o);
     }
 
-    // RequestReader rejects chunk ids that do not fit an object id (2^48 or
-    // more) as it reads each row.
-    s.objects.clear();
-    s.objects.extend(
-        kv.mapper
-            .objects(&req.chunks)
-            .expect("RequestReader rejects chunk ids >= 2^48"),
-    );
-    s.keys.clear();
-    s.key_ends.clear();
-    for obj in &s.objects {
-        kv.push_key(&mut s.keys, obj.obj_id);
-        s.key_ends.push(s.keys.len());
-    }
+    s.fill(kv, req);
     let ranks = kv.mapper.sharding().ranks as usize;
     let n = s.objects.len();
 
@@ -1165,9 +1416,11 @@ async fn run_request(
         o.gets = gets;
         o.load_ns = t0.elapsed().as_nanos() as u64;
     }
+    o.ready_ns = Instant::now()
+        .saturating_duration_since(ready_from)
+        .as_nanos() as u64;
 
     // 3. Store.
-    s.sets.clear();
     match kv.write_rule {
         KvWriteRule::SetFromMiss => s.sets.extend(o.lookup_hit * ranks..n),
         KvWriteRule::InsertIfAbsent => {
@@ -1180,45 +1433,10 @@ async fn run_request(
             );
         }
     }
-    let sets = s.sets.len();
-    if sets > 0 {
-        let pool_len = ctx.value_pool.len();
+    if store_inline && !s.sets.is_empty() {
         let t0 = Instant::now();
-        let mut next = 0;
-        let mut done = 0;
-        while done < sets {
-            let fired_at = Instant::now();
-            let mut fired = 0u64;
-            while next < sets && client.pending_count() < ctx.pipeline_depth {
-                let i = s.sets[next];
-                let len = s.objects[i].size as usize;
-                let before = client.pending_count();
-                let sent = if len >= ZC_VALUE_THRESHOLD {
-                    let guard = make_value_guard(rng, ctx.value_pool, len, pool_len);
-                    client.fire_set_with_guard(s.key(i), guard, i as u64)
-                } else {
-                    let value = value_slice(rng, ctx.value_pool, len, pool_len);
-                    client.fire_set(s.key(i), value, i as u64)
-                };
-                if sent.is_err() {
-                    note_failed_fire(before, client.pending_count(), inflight, true);
-                    metrics::REQUESTS_SENT.add(fired);
-                    return Err(send_failed(conn));
-                }
-                inflight.push(fired_at);
-                next += 1;
-                fired += 1;
-            }
-            flush(client, conn, inflight, fired)?;
-            let meta = recv_with_timeout(client.recv_meta(), inflight, conn)
-                .await
-                .map_err(Failure::Disconnect)?
-                .map_err(recv_failed)?;
-            inflight.pop();
-            done += 1;
-            record_counters(&map_respmeta(meta));
-        }
-        o.sets = sets;
+        store(client, conn, ctx, rng, inflight, s, &s.sets).await?;
+        o.sets = s.sets.len();
         o.store_ns = t0.elapsed().as_nanos() as u64;
     }
 
@@ -1234,6 +1452,56 @@ async fn run_request(
     o.new_tokens = input.saturating_sub(o.cached_tokens);
     o.full_hit = input > 0 && (o.hit as u64).saturating_mul(kv.chunk_tokens) >= input;
     Ok(o)
+}
+
+/// SET the objects `sets` indexes in `s.objects`, at most `pipeline_depth`
+/// in flight.
+async fn store(
+    client: &mut ringline_redis::Client,
+    conn: ConnCtx,
+    ctx: &KvConn<'_>,
+    rng: &mut Xoshiro256PlusPlus,
+    inflight: &mut InFlight,
+    s: &Scratch,
+    sets: &[usize],
+) -> Result<(), Failure> {
+    let n = sets.len();
+    let pool_len = ctx.value_pool.len();
+    let mut next = 0;
+    let mut done = 0;
+    while done < n {
+        let fired_at = Instant::now();
+        let mut fired = 0u64;
+        while next < n && client.pending_count() < ctx.pipeline_depth {
+            let i = sets[next];
+            let len = s.objects[i].size as usize;
+            let before = client.pending_count();
+            let sent = if len >= ZC_VALUE_THRESHOLD {
+                let guard = make_value_guard(rng, ctx.value_pool, len, pool_len);
+                client.fire_set_with_guard(s.key(i), guard, i as u64)
+            } else {
+                let value = value_slice(rng, ctx.value_pool, len, pool_len);
+                client.fire_set(s.key(i), value, i as u64)
+            };
+            if sent.is_err() {
+                note_failed_fire(before, client.pending_count(), inflight, true);
+                metrics::REQUESTS_SENT.add(fired);
+                return Err(send_failed(conn));
+            }
+            inflight.push(fired_at);
+            next += 1;
+            fired += 1;
+        }
+        flush(client, conn, inflight, fired)?;
+        let meta = recv_with_timeout(client.recv_meta(), inflight, conn)
+            .await
+            .map_err(Failure::Disconnect)?
+            .map_err(recv_failed)?;
+        inflight.pop();
+        done += 1;
+        record_counters(&map_respmeta(meta));
+    }
+    Ok(())
 }
 
 /// Count `n` EXISTS sent and answered. The pipeline has no result callback,
@@ -1295,15 +1563,17 @@ fn recv_failed(e: ringline_redis::Error) -> Failure {
 /// subtracted from the final values as the runner does for every other
 /// metric.
 pub struct KvBaseline {
-    counters: [u64; 14],
+    counters: [u64; 15],
     lookup: Option<Histogram>,
     load: Option<Histogram>,
     store: Option<Histogram>,
     load_per_1k: Option<Histogram>,
     lag: Option<Histogram>,
+    store_queue: Option<Histogram>,
+    ready: Option<Histogram>,
 }
 
-fn kv_counters() -> [u64; 14] {
+fn kv_counters() -> [u64; 15] {
     [
         metrics::KV_REQUESTS.value(),
         metrics::KV_REQUESTS_FAILED.value(),
@@ -1319,6 +1589,7 @@ fn kv_counters() -> [u64; 14] {
         metrics::KV_LOADS.value(),
         metrics::KV_STORES.value(),
         metrics::KV_LOADS_WITH_CACHED.value(),
+        metrics::KV_STORES_DROPPED.value(),
     ]
 }
 
@@ -1331,6 +1602,8 @@ impl KvBaseline {
             store: metrics::KV_STORE_TIME.load(),
             load_per_1k: metrics::KV_LOAD_TIME_PER_1K_TOKENS.load(),
             lag: metrics::KV_SCHEDULE_LAG.load(),
+            store_queue: metrics::KV_STORE_QUEUE_TIME.load(),
+            ready: metrics::KV_READY_TIME.load(),
         }
     }
 }
@@ -1362,11 +1635,15 @@ impl KvReplay {
             loads: d(11),
             stores: d(12),
             loads_with_cached_tokens: d(13),
+            store_connections: self.store_connections,
+            stores_dropped: d(14),
             lookup_time: stats(&metrics::KV_LOOKUP_TIME, &base.lookup),
             load_time: stats(&metrics::KV_LOAD_TIME, &base.load),
             store_time: stats(&metrics::KV_STORE_TIME, &base.store),
             load_time_per_1k_tokens: stats(&metrics::KV_LOAD_TIME_PER_1K_TOKENS, &base.load_per_1k),
             schedule_lag: stats(&metrics::KV_SCHEDULE_LAG, &base.lag),
+            store_queue_time: stats(&metrics::KV_STORE_QUEUE_TIME, &base.store_queue),
+            ready_time: stats(&metrics::KV_READY_TIME, &base.ready),
         }
     }
 }
@@ -1423,6 +1700,8 @@ mod tests {
             key_prefix: "kv:".into(),
             key_format: KvKeyFormat::Hex,
             requests_out: None,
+            store_connections: 0,
+            store_queue: None,
         }
     }
 

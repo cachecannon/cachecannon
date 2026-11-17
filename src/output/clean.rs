@@ -552,6 +552,22 @@ impl OutputFormatter for CleanFormatter {
                 "{}",
                 format_latency_row(&self.cyan(&pad_name("store")), &kv.store_time)
             );
+            if kv.store_connections > 0 {
+                println!(
+                    "{}",
+                    format_latency_row(&self.cyan(&pad_name("store q")), &kv.store_queue_time)
+                );
+                println!(
+                    "{}       {} store connections, {} stores dropped at a full queue",
+                    self.cyan("stores"),
+                    format_count(kv.store_connections as u64),
+                    format_count(kv.stores_dropped)
+                );
+            }
+            println!(
+                "{}",
+                format_latency_row(&self.cyan(&pad_name("ready")), &kv.ready_time)
+            );
             if !kv.closed_loop {
                 println!(
                     "{}",

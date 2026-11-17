@@ -207,6 +207,16 @@ struct KvReplayOutput {
     /// Open loop only.
     #[serde(skip_serializing_if = "Option::is_none")]
     schedule_lag: Option<LatencyOutput>,
+    /// Scheduled time (open loop) or start (closed loop) to the end of the
+    /// load.
+    ready: LatencyOutput,
+    store_connections: usize,
+    /// With store connections only.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stores_dropped: Option<u64>,
+    /// With store connections only.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    store_queue: Option<LatencyOutput>,
 }
 
 impl LatencyOutput {
@@ -250,6 +260,11 @@ impl KvReplayOutput {
             ),
             schedule_lag: (!kv.closed_loop)
                 .then(|| LatencyOutput::from_stats(kv.requests, &kv.schedule_lag)),
+            ready: LatencyOutput::from_stats(kv.lookups, &kv.ready_time),
+            store_connections: kv.store_connections,
+            stores_dropped: (kv.store_connections > 0).then_some(kv.stores_dropped),
+            store_queue: (kv.store_connections > 0)
+                .then(|| LatencyOutput::from_stats(kv.stores, &kv.store_queue_time)),
         }
     }
 }
@@ -613,6 +628,10 @@ mod tests {
             store_time: LatencyStats::default(),
             load_time_per_1k_tokens: LatencyStats::default(),
             schedule_lag: LatencyStats::default(),
+            store_connections: 0,
+            stores_dropped: 0,
+            store_queue_time: LatencyStats::default(),
+            ready_time: LatencyStats::default(),
         };
         let out = KvReplayOutput::new(&kv);
         assert_eq!(
@@ -625,5 +644,14 @@ mod tests {
             (3, 2, 1, 1)
         );
         assert!(out.schedule_lag.is_none(), "closed loop has no lag");
+        assert_eq!(out.ready.count, 3);
+        assert!(out.store_queue.is_none() && out.stores_dropped.is_none());
+        let out = KvReplayOutput::new(&KvReplayResults {
+            store_connections: 1,
+            stores_dropped: 2,
+            ..kv
+        });
+        assert_eq!(out.store_queue.map(|q| q.count), Some(1));
+        assert_eq!(out.stores_dropped, Some(2));
     }
 }

@@ -372,6 +372,14 @@ pub struct Row {
     pub gets: u64,
     pub get_nil: u64,
     pub sets: u64,
+    pub lookup_ns: u64,
+    pub load_ns: u64,
+    pub store_ns: u64,
+    /// With `store_connections`: the request's store from queued to its
+    /// first SET sent. Empty otherwise.
+    pub store_queue_ns: Option<u64>,
+    pub ready_ns: u64,
+    pub store_dropped: bool,
 }
 
 fn read_rows(path: &PathBuf) -> Vec<Row> {
@@ -384,7 +392,7 @@ fn read_rows(path: &PathBuf) -> Vec<Row> {
     lines
         .map(|line| {
             let f: Vec<&str> = line.split(',').collect();
-            assert_eq!(f.len(), 16, "{line}");
+            assert_eq!(f.len(), 19, "{line}");
             let n = |i: usize| f[i].parse::<u64>().unwrap();
             Row {
                 req_id: n(0),
@@ -398,6 +406,16 @@ fn read_rows(path: &PathBuf) -> Vec<Row> {
                 gets: n(9),
                 get_nil: n(10),
                 sets: n(11),
+                lookup_ns: n(12),
+                load_ns: n(13),
+                store_ns: n(14),
+                store_queue_ns: (!f[16].is_empty()).then(|| n(16)),
+                ready_ns: n(17),
+                store_dropped: match f[18] {
+                    "0" => false,
+                    "1" => true,
+                    other => panic!("store_dropped {other}: {line}"),
+                },
             }
         })
         .collect()

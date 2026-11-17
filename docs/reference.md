@@ -390,6 +390,18 @@ key_format = "hex"
 
 # One CSV row per completed trace request (optional).
 # requests_out = "kv-requests.csv"
+
+# Connections, out of connection.connections, that only send SETs. 0 (the
+# default) runs each trace request's lookup, load and store in order on one
+# connection. Above 0, a request's SETs are queued on its worker once its load
+# has finished and sent by one of the worker's store connections, so the
+# connection that loaded starts its next request at once. Each worker needs
+# at least one store connection and one other.
+# store_connections = 8
+# With store_connections: stores each worker may hold queued and not yet
+# started. A store that finds the queue full is dropped whole: none of its
+# SETs is sent, and its request completes without them. Unset is no limit.
+# store_queue = 1024
 ```
 
 The object id is kvtrace's `chunk << 16 | slot << 12 | rank`, with slot 0.
@@ -397,14 +409,18 @@ A SET's value is the object's size in bytes, taken from the shared value pool;
 an object larger than the pool (1 GiB) is rejected at startup.
 
 Related settings keep their meaning: `connection.connections` bounds the trace
-requests in flight (one per connection), `connection.pipeline_depth` bounds the
-GETs or SETs one trace request has in flight, and `connection.request_timeout`
+requests in flight (one per connection, less `store_connections`),
+`connection.pipeline_depth` bounds the GETs or SETs one trace request has in
+flight (with `store_connections`, the SETs one store connection has in flight), and `connection.request_timeout`
 applies to every EXISTS, GET and SET. `general.duration` is an upper bound: the
 run ends when every trace request has finished. Trace requests that finish
 during `general.warmup` are not recorded.
 
 Rejected at config load: protocols other than `resp` and `resp3`, more than one
-endpoint, `cluster = true`, `connection.pipeline_depth = 0`, `tp` other than 1, `rate_limit`, `[workload.saturation_search]`,
+endpoint, `cluster = true`, `connection.pipeline_depth = 0`, `tp` other than 1,
+`store_connections` that would leave a worker with connections but no store
+connection or no other connection, `store_queue` without `store_connections`
+or at 0, `rate_limit`, `[workload.saturation_search]`,
 `prefill`, `backfill_on_miss`, `read_values` and `[workload.append]`. Rejected
 when the run starts: an empty trace, a trace file kvtrace cannot open, a
 model with recurrent state (a hybrid linear-attention model), and a trace
@@ -446,13 +462,19 @@ The JSON `result` line gains a `kv_replay` object:
 | `exists` | EXISTS operations |
 | `lookup` | Per request: first EXISTS sent to last EXISTS reply |
 | `load` | Per request with GETs: first GET sent to last GET reply |
-| `store` | Per request with SETs: first SET sent to last SET reply |
+| `store` | Per request with SETs: first SET sent to last SET reply. With `store_connections`, the store queued to its last SET reply |
 | `load_per_1k_cached_tokens` | Per request with GETs and cached tokens: `load × 1000 / cached_tokens`. Its `count` can be below `load`'s: a request whose first GET returned nil has a load time and no cached tokens |
 | `schedule_lag` | Open loop only, per request: start minus the time the trace scheduled it |
+| `ready` | Per request with a lookup: the time the trace scheduled it (open loop) or its start (closed loop) to its last GET reply, or to its last EXISTS reply when it loads nothing. The time until an engine could start computing the uncached tokens, without the engine's own scheduling |
+| `store_connections` | As configured; 0 when each request stores on the connection that loaded |
+| `stores_dropped` | With `store_connections` only: stores dropped whole at a full `store_queue` |
+| `store_queue` | With `store_connections` only, per request with SETs: the store queued to its first SET sent |
 
-The five distributions are objects with `count` (requests sampled) and
+The distributions are objects with `count` (requests sampled) and
 `p50_us` through `max_us`, like `get` and `set`. A request is attributed to the
-phase it finished in.
+phase it finished in. With `store_connections`, a request with SETs finishes
+when its store does, so all its samples, the lookup and load included, are
+recorded then; one whose store was dropped finishes when it was dropped.
 
 The EXISTS, GETs and SETs are also counted in `requests`, `responses`,
 `bytes_tx` and `bytes_rx`, and the GETs and SETs in `get`, `set`, `hits` and
@@ -483,6 +505,9 @@ order:
 | `gets`, `get_nil`, `sets` | Operations the request sent |
 | `lookup_ns`, `load_ns`, `store_ns` | As in the result; 0 when there was no such step |
 | `recorded` | 1 if the request finished during recording, 0 during warmup, read from the phase when it finished. A request finishing at the warmup-to-recording transition can be on either side of the JSON totals |
+| `store_queue_ns` | With `store_connections`: the store queued to its first SET sent. Empty without `store_connections`, and for a request with no SETs or whose store was dropped |
+| `ready_ns` | As `ready` in the result; 0 for a request with no full chunk |
+| `store_dropped` | 1 if the request's store was dropped at a full `store_queue`; its `sets` and `store_ns` are then 0 |
 
 ### Object Trace Replay Settings
 
@@ -961,6 +986,7 @@ Each snapshot contains the full set of metrics. The file uses the metriken expos
 | `kv_exists_count` | KV replay: EXISTS operations |
 | `kv_lookups`, `kv_loads`, `kv_stores` | KV replay: requests with a lookup, GETs, SETs (sample counts of the time histograms) |
 | `kv_loads_with_cached_tokens` | KV replay: requests with GETs that ended with cached tokens (sample count of `kv_load_time_per_1k_tokens`) |
+| `kv_stores_dropped` | KV replay with `store_connections`: stores dropped whole at a full `store_queue` |
 | `kv_trace_read_waits` | KV replay: dispatcher polls (one per worker per millisecond) that found a connection idle and the trace reader behind, over the whole run including warmup. Non-zero means the generator delayed requests; the run logs a warning |
 
 **Gauges** (point-in-time values):
@@ -969,6 +995,7 @@ Each snapshot contains the full set of metrics. The file uses the metriken expos
 |--------|-------------|
 | `connections_active` | Currently active connections |
 | `target_rate` | Current target request rate (saturation search) |
+| `kv_store_queue_depth` | KV replay with `store_connections`: stores queued and not yet started, over all workers |
 
 **Histograms** (latency distributions in nanoseconds):
 
@@ -983,7 +1010,9 @@ Each snapshot contains the full set of metrics. The file uses the metriken expos
 | `schedule_slip` | Queueing the latency clock omits: rate-limiter tokens beyond one claim (one batch), divided by rate, per worker. Not recorded without a rate limiter (neither `workload.rate_limit` nor `[workload.saturation_search]`), so the column is absent. With `workload.routing = "routed"`, recorded once per funded request, including dropped ones, and not for backfill SETs |
 | `perceived_latency` | `response_latency + schedule_slip`. What a client issuing at the target rate experienced |
 | `routed_queue_wait` | With `workload.routing = "routed"`: time from the dispatcher funding a request to a connection sending it, recorded at send (including requests a failed send then discards). Included in `response_latency` and the per-command latencies |
-| `kv_lookup_time`, `kv_load_time`, `kv_store_time` | KV replay, per trace request: first EXISTS, GET or SET sent to the last reply |
+| `kv_lookup_time`, `kv_load_time`, `kv_store_time` | KV replay, per trace request: first EXISTS, GET or SET sent to the last reply. With `store_connections`, `kv_store_time` runs from the store being queued |
+| `kv_store_queue_time` | KV replay with `store_connections`, per trace request with SETs: store queued to its first SET sent |
+| `kv_ready_time` | KV replay, per trace request with a lookup: scheduled time (open loop) or start (closed loop) to the end of the load, or of the lookup when it loads nothing |
 | `kv_load_time_per_1k_tokens` | KV replay, per trace request with cached tokens: load time × 1000 / cached tokens |
 | `kv_schedule_lag` | KV replay, open loop, per trace request: start minus scheduled time |
 
