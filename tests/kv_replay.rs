@@ -220,7 +220,9 @@ fn kv_replay_rejects_a_hybrid_model() {
             key_prefix: "kv:".into(),
             key_format: Default::default(),
             requests_out: None,
+            client: Default::default(),
             store_connections: 0,
+            load_connections: 0,
             store_queue: None,
         };
         cachecannon::kvreplay::geometry(&cfg).unwrap();
@@ -944,6 +946,310 @@ fn kv_replay_store_fails_when_no_store_connection_reconnects() {
             // Request 2's lookup ran on the connection that stayed open.
             assert!(server.ops("EXISTS").contains(&key(2, 0)));
             assert_eq!(server.sets(), vec![key(1, 0)]);
+            assert_eq!(metrics::KV_REQUESTS_FAILED.value(), 1);
+            assert!(took < RUN_BOUND, "the run took {took:?}");
+        },
+    );
+}
+
+/// The first `cmd` of chunk `chunk` (rank 0) the server received.
+fn first_op(server: &Server, cmd: &str, chunk: u64) -> common::kv::Op {
+    server
+        .log()
+        .into_iter()
+        .find(|o| o.cmd == cmd && o.key == key(chunk, 0))
+        .unwrap_or_else(|| panic!("no {cmd} of chunk {chunk}"))
+}
+
+/// Request 1 stores chunks 1 to 4; request 2, 300 ms later, loads them.
+fn store_then_load() -> Vec<kvtrace::Request> {
+    let ct = CHUNK_TOKENS;
+    vec![
+        request(1, 0, &[1, 2, 3, 4], 4 * ct),
+        request(2, 300, &[1, 2, 3, 4], 4 * ct),
+    ]
+}
+
+/// KV replay with `client = "vllm"`: a load's GETs are tasks that any idle
+/// load- or store-priority connection takes, one at a time each. With chunk
+/// 1's GET held on one connection, the store-priority connection, finding no
+/// store queued, sends the other three GETs before the held one is answered.
+#[test]
+fn kv_replay_vllm_client_spreads_a_load_over_the_priority_connections() {
+    common::kv::isolated(
+        "kv_replay_vllm_client_spreads_a_load_over_the_priority_connections",
+        || {
+            let hold = Duration::from_millis(500);
+            let server = Server::with_hooks(Hooks {
+                delay_get: Some((key(1, 0), hold)),
+                ..Default::default()
+            });
+            let rows = replay_on(
+                &server,
+                &store_then_load(),
+                "speedup = 1\nclient = \"vllm\"\nload_connections = 1\nstore_connections = 1",
+                3,
+            );
+            assert_eq!(rows.len(), 2, "{rows:?}");
+            let held = first_op(&server, "GET", 1);
+            for chunk in [2, 3, 4] {
+                let get = first_op(&server, "GET", chunk);
+                assert_ne!(
+                    get.conn, held.conn,
+                    "GET {chunk} queued behind the held GET"
+                );
+                let after = get.at.saturating_duration_since(held.at);
+                assert!(after < hold / 2, "GET {chunk} came {after:?} after GET 1");
+            }
+            assert_eq!(server.ops("GET").len(), 4);
+            let r2 = rows.iter().find(|r| r.req_id == 2).unwrap();
+            assert_eq!((r2.hit_chunks, r2.gets, r2.sets), (4, 4, 0), "{r2:?}");
+            // The load ends with its last GET reply, the held one.
+            assert!(r2.load_ns >= hold.as_nanos() as u64, "{r2:?}");
+            assert!(r2.ready_ns >= r2.lookup_ns + r2.load_ns, "{r2:?}");
+            let r1 = rows.iter().find(|r| r.req_id == 1).unwrap();
+            assert_eq!(r1.sets, 4, "{r1:?}");
+            assert!(r1.store_queue_ns.is_some(), "{r1:?}");
+            assert_eq!(metrics::KV_REQUESTS_FAILED.value(), 0);
+        },
+    );
+}
+
+/// The control for `kv_replay_vllm_client_spreads_a_load_over_the_priority_connections`:
+/// without `client = "vllm"` the load is pipelined on the connection that
+/// looked up, so the GETs after the held one are read only once it is
+/// answered.
+#[test]
+fn kv_replay_lmcache_client_pipelines_a_load_on_one_connection() {
+    common::kv::isolated(
+        "kv_replay_lmcache_client_pipelines_a_load_on_one_connection",
+        || {
+            let hold = Duration::from_millis(500);
+            let server = Server::with_hooks(Hooks {
+                delay_get: Some((key(1, 0), hold)),
+                ..Default::default()
+            });
+            let rows = replay_on(&server, &store_then_load(), "speedup = 1", 3);
+            assert_eq!(rows.len(), 2, "{rows:?}");
+            let held = first_op(&server, "GET", 1);
+            for chunk in [2, 3, 4] {
+                let get = first_op(&server, "GET", chunk);
+                assert_eq!(get.conn, held.conn, "GET {chunk}");
+                let after = get.at.saturating_duration_since(held.at);
+                assert!(after >= hold, "GET {chunk} came {after:?} after GET 1");
+            }
+        },
+    );
+}
+
+/// KV replay with `client = "vllm"`: a lookup connection waits for its
+/// request's load but not for its store, so the next request's lookup
+/// reaches the server while the first request's SET is held, and the store
+/// records its queue time.
+#[test]
+fn kv_replay_vllm_client_lookup_does_not_wait_for_the_store() {
+    common::kv::isolated(
+        "kv_replay_vllm_client_lookup_does_not_wait_for_the_store",
+        || {
+            let ct = CHUNK_TOKENS;
+            let hold = Duration::from_millis(500);
+            let server = Server::with_hooks(Hooks {
+                delay_set: Some((key(1, 0), hold)),
+                ..Default::default()
+            });
+            let rows = replay_on(
+                &server,
+                &[request(1, 0, &[1], ct), request(2, 0, &[2], ct)],
+                "client = \"vllm\"\nload_connections = 1",
+                2,
+            );
+            assert_eq!(rows.len(), 2, "{rows:?}");
+            assert_eq!(server.sets(), vec![key(1, 0), key(2, 0)]);
+            let gap = first_at(&server, "EXISTS", 2).duration_since(first_at(&server, "SET", 1));
+            assert!(gap < hold / 2, "lookup 2 came {gap:?} after SET 1");
+            let row = |id: u64| rows.iter().find(|r| r.req_id == id).unwrap();
+            let (r1, r2) = (row(1), row(2));
+            assert_eq!((r1.sets, r2.sets), (1, 1));
+            assert!(r1.store_ns >= hold.as_nanos() as u64, "{r1:?}");
+            // Request 2's SET waits for the one load-priority connection.
+            let q2 = r2.store_queue_ns.expect("queue time with client = vllm");
+            assert!(q2 >= (hold / 2).as_nanos() as u64, "{r2:?}");
+            assert!(r2.store_ns >= q2, "{r2:?}");
+            assert_eq!(metrics::KV_STORES.value(), 2);
+        },
+    );
+}
+
+/// KV replay with `client = "vllm"` and `store_queue`: a store that finds
+/// the worker's queue full is dropped whole.
+#[test]
+fn kv_replay_vllm_client_full_store_queue_drops_the_whole_store() {
+    common::kv::isolated(
+        "kv_replay_vllm_client_full_store_queue_drops_the_whole_store",
+        || {
+            let ct = CHUNK_TOKENS;
+            let server = Server::with_hooks(Hooks {
+                delay_set: Some((key(1, 0), Duration::from_millis(600))),
+                ..Default::default()
+            });
+            // Request 1's SET holds the one load-priority connection; request 2's store
+            // waits in the queue, which then is full for request 3's.
+            let rows = replay_on(
+                &server,
+                &[
+                    request(1, 0, &[1], ct),
+                    request(2, 100, &[2], ct),
+                    request(3, 200, &[3, 4], 2 * ct),
+                ],
+                "speedup = 1\nclient = \"vllm\"\nload_connections = 1\nstore_queue = 1",
+                2,
+            );
+            assert_eq!(rows.len(), 3, "{rows:?}");
+            let row = |id: u64| rows.iter().find(|r| r.req_id == id).unwrap();
+            assert!(!row(1).store_dropped && !row(2).store_dropped, "{rows:?}");
+            let r3 = row(3);
+            assert!(r3.store_dropped, "{r3:?}");
+            assert_eq!((r3.sets, r3.store_ns, r3.store_queue_ns), (0, 0, None));
+            assert_eq!(server.sets(), vec![key(1, 0), key(2, 0)]);
+            assert_eq!(metrics::KV_STORES_DROPPED.value(), 1);
+        },
+    );
+}
+
+/// KV replay with `client = "vllm"` when the server closes the idle
+/// load-priority connection: the next task reaches it closed with nothing sent, goes back
+/// on its queue, and runs once the connection has reconnected.
+#[test]
+fn kv_replay_vllm_client_task_on_a_closed_connection_runs_after_it_reconnects() {
+    common::kv::isolated(
+        "kv_replay_vllm_client_task_on_a_closed_connection_runs_after_it_reconnects",
+        || {
+            let ct = CHUNK_TOKENS;
+            let server = Server::with_hooks(Hooks {
+                close_after_sets: Some((1, Duration::from_millis(50))),
+                ..Default::default()
+            });
+            let rows = replay_on(
+                &server,
+                &[request(1, 0, &[1], ct), request(2, 300, &[1, 2], 2 * ct)],
+                "speedup = 1\nclient = \"vllm\"\nload_connections = 1",
+                2,
+            );
+            let mut ids: Vec<u64> = rows.iter().map(|r| r.req_id).collect();
+            ids.sort();
+            assert_eq!(ids, [1, 2], "{rows:?}");
+            let r2 = rows.iter().find(|r| r.req_id == 2).unwrap();
+            assert_eq!((r2.hit_chunks, r2.gets, r2.sets), (1, 1, 1), "{r2:?}");
+            assert_eq!(server.sets(), vec![key(1, 0), key(2, 0)]);
+            assert_eq!(metrics::KV_REQUESTS_FAILED.value(), 0);
+        },
+    );
+}
+
+/// KV replay with `client = "vllm"` when the one load-priority connection closes and
+/// cannot reconnect while the lookup connection stays open: a queued load
+/// and a queued store are each failed once a reconnect has failed, and the
+/// run ends instead of waiting for `duration`.
+#[test]
+fn kv_replay_vllm_client_tasks_fail_when_no_priority_connection_reconnects() {
+    common::kv::isolated(
+        "kv_replay_vllm_client_tasks_fail_when_no_priority_connection_reconnects",
+        || {
+            let ct = CHUNK_TOKENS;
+            let server = Server::with_hooks(Hooks {
+                close_after_sets: Some((1, Duration::from_millis(50))),
+                refuse_after_close: true,
+                ..Default::default()
+            });
+            let started = std::time::Instant::now();
+            // Request 2 hits chunk 1 and must load it; request 3 misses and
+            // must store.
+            let rows = replay_on(
+                &server,
+                &[
+                    request(1, 0, &[1], ct),
+                    request(2, 300, &[1], ct),
+                    request(3, 600, &[3], ct),
+                ],
+                "speedup = 1\nclient = \"vllm\"\nload_connections = 1",
+                2,
+            );
+            let took = started.elapsed();
+            assert_eq!(
+                rows.iter().map(|r| r.req_id).collect::<Vec<_>>(),
+                [1],
+                "{rows:?}"
+            );
+            let exists = server.ops("EXISTS");
+            assert!(exists.contains(&key(3, 0)), "{exists:?}");
+            assert!(server.ops("GET").is_empty());
+            assert_eq!(server.sets(), vec![key(1, 0)]);
+            assert_eq!(metrics::KV_REQUESTS_FAILED.value(), 2);
+            assert!(took < RUN_BOUND, "the run took {took:?}");
+        },
+    );
+}
+
+/// KV replay with `client = "vllm"`: a GET that returns nil ends the cached
+/// prefix at its chunk, as with the default client.
+#[test]
+fn kv_replay_vllm_client_get_nil_ends_the_cached_prefix() {
+    common::kv::isolated(
+        "kv_replay_vllm_client_get_nil_ends_the_cached_prefix",
+        || {
+            let ct = CHUNK_TOKENS;
+            let server = Server::with_hooks(Hooks {
+                evict_after_exists: Some(key(2, 0)),
+                ..Default::default()
+            });
+            let rows = replay_on(
+                &server,
+                &[
+                    request(1, 0, &[1, 2, 3], 3 * ct + 3),
+                    request(2, 300, &[1, 2, 3], 3 * ct + 3),
+                ],
+                "speedup = 1\nclient = \"vllm\"\nload_connections = 1\nstore_connections = 1",
+                3,
+            );
+            let r = rows.iter().find(|r| r.req_id == 2).unwrap();
+            assert_eq!((r.lookup_hit_chunks, r.hit_chunks), (3, 1), "{r:?}");
+            assert_eq!((r.gets, r.get_nil, r.sets), (3, 1, 0), "{r:?}");
+            assert_eq!(r.cached_tokens, u64::from(ct), "{r:?}");
+            assert_eq!(metrics::KV_GET_NIL.value(), 1);
+        },
+    );
+}
+
+/// KV replay with `client = "vllm"`: a GET whose connection closes after it
+/// was sent fails its request, the lookup connection waiting for the load
+/// moves on, and a later request runs once the connection has reconnected.
+#[test]
+fn kv_replay_vllm_client_get_on_a_failed_connection_fails_its_request() {
+    common::kv::isolated(
+        "kv_replay_vllm_client_get_on_a_failed_connection_fails_its_request",
+        || {
+            let ct = CHUNK_TOKENS;
+            let server = Server::with_hooks(Hooks {
+                close_on_get: Some(key(1, 0)),
+                ..Default::default()
+            });
+            let started = std::time::Instant::now();
+            let rows = replay_on(
+                &server,
+                &[
+                    request(1, 0, &[1], ct),
+                    request(2, 300, &[1], ct),
+                    request(3, 600, &[3], ct),
+                ],
+                "speedup = 1\nclient = \"vllm\"\nload_connections = 1",
+                2,
+            );
+            let took = started.elapsed();
+            let mut ids: Vec<u64> = rows.iter().map(|r| r.req_id).collect();
+            ids.sort();
+            assert_eq!(ids, [1, 3], "{rows:?}");
+            assert_eq!(server.ops("GET"), vec![key(1, 0)]);
+            assert_eq!(server.sets(), vec![key(1, 0), key(3, 0)]);
             assert_eq!(metrics::KV_REQUESTS_FAILED.value(), 1);
             assert!(took < RUN_BOUND, "the run took {took:?}");
         },

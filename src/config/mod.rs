@@ -452,21 +452,60 @@ pub struct KvReplay {
     /// Write one CSV row per completed trace request to this file.
     #[serde(default)]
     pub requests_out: Option<PathBuf>,
-    /// Connections, out of `connection.connections`, that only send SETs.
-    /// 0 (the default) runs each request's lookup, load and store in order
-    /// on one connection. Above 0, a request's store is queued once its load
-    /// has finished and is sent by one of these connections, so the next
-    /// request can start on the connection that loaded. Each worker needs at
-    /// least one store connection and one other.
+    /// How the replay sends a request's operations. Default `"lmcache"`.
+    #[serde(default)]
+    pub client: KvClient,
+    /// With `client = "lmcache"`: connections, out of
+    /// `connection.connections`, that only send SETs. 0 (the default) runs
+    /// each request's lookup, load and store in order on one connection.
+    /// Above 0, a request's store is queued once its load has finished and is
+    /// sent by one of these connections, so the next request can start on
+    /// the connection that loaded. Each worker needs at least one store
+    /// connection and one other.
+    ///
+    /// With `client = "vllm"`: the store-priority connections, which take
+    /// the oldest queued SET, or the oldest queued GET when no SET is queued.
     #[serde(default)]
     pub store_connections: usize,
-    /// With `store_connections`: stores each worker may hold queued, not yet
-    /// started. A store that finds the queue full is dropped whole and
-    /// counted in `kv_stores_dropped`. A store put back after it reached a
-    /// closed store connection goes in even when the queue is full. Unset
-    /// (the default) is no limit.
+    /// With `client = "vllm"`: the load-priority connections, which take the
+    /// oldest queued GET, or the oldest queued SET when no GET is queued.
+    /// Each worker needs at least one load- or store-priority connection and
+    /// one lookup connection (the rest). Default 0.
+    #[serde(default)]
+    pub load_connections: usize,
+    /// With `store_connections`, or with `client = "vllm"`: stores each
+    /// worker may hold queued with SETs not yet sent. A store that finds the
+    /// queue full is dropped whole and counted in `kv_stores_dropped`. A
+    /// store put back after it reached a closed connection goes in even when
+    /// the queue is full. Unset (the default) is no limit.
     #[serde(default)]
     pub store_queue: Option<usize>,
+}
+
+/// How a KV replay sends a request's lookup, load and store.
+#[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum KvClient {
+    /// LMCache's remote backend: one connection looks up, loads with up to
+    /// `connection.pipeline_depth` GETs in flight, and stores the same way
+    /// (or queues the store for `store_connections`).
+    #[default]
+    Lmcache,
+    /// A network-store tier that runs one task per key on vLLM's
+    /// `DualQueueThreadPool`: a lookup connection sends the request's EXISTS
+    /// and waits for its load, and each GET and SET is a task on the
+    /// worker's load or store queue, sent by a load- or store-priority
+    /// connection one at a time.
+    Vllm,
+}
+
+impl KvClient {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Lmcache => "lmcache",
+            Self::Vllm => "vllm",
+        }
+    }
 }
 
 /// Which objects a KV replay request SETs after its lookup.
@@ -1568,43 +1607,69 @@ impl Config {
         Ok(())
     }
 
-    /// `store_connections` and `store_queue`.
+    /// `client`, `store_connections`, `load_connections` and `store_queue`.
     fn validate_kv_store_connections(&self, kv: &KvReplay) -> Result<(), ConfigError> {
         let bad = |msg: String| {
             Err(ConfigError::Validation(format!(
                 "workload.kv_replay: {msg}"
             )))
         };
+        let vllm = kv.client == KvClient::Vllm;
+        if !vllm && kv.load_connections > 0 {
+            return bad("load_connections needs client = \"vllm\"".into());
+        }
         match kv.store_queue {
-            Some(_) if kv.store_connections == 0 => {
-                return bad("store_queue needs store_connections".into());
+            Some(_) if !vllm && kv.store_connections == 0 => {
+                return bad("store_queue needs store_connections or client = \"vllm\"".into());
             }
             Some(0) => return bad("store_queue must be >= 1 (unset for no limit)".into()),
             _ => {}
         }
-        if kv.store_connections == 0 {
+        let io = kv.store_connections + kv.load_connections;
+        if io == 0 {
+            if vllm {
+                return bad("client = \"vllm\" needs load_connections or store_connections".into());
+            }
             return Ok(());
         }
         let total = self.connection.total_connections();
-        if kv.store_connections >= total {
+        if io >= total && !vllm {
             return bad(format!(
                 "store_connections ({}) must be fewer than connection.connections ({total})",
                 kv.store_connections
             ));
         }
-        // Each worker queues its own requests' stores for its own store
+        if io >= total {
+            return bad(format!(
+                "store_connections ({}) plus load_connections ({}) must be fewer than \
+                 connection.connections ({total})",
+                kv.store_connections, kv.load_connections
+            ));
+        }
+        // Each worker queues its own requests' operations for its own
         // connections, so a worker with connections needs both kinds.
         let threads = self.general.threads.max(1);
         for worker in 0..threads {
             let (mine, _) = crate::worker::connection_share(total, threads, worker);
             let (stores, _) =
                 crate::worker::connection_share(kv.store_connections, threads, worker);
-            if mine > 0 && (stores == 0 || stores == mine) {
+            let (loads, _) = crate::worker::connection_share(kv.load_connections, threads, worker);
+            if mine > 0 && (stores + loads == 0 || stores + loads >= mine) {
+                if !vllm {
+                    return bad(format!(
+                        "every worker with connections needs at least one store connection and \
+                         one other; worker {worker} of {threads} would have {mine} connections, \
+                         {stores} of them store connections (store_connections = {}, \
+                         connections = {total})",
+                        kv.store_connections
+                    ));
+                }
                 return bad(format!(
-                    "every worker with connections needs at least one store connection and one \
-                     other; worker {worker} of {threads} would have {mine} connections, {stores} \
-                     of them store connections (store_connections = {}, connections = {total})",
-                    kv.store_connections
+                    "every worker with connections needs at least one load- or store-priority \
+                     connection and one lookup connection; worker {worker} of {threads} would \
+                     have {mine} connections, {loads} load-priority and {stores} store-priority \
+                     (load_connections = {}, store_connections = {}, connections = {total})",
+                    kv.load_connections, kv.store_connections
                 ));
             }
         }
@@ -1881,6 +1946,18 @@ mod validation_tests {
         .kv_replay
         .unwrap();
         assert_eq!((kv.store_connections, kv.store_queue), (2, Some(8)));
+        assert_eq!((kv.client, kv.load_connections), (KvClient::Lmcache, 0));
+        // client = "vllm" with only load connections, and a store queue
+        // without store connections.
+        let kv = kv_config(
+            "kv_bytes_per_token = 4\nclient = \"vllm\"\nload_connections = 1\nstore_queue = 2",
+            "[general]\nthreads = 1\n[connection]\nconnections = 2",
+        )
+        .unwrap()
+        .workload
+        .kv_replay
+        .unwrap();
+        assert_eq!((kv.client, kv.load_connections), (KvClient::Vllm, 1));
 
         for (kv, extra, want) in [
             // Every connection would store; none would look up.
@@ -1903,6 +1980,29 @@ mod validation_tests {
                 "every worker",
             ),
             ("store_queue = 4", "", "store_queue needs store_connections"),
+            (
+                "load_connections = 1",
+                "[connection]\nconnections = 2",
+                "load_connections needs client",
+            ),
+            (
+                "client = \"vllm\"",
+                "[connection]\nconnections = 2",
+                "needs load_connections or store_connections",
+            ),
+            (
+                "client = \"vllm\"\nload_connections = 1\nstore_connections = 1",
+                "[connection]\nconnections = 2",
+                "must be fewer than",
+            ),
+            // Worker 1 would have no lookup connection: 5 connections over 2
+            // threads give it 2, and it would get 1 load and 1 store
+            // connection.
+            (
+                "client = \"vllm\"\nload_connections = 2\nstore_connections = 2",
+                "[general]\nthreads = 2\n[connection]\nconnections = 5",
+                "every worker",
+            ),
             (
                 "store_connections = 1\nstore_queue = 0",
                 "[connection]\nconnections = 2",

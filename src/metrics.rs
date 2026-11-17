@@ -319,15 +319,15 @@ pub static KV_TRACE_READ_WAITS: Counter = Counter::new(&KV, kv::TRACE_READ_WAITS
 
 #[metric(
     name = "kv_stores_dropped",
-    description = "KV replay with store_connections: stores dropped whole because the worker's \
-                   store queue was full (store_queue)"
+    description = "KV replay with queued stores (store_connections or client vllm): stores \
+                   dropped whole because the worker's store queue was full (store_queue)"
 )]
 pub static KV_STORES_DROPPED: Counter = Counter::new(&KV, kv::STORES_DROPPED);
 
 #[metric(
     name = "kv_store_queue_depth",
-    description = "KV replay with store_connections: stores queued and not yet started, over \
-                   all workers"
+    description = "KV replay with queued stores (store_connections or client vllm): stores \
+                   queued with SETs not yet sent, over all workers"
 )]
 pub static KV_STORE_QUEUE_DEPTH: ShardedGauge = ShardedGauge::new();
 
@@ -423,21 +423,23 @@ pub static KV_LOOKUP_TIME: AtomicCounterHistogram = AtomicCounterHistogram::new(
 
 #[metric(
     name = "kv_load_time",
-    description = "KV replay: per request, first GET sent to last GET reply (nanoseconds)"
+    description = "KV replay: per request, first GET sent to last GET reply; with client vllm, \
+                   GETs queued to last GET reply (nanoseconds)"
 )]
 pub static KV_LOAD_TIME: AtomicCounterHistogram = AtomicCounterHistogram::new(7, 64);
 
 #[metric(
     name = "kv_store_time",
     description = "KV replay: per request, first SET sent to last SET reply; with \
-                   store_connections, store queued to last SET reply (nanoseconds)"
+                   queued stores (store_connections or client vllm), store queued to last SET \
+                   reply (nanoseconds)"
 )]
 pub static KV_STORE_TIME: AtomicCounterHistogram = AtomicCounterHistogram::new(7, 64);
 
 #[metric(
     name = "kv_store_queue_time",
-    description = "KV replay with store_connections: per request with SETs, store queued to \
-                   its first SET sent (nanoseconds)"
+    description = "KV replay with queued stores (store_connections or client vllm): per \
+                   request with SETs, store queued to its first SET sent (nanoseconds)"
 )]
 pub static KV_STORE_QUEUE_TIME: AtomicCounterHistogram = AtomicCounterHistogram::new(7, 64);
 

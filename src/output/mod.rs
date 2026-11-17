@@ -305,12 +305,16 @@ pub struct KvReplayResults {
     pub load_time_per_1k_tokens: LatencyStats,
     /// Open loop: request start minus the time the trace scheduled it.
     pub schedule_lag: LatencyStats,
-    /// `store_connections`: 0 when each request stores on the connection
-    /// that loaded.
+    /// `client`: `"lmcache"` or `"vllm"`.
+    pub client: &'static str,
+    /// `store_connections`: with `client = "lmcache"`, 0 when each request
+    /// stores on the connection that loaded.
     pub store_connections: usize,
+    /// `load_connections`: 0 unless `client = "vllm"`.
+    pub load_connections: usize,
     /// Stores dropped whole at a full store queue.
     pub stores_dropped: u64,
-    /// With store connections: store queued to its first SET sent; `stores`
+    /// With queued stores: store queued to its first SET sent; `stores`
     /// samples.
     pub store_queue_time: LatencyStats,
     /// The time the trace scheduled a request (open loop) or its start
@@ -320,6 +324,12 @@ pub struct KvReplayResults {
 }
 
 impl KvReplayResults {
+    /// Stores are queued, not sent by the connection that loaded:
+    /// `store_connections` or `client = "vllm"`.
+    pub fn stores_queued(&self) -> bool {
+        self.store_connections + self.load_connections > 0
+    }
+
     /// Cached tokens over input tokens (0.0-1.0).
     pub fn cached_fraction(&self) -> f64 {
         if self.input_tokens > 0 {

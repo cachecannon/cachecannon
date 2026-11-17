@@ -210,11 +210,13 @@ struct KvReplayOutput {
     /// Scheduled time (open loop) or start (closed loop) to the end of the
     /// load.
     ready: LatencyOutput,
+    client: &'static str,
     store_connections: usize,
-    /// With store connections only.
+    load_connections: usize,
+    /// With queued stores only (store connections or client vllm).
     #[serde(skip_serializing_if = "Option::is_none")]
     stores_dropped: Option<u64>,
-    /// With store connections only.
+    /// With queued stores only.
     #[serde(skip_serializing_if = "Option::is_none")]
     store_queue: Option<LatencyOutput>,
 }
@@ -261,9 +263,12 @@ impl KvReplayOutput {
             schedule_lag: (!kv.closed_loop)
                 .then(|| LatencyOutput::from_stats(kv.requests, &kv.schedule_lag)),
             ready: LatencyOutput::from_stats(kv.lookups, &kv.ready_time),
+            client: kv.client,
             store_connections: kv.store_connections,
-            stores_dropped: (kv.store_connections > 0).then_some(kv.stores_dropped),
-            store_queue: (kv.store_connections > 0)
+            load_connections: kv.load_connections,
+            stores_dropped: kv.stores_queued().then_some(kv.stores_dropped),
+            store_queue: kv
+                .stores_queued()
                 .then(|| LatencyOutput::from_stats(kv.stores, &kv.store_queue_time)),
         }
     }
@@ -628,7 +633,9 @@ mod tests {
             store_time: LatencyStats::default(),
             load_time_per_1k_tokens: LatencyStats::default(),
             schedule_lag: LatencyStats::default(),
+            client: "lmcache",
             store_connections: 0,
+            load_connections: 0,
             stores_dropped: 0,
             store_queue_time: LatencyStats::default(),
             ready_time: LatencyStats::default(),
@@ -648,6 +655,15 @@ mod tests {
         assert!(out.store_queue.is_none() && out.stores_dropped.is_none());
         let out = KvReplayOutput::new(&KvReplayResults {
             store_connections: 1,
+            stores_dropped: 2,
+            ..kv.clone()
+        });
+        assert_eq!(out.store_queue.map(|q| q.count), Some(1));
+        assert_eq!(out.stores_dropped, Some(2));
+        // client = "vllm" queues stores with load connections alone.
+        let out = KvReplayOutput::new(&KvReplayResults {
+            client: "vllm",
+            load_connections: 1,
             stores_dropped: 2,
             ..kv
         });
