@@ -8,6 +8,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `[workload.kv_replay]` gains `client = "vllm"`, which sends a trace
+  request's operations the way a network-store tier sends them when it runs
+  one task per key on vLLM's `DualQueueThreadPool`. A lookup connection sends
+  the request's EXISTS and queues one GET task per object of the hit prefix.
+  `load_connections` (load-priority) and `store_connections` (store-priority)
+  each send one queued GET or SET at a time, taking from their own queue
+  first and from the other queue when their own is empty. A request's GETs
+  are spread over every idle load- or store-priority connection instead of
+  pipelined on the connection that looked up. The default,
+  `client = "lmcache"`, is unchanged. The result gains `client` and
+  `load_connections`.
 - `[workload.kv_replay]` gains `store_connections`: that many of the
   connections send only SETs, and a trace request's store is queued on its
   worker once its load has finished, so the connection that loaded starts the

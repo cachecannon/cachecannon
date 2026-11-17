@@ -5,8 +5,9 @@
 //! tokens were served from the cache. The request-to-object mapping (object
 //! ids and sizes for a model geometry) is kvtrace's `ObjectMapper`.
 //!
-//! One trace request on one connection, modelling LMCache v0.5.5 (05a013b)
-//! with a Redis-protocol remote backend under vLLM v0.31.0 (db9527a):
+//! With `client = "lmcache"` (the default), one trace request on one
+//! connection, modelling LMCache v0.5.5 (05a013b) with a Redis-protocol
+//! remote backend under vLLM v0.31.0 (db9527a):
 //!
 //! 1. Lookup: one EXISTS per object of every full chunk on every storing
 //!    rank, all sent in one pipeline. The hit prefix is the chunks before the
@@ -37,6 +38,37 @@
 //! whose write is in flight as pending instead of missing; the replay has no
 //! such state.
 //!
+//! With `client = "vllm"`, a request's operations are sent the way a
+//! network-store secondary tier for vLLM sends them when it runs one task per
+//! key on vLLM's `DualQueueThreadPool`
+//! (`vllm/v1/kv_offload/tiering/fs/thread_pool.py`). vLLM's own file-system
+//! tier (`fs/manager.py`) runs one task per transfer job instead, which
+//! reads or writes the job's files in order on one thread; that is not
+//! modelled. Each worker has a load queue and a store queue of single-object
+//! tasks, and three kinds of connection:
+//!
+//! - A lookup connection takes a trace request, sends its EXISTS as step 1
+//!   does, queues one GET task per object of the hit prefix, and waits for
+//!   the last GET's reply. It then queues one SET task per object the write
+//!   rule selects and takes the next request. A request is finished when its
+//!   last SET is answered.
+//! - A load-priority connection (`load_connections`) takes the oldest queued
+//!   GET, or the oldest queued SET when no GET is queued.
+//! - A store-priority connection (`store_connections`) takes the oldest
+//!   queued SET, or the oldest queued GET when no SET is queued.
+//!
+//! A load- or store-priority connection sends one GET or SET and waits for
+//! its reply before taking the next task; `connection.pipeline_depth` does
+//! not apply to it. One request's GETs are therefore sent on as many load- or
+//! store-priority connections as are idle. A GET that returns nil or an
+//! error ends the cached prefix at its chunk, as in step 2. The lookup has
+//! the same race with queued stores as with `store_connections`. vLLM's
+//! `AsyncLookupManager` is not modelled: it sends lookups on one thread, one
+//! request's batch at a time, keeps one result per block for the requests
+//! that asked for it, and sets it to present when a store of the block
+//! finishes. The replay's lookup connections send their EXISTS concurrently,
+//! and every request sends its own.
+//!
 //! Token accounting is in [`cached_tokens`].
 //!
 //! Timing: the trace's timestamps divided by `speedup` (open loop), or as
@@ -46,7 +78,7 @@
 //! per worker rather than one per connection (see `CLAUDE.md`, "Price any
 //! per-request timer").
 
-use crate::config::{KvKeyFormat, KvWriteRule};
+use crate::config::{KvClient, KvKeyFormat, KvWriteRule};
 use crate::metrics;
 use crate::output::{KvReplayResults, LatencyStats};
 use crate::worker::{
@@ -103,8 +135,12 @@ pub struct KvReplay {
     write_rule: KvWriteRule,
     /// 0 for closed loop.
     speedup: f64,
-    /// `store_connections`: 0 stores on the connection that loaded.
+    client: KvClient,
+    /// `store_connections`: with `client = "lmcache"`, 0 stores on the
+    /// connection that loaded.
     store_connections: usize,
+    /// `load_connections`: 0 unless `client = "vllm"`.
+    load_connections: usize,
     /// `store_queue`: stores each worker may hold queued; `None` is no limit.
     store_queue: Option<usize>,
     /// Objects of the request with the most, for sizing the send pool.
@@ -189,7 +225,9 @@ impl KvReplay {
             key_format: cfg.key_format,
             write_rule: cfg.write_rule,
             speedup: cfg.speedup,
+            client: cfg.client,
             store_connections: cfg.store_connections,
+            load_connections: cfg.load_connections,
             store_queue: cfg.store_queue,
             max_objects,
             start: OnceLock::new(),
@@ -230,10 +268,17 @@ impl KvReplay {
         self.speedup == 0.0
     }
 
-    /// Connections, over all workers, that only send stores; 0 when each
-    /// request stores on the connection that loaded.
+    /// `store_connections`, over all workers: connections that only send
+    /// stores (`client = "lmcache"`) or store-priority connections
+    /// (`client = "vllm"`).
     pub fn store_connections(&self) -> usize {
         self.store_connections
+    }
+
+    /// `load_connections`, over all workers: load-priority connections; 0
+    /// unless `client = "vllm"`.
+    pub fn load_connections(&self) -> usize {
+        self.load_connections
     }
 
     /// The largest object, in bytes: the SET value length the send pool is
@@ -525,6 +570,9 @@ enum Failure {
     /// the request, as when the server closes an idle connection. Nothing was
     /// written, so the request can run again on another connection.
     Closed,
+    /// The run stopped while the request waited for its load
+    /// (`client = "vllm"`); it is neither finished nor failed.
+    Stopped,
 }
 
 // ── Dispatcher ─────────────────────────────────────────────────────────────
@@ -580,6 +628,143 @@ struct StoreJob {
     dead_handovers: u32,
     /// The worker's `connect_failures` when it was queued or put back.
     failures_at: u64,
+}
+
+/// With `client = "vllm"`: one GET of a request's load or one SET of its
+/// store, queued for the worker's load- and store-priority connections.
+struct Task {
+    op: TaskOp,
+    /// The worker's `connect_failures` when it was queued or put back.
+    failures_at: u64,
+    /// Times it reached a connection already closed, before anything was
+    /// sent. Bounded by the worker's load- and store-priority connections.
+    dead_handovers: u32,
+}
+
+enum TaskOp {
+    /// GET object `.1` (an index into the request's objects) of the load.
+    Get(Rc<LoadJob>, usize),
+    /// SET object `.1` (an index into the request's objects) of the store.
+    Set(Rc<StoreTasks>, usize),
+}
+
+impl TaskOp {
+    /// The request's load or store has failed, so the task is not sent.
+    fn failed(&self) -> bool {
+        match self {
+            Self::Get(job, _) => job.failed.get(),
+            Self::Set(job, _) => job.failed.get(),
+        }
+    }
+}
+
+/// With `client = "vllm"`: a request's load, queued as one GET task per
+/// object, and what the GETs found.
+struct LoadJob {
+    s: Rc<Scratch>,
+    /// GETs not yet answered.
+    remaining: Cell<usize>,
+    /// The first chunk whose GET returned nil or an error, or the lookup's
+    /// prefix when none did: the loaded prefix ends there.
+    cut: Cell<usize>,
+    get_nil: Cell<usize>,
+    /// A GET could not be sent or answered: the request fails.
+    failed: Cell<bool>,
+    /// The lookup connection waiting for the load.
+    waker: RefCell<Option<Waker>>,
+}
+
+impl LoadJob {
+    fn new(s: Rc<Scratch>, gets: usize, lookup_hit: usize) -> Rc<Self> {
+        Rc::new(Self {
+            s,
+            remaining: Cell::new(gets),
+            cut: Cell::new(lookup_hit),
+            get_nil: Cell::new(0),
+            failed: Cell::new(false),
+            waker: RefCell::new(None),
+        })
+    }
+
+    fn is_done(&self) -> bool {
+        self.remaining.get() == 0 || self.failed.get()
+    }
+
+    fn wake(&self) {
+        if let Some(w) = self.waker.borrow_mut().take() {
+            w.wake();
+        }
+    }
+
+    /// Record one GET's reply.
+    fn answered(&self, found: Loaded) {
+        if let Some(cut) = found.cut {
+            self.cut.set(self.cut.get().min(cut));
+        }
+        self.get_nil.set(self.get_nil.get() + found.nil);
+        self.remaining.set(self.remaining.get() - 1);
+        if self.remaining.get() == 0 {
+            self.wake();
+        }
+    }
+
+    fn fail(&self) {
+        self.failed.set(true);
+        self.wake();
+    }
+}
+
+/// With `client = "vllm"`: a request's store, queued as one SET task per
+/// object the write rule selected (`s.sets`).
+struct StoreTasks {
+    req: Request,
+    lag_ns: Option<u64>,
+    /// The lookup and load; the store fills in the rest.
+    outcome: RefCell<Outcome>,
+    s: Rc<Scratch>,
+    queued_at: Instant,
+    first_sent: Cell<Option<Instant>>,
+    /// SETs still queued, not yet taken by a connection.
+    untaken: Cell<usize>,
+    /// SETs not yet answered.
+    remaining: Cell<usize>,
+    /// Set when a SET failed and the request was counted failed.
+    failed: Cell<bool>,
+}
+
+impl StoreTasks {
+    /// Count the request failed, once.
+    fn fail(&self, kv: &KvReplay) {
+        if !self.failed.replace(true) {
+            kv.mark_finished();
+            metrics::KV_REQUESTS_FAILED.increment();
+        }
+    }
+
+    /// Record one SET's reply, and finish the request at the last.
+    fn answered(&self, kv: &KvReplay, shared: &SharedState) {
+        self.remaining.set(self.remaining.get() - 1);
+        if self.remaining.get() > 0 || self.failed.get() {
+            return;
+        }
+        let mut o = self.outcome.borrow_mut();
+        o.sets = self.s.sets.len();
+        o.store_ns = self.queued_at.elapsed().as_nanos() as u64;
+        o.store_queue_ns = self
+            .first_sent
+            .get()
+            .map(|at| at.saturating_duration_since(self.queued_at).as_nanos() as u64);
+        finish(kv, shared, &self.req, self.lag_ns, &o);
+    }
+}
+
+/// Fail a task that will not be sent, and with it its request.
+fn fail_task(task: Task, kv: &KvReplay) {
+    match task.op {
+        // The lookup connection waiting for the load counts the request.
+        TaskOp::Get(job, _) => job.fail(),
+        TaskOp::Set(job, _) => job.fail(kv),
+    }
 }
 
 /// One idle connection waiting for a trace request, or a store connection
@@ -644,6 +829,21 @@ struct KvDispatcher {
     stores: RefCell<VecDeque<StoreJob>>,
     /// Store connections waiting for a store.
     store_waiting: RefCell<VecDeque<Rc<Slot<StoreJob>>>>,
+    /// `client = "vllm"`.
+    vllm: Cell<bool>,
+    /// With `client = "vllm"`: load-priority connections this worker runs.
+    load_target: Cell<usize>,
+    /// Connections on this worker in the load-priority loop.
+    loading: Cell<usize>,
+    /// With `client = "vllm"`: queued GET tasks, oldest first.
+    gets: RefCell<VecDeque<Task>>,
+    /// With `client = "vllm"`: queued SET tasks, oldest first.
+    sets: RefCell<VecDeque<Task>>,
+    /// Load- and store-priority connections waiting for a task, each with
+    /// whether it is load-priority.
+    task_waiting: RefCell<VecDeque<(Rc<Slot<Task>>, bool)>>,
+    /// With `client = "vllm"`: stores with SETs still queued.
+    stores_queued: Cell<usize>,
 }
 
 impl KvDispatcher {
@@ -789,8 +989,177 @@ impl KvDispatcher {
         slot.job.take()
     }
 
+    /// Take a task for a connection: the oldest of its own queue, or of the
+    /// other queue when its own is empty.
+    fn take_task(&self, load_priority: bool) -> Option<Task> {
+        let (own, other) = if load_priority {
+            (&self.gets, &self.sets)
+        } else {
+            (&self.sets, &self.gets)
+        };
+        let task = own
+            .borrow_mut()
+            .pop_front()
+            .or_else(|| other.borrow_mut().pop_front())?;
+        self.note_taken(&task);
+        Some(task)
+    }
+
+    /// Account for a SET task leaving the queue.
+    fn note_taken(&self, task: &Task) {
+        if let TaskOp::Set(job, _) = &task.op {
+            job.untaken.set(job.untaken.get() - 1);
+            if job.untaken.get() == 0 {
+                self.stores_queued.set(self.stores_queued.get() - 1);
+                metrics::KV_STORE_QUEUE_DEPTH.decrement();
+            }
+        }
+    }
+
+    /// Account for a SET task entering the queue.
+    fn note_queued(&self, op: &TaskOp) {
+        if let TaskOp::Set(job, _) = op {
+            job.untaken.set(job.untaken.get() + 1);
+            if job.untaken.get() == 1 {
+                self.stores_queued.set(self.stores_queued.get() + 1);
+                metrics::KV_STORE_QUEUE_DEPTH.increment();
+            }
+        }
+    }
+
+    /// Hand queued tasks to waiting connections, oldest waiter first.
+    fn serve_tasks(&self) {
+        loop {
+            let Some((slot, load_priority)) = self.task_waiting.borrow_mut().pop_front() else {
+                return;
+            };
+            match self.take_task(load_priority) {
+                Some(task) => slot.complete(Some(task)),
+                None => {
+                    self.task_waiting
+                        .borrow_mut()
+                        .push_front((slot, load_priority));
+                    return;
+                }
+            }
+        }
+    }
+
+    /// Queue one GET task per object of `job`'s first `gets` objects.
+    fn queue_load(&self, job: &Rc<LoadJob>, gets: usize) {
+        let at = self.connect_failures.get();
+        self.gets.borrow_mut().extend((0..gets).map(|i| Task {
+            op: TaskOp::Get(Rc::clone(job), i),
+            failures_at: at,
+            dead_handovers: 0,
+        }));
+        self.serve_tasks();
+    }
+
+    /// Queue one SET task per object in `job.s.sets`. Returns false, and
+    /// queues nothing, when `limit` stores have SETs queued already.
+    fn queue_store_tasks(&self, job: &Rc<StoreTasks>, limit: Option<usize>) -> bool {
+        if limit.is_some_and(|l| self.stores_queued.get() >= l) {
+            return false;
+        }
+        let at = self.connect_failures.get();
+        for &i in &job.s.sets {
+            let op = TaskOp::Set(Rc::clone(job), i);
+            self.note_queued(&op);
+            self.sets.borrow_mut().push_back(Task {
+                op,
+                failures_at: at,
+                dead_handovers: 0,
+            });
+        }
+        self.serve_tasks();
+        true
+    }
+
+    /// Wait for the next task for a load-priority (`load_priority`) or
+    /// store-priority connection. Returns `None` once the run stops, or at
+    /// once when this worker's dispatcher failed to start.
+    async fn next_task(&self, load_priority: bool) -> Option<Task> {
+        if self.closed.get() {
+            return None;
+        }
+        if let Some(task) = self.take_task(load_priority) {
+            return Some(task);
+        }
+        let slot = Slot::new();
+        self.task_waiting
+            .borrow_mut()
+            .push_back((Rc::clone(&slot), load_priority));
+        SlotWait {
+            slot: Rc::clone(&slot),
+        }
+        .await;
+        slot.job.take()
+    }
+
+    /// Put back a task that reached a closed connection with nothing sent,
+    /// at the front of its queue. It goes in even when `store_queue` stores
+    /// are queued already. Returns the task, keeping nothing, once it has
+    /// reached as many closed connections as the worker has load- and
+    /// store-priority connections: the caller fails it. After the run
+    /// stopped it keeps nothing and returns `None`, waking a GET's lookup
+    /// connection to see the dispatcher closed.
+    fn requeue_task(&self, task: Task) -> Option<Task> {
+        // After the run stopped nothing takes it; a lookup connection waiting
+        // for its load sees the dispatcher closed once woken.
+        if self.closed.get() {
+            if let TaskOp::Get(job, _) = &task.op {
+                job.wake();
+            }
+            return None;
+        }
+        if task.dead_handovers as usize >= (self.load_target.get() + self.store_target.get()).max(1)
+        {
+            return Some(task);
+        }
+        let task = Task {
+            dead_handovers: task.dead_handovers + 1,
+            failures_at: self.connect_failures.get(),
+            ..task
+        };
+        self.note_queued(&task.op);
+        match task.op {
+            TaskOp::Get(..) => self.gets.borrow_mut().push_front(task),
+            TaskOp::Set(..) => self.sets.borrow_mut().push_front(task),
+        }
+        self.serve_tasks();
+        None
+    }
+
+    /// Take the queued tasks whose worker has had no load- or store-priority
+    /// connection in its loop since a connect attempt failed after they were
+    /// queued, for the caller to fail rather than wait for a connection that
+    /// may never come.
+    fn take_stranded_tasks(&self) -> Vec<Task> {
+        if self.loading.get() + self.storing.get() > 0 {
+            return Vec::new();
+        }
+        let failures = self.connect_failures.get();
+        let mut stranded = Vec::new();
+        for queue in [&self.gets, &self.sets] {
+            let mut queue = queue.borrow_mut();
+            if queue.iter().all(|t| failures <= t.failures_at) {
+                continue;
+            }
+            let (keep, fail): (Vec<Task>, Vec<Task>) =
+                queue.drain(..).partition(|t| failures <= t.failures_at);
+            *queue = keep.into();
+            stranded.extend(fail);
+        }
+        for task in &stranded {
+            self.note_taken(task);
+        }
+        stranded
+    }
+
     /// Release every waiting connection without a job, for good. Stores
-    /// still queued are not sent.
+    /// still queued are not sent. Lookup connections waiting for a load with
+    /// GETs still queued are woken to see the dispatcher closed.
     fn close(&self) {
         self.closed.set(true);
         for slot in self.waiting.borrow_mut().drain(..) {
@@ -799,6 +1168,31 @@ impl KvDispatcher {
         for slot in self.store_waiting.borrow_mut().drain(..) {
             slot.complete(None);
         }
+        for (slot, _) in self.task_waiting.borrow_mut().drain(..) {
+            slot.complete(None);
+        }
+        for task in self.gets.borrow().iter() {
+            if let TaskOp::Get(job, _) = &task.op {
+                job.wake();
+            }
+        }
+    }
+}
+
+/// Waits until a load has finished or failed, or the dispatcher closed.
+struct LoadWait<'a> {
+    job: &'a LoadJob,
+    dispatch: &'a KvDispatcher,
+}
+
+impl Future for LoadWait<'_> {
+    type Output = ();
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
+        if self.job.is_done() || self.dispatch.closed.get() {
+            return Poll::Ready(());
+        }
+        *self.job.waker.borrow_mut() = Some(cx.waker().clone());
+        Poll::Pending
     }
 }
 
@@ -825,19 +1219,24 @@ thread_local! {
 /// Install this worker's dispatcher and spawn its task. Called from the
 /// worker's `on_start`, before any connection task runs.
 ///
-/// `stores` of the worker's `connections` are store connections: the first
-/// connections to enter [`drive`] take that role, and a connection entering
-/// it again after a reconnect takes it while fewer than `stores` hold it.
+/// `loads` of the worker's `connections` are load-priority connections and
+/// `stores` store connections (store-priority with `client = "vllm"`): the
+/// first connections to enter [`drive`] take those roles, load-priority
+/// first, and a connection entering it again after a reconnect takes one
+/// while fewer than `loads` or `stores` hold it.
 pub(crate) fn start_dispatcher(
     kv: Arc<KvReplay>,
     shared: Arc<SharedState>,
     worker_id: usize,
     connections: usize,
     stores: usize,
+    loads: usize,
 ) {
     let dispatch = Rc::new(KvDispatcher::default());
-    dispatch.connections.set(connections - stores);
+    dispatch.connections.set(connections - stores - loads);
     dispatch.store_target.set(stores);
+    dispatch.load_target.set(loads);
+    dispatch.vllm.set(kv.client == KvClient::Vllm);
     DISPATCHER.with(|d| *d.borrow_mut() = Some(Rc::clone(&dispatch)));
     if let Err(e) = ringline::spawn(run_dispatcher(dispatch, kv, shared)) {
         // Without it no connection on this worker gets a trace request, and
@@ -891,6 +1290,22 @@ impl Live {
 impl Drop for Live {
     fn drop(&mut self) {
         self.0.live.set(self.0.live.get() - 1);
+    }
+}
+
+/// Marks a connection as a load-priority connection for as long as it lives.
+struct Loading(Rc<KvDispatcher>);
+
+impl Loading {
+    fn new(d: &Rc<KvDispatcher>) -> Self {
+        d.loading.set(d.loading.get() + 1);
+        Self(Rc::clone(d))
+    }
+}
+
+impl Drop for Loading {
+    fn drop(&mut self) {
+        self.0.loading.set(self.0.loading.get() - 1);
     }
 }
 
@@ -978,6 +1393,12 @@ async fn run_dispatcher(dispatch: Rc<KvDispatcher>, kv: Arc<KvReplay>, shared: A
         for _ in 0..dispatch.fail_stranded_stores() {
             kv.mark_finished();
             metrics::KV_REQUESTS_FAILED.increment();
+        }
+        // The same for `client = "vllm"` tasks: no load- or store-priority
+        // connection is in its loop and a connect attempt failed since the
+        // task was queued.
+        for task in dispatch.take_stranded_tasks() {
+            fail_task(task, &kv);
         }
         let mut reader_behind = false;
         if has_slot && pending.is_none() && !exhausted {
@@ -1102,12 +1523,23 @@ pub(crate) async fn drive(
         // `on_start` installs it before spawning connections.
         unreachable!("kv replay connection without a dispatcher");
     };
+    let vllm = dispatch.vllm.get();
+    if dispatch.loading.get() < dispatch.load_target.get() {
+        let _loading = Loading::new(&dispatch);
+        return drive_tasks(client, conn, ctx, rng, &dispatch, true).await;
+    }
     if dispatch.storing.get() < dispatch.store_target.get() {
         let _storing = Storing::new(&dispatch);
+        if vllm {
+            return drive_tasks(client, conn, ctx, rng, &dispatch, false).await;
+        }
         return drive_stores(client, conn, ctx, rng, &dispatch).await;
     }
     let _live = Live::new(&dispatch);
-    let store_inline = dispatch.store_target.get() == 0;
+    let store_inline = !vllm && dispatch.store_target.get() == 0;
+    // With `client = "vllm"`: the request's objects and SETs, when it has a
+    // store to queue.
+    let mut queued: Option<Rc<Scratch>> = None;
     let mut inflight = InFlight::new(ctx.request_timeout, ctx.pipeline_depth);
     let mut scratch = Scratch::default();
     let mut ran_any = false;
@@ -1149,18 +1581,34 @@ pub(crate) async fn drive(
         let lag_ns = job
             .scheduled
             .map(|due| started.saturating_duration_since(due).as_nanos() as u64);
-        let result = run_request(
-            client,
-            conn,
-            ctx,
-            rng,
-            &mut inflight,
-            &mut scratch,
-            &job.req,
-            job.scheduled.unwrap_or(started),
-            store_inline,
-        )
-        .await;
+        let ready_from = job.scheduled.unwrap_or(started);
+        let result = if vllm {
+            run_request_vllm(
+                client,
+                conn,
+                ctx,
+                &mut inflight,
+                &mut scratch,
+                &job.req,
+                ready_from,
+                &dispatch,
+                &mut queued,
+            )
+            .await
+        } else {
+            run_request(
+                client,
+                conn,
+                ctx,
+                rng,
+                &mut inflight,
+                &mut scratch,
+                &job.req,
+                ready_from,
+                store_inline,
+            )
+            .await
+        };
         if let Err(Failure::Closed) = result {
             if !dispatch.give_back(job, HandBack::LookupSent) {
                 // Closed a second time: counted as failed rather than
@@ -1171,6 +1619,28 @@ pub(crate) async fn drive(
             return Err(DisconnectReason::Eof);
         }
         match result {
+            Ok(outcome) if queued.is_some() => {
+                let s = queued.take().expect("checked by the guard");
+                let sets = s.sets.len();
+                let store = Rc::new(StoreTasks {
+                    req: job.req,
+                    lag_ns,
+                    outcome: RefCell::new(outcome),
+                    s,
+                    queued_at: Instant::now(),
+                    first_sent: Cell::new(None),
+                    untaken: Cell::new(0),
+                    remaining: Cell::new(sets),
+                    failed: Cell::new(false),
+                });
+                // Queued SETs are finished by the connection that sends the
+                // last of them.
+                if !dispatch.queue_store_tasks(&store, ctx.kv.store_queue) {
+                    let mut outcome = store.outcome.take();
+                    outcome.store_dropped = true;
+                    finish(ctx.kv, ctx.shared, &store.req, lag_ns, &outcome);
+                }
+            }
             Ok(outcome) if !store_inline && !scratch.sets.is_empty() => {
                 let store = StoreJob {
                     req: job.req,
@@ -1186,15 +1656,17 @@ pub(crate) async fn drive(
                 if let Some(dropped) = dispatch.queue_store(store, ctx.kv.store_queue) {
                     let mut outcome = dropped.outcome;
                     outcome.store_dropped = true;
-                    finish(ctx, &dropped.req, lag_ns, &outcome);
+                    finish(ctx.kv, ctx.shared, &dropped.req, lag_ns, &outcome);
                 }
             }
-            Ok(outcome) => finish(ctx, &job.req, lag_ns, &outcome),
+            Ok(outcome) => finish(ctx.kv, ctx.shared, &job.req, lag_ns, &outcome),
             Err(Failure::Request) => {
                 ctx.kv.mark_finished();
                 metrics::KV_REQUESTS_FAILED.increment();
             }
             Err(Failure::Closed) => unreachable!("handled above"),
+            // The run stopped while the request waited for its load.
+            Err(Failure::Stopped) => return Ok(()),
             Err(Failure::Disconnect(reason)) => {
                 ctx.kv.mark_finished();
                 metrics::KV_REQUESTS_FAILED.increment();
@@ -1206,14 +1678,14 @@ pub(crate) async fn drive(
 
 /// Count a request finished and record it: its samples, all together so they
 /// fall in the same phase, and its `requests_out` row.
-fn finish(ctx: &KvConn<'_>, req: &Request, lag_ns: Option<u64>, o: &Outcome) {
-    ctx.kv.mark_finished();
+fn finish(kv: &KvReplay, shared: &SharedState, req: &Request, lag_ns: Option<u64>, o: &Outcome) {
+    kv.mark_finished();
     if let Some(lag) = lag_ns {
         let _ = metrics::KV_SCHEDULE_LAG.increment(lag);
     }
     record_outcome(req, o);
-    let recorded = ctx.shared.phase() == Phase::Running;
-    ctx.kv.write_row(req, lag_ns, o, recorded);
+    let recorded = shared.phase() == Phase::Running;
+    kv.write_row(req, lag_ns, o, recorded);
 }
 
 /// Send this worker's queued stores on one connected RESP client until the
@@ -1258,22 +1730,109 @@ async fn drive_stores(
         job.outcome.store_queue_ns =
             Some(started.saturating_duration_since(job.queued_at).as_nanos() as u64);
         scratch.fill(ctx.kv, &job.req);
-        match store(client, conn, ctx, rng, &mut inflight, &scratch, &job.sets).await {
+        match store(
+            client,
+            conn,
+            ctx,
+            rng,
+            &mut inflight,
+            &scratch,
+            &job.sets,
+            ctx.pipeline_depth,
+        )
+        .await
+        {
             Ok(()) => {
                 job.outcome.sets = job.sets.len();
                 job.outcome.store_ns = job.queued_at.elapsed().as_nanos() as u64;
-                finish(ctx, &job.req, job.lag_ns, &job.outcome);
+                finish(ctx.kv, ctx.shared, &job.req, job.lag_ns, &job.outcome);
             }
             Err(failure) => {
                 // Some of its SETs may have reached the server; the request
                 // is failed, not retried.
                 ctx.kv.mark_finished();
                 metrics::KV_REQUESTS_FAILED.increment();
-                let reason = match failure {
-                    Failure::Disconnect(reason) => reason,
-                    Failure::Request | Failure::Closed => DisconnectReason::SendError,
-                };
-                return Err(reason);
+                return Err(failure.reason());
+            }
+        }
+    }
+}
+
+impl Failure {
+    /// Why a connection whose operation failed this way disconnects.
+    fn reason(self) -> DisconnectReason {
+        match self {
+            Failure::Disconnect(reason) => reason,
+            Failure::Request | Failure::Closed | Failure::Stopped => DisconnectReason::SendError,
+        }
+    }
+}
+
+/// With `client = "vllm"`: send this worker's queued GET and SET tasks on
+/// one connected RESP client, one at a time, until the run stops or the
+/// connection fails. A load-priority connection (`load_priority`) takes the
+/// oldest GET, or the oldest SET when no GET is queued; a store-priority
+/// connection the reverse.
+async fn drive_tasks(
+    client: &mut ringline_redis::Client,
+    conn: ConnCtx,
+    ctx: &KvConn<'_>,
+    rng: &mut Xoshiro256PlusPlus,
+    dispatch: &Rc<KvDispatcher>,
+    load_priority: bool,
+) -> Result<(), DisconnectReason> {
+    let mut inflight = InFlight::new(ctx.request_timeout, 1);
+    loop {
+        if ctx.shared.phase().should_stop() {
+            return Ok(());
+        }
+        if !client.is_alive() {
+            return Err(DisconnectReason::Eof);
+        }
+        let Some(task) = dispatch.next_task(load_priority).await else {
+            // The run stopped. Otherwise this worker's dispatcher failed to
+            // start; stay connected until the run stops, so the connection
+            // count the runner reports is the one the run had.
+            if ctx.shared.phase().should_stop() {
+                return Ok(());
+            }
+            ringline::sleep(IDLE_SLEEP_MAX).await;
+            continue;
+        };
+        // Closed while it waited (a server closes idle connections): nothing
+        // was sent, so the task runs on the next connection to ask.
+        if !client.is_alive() {
+            if let Some(task) = dispatch.requeue_task(task) {
+                fail_task(task, ctx.kv);
+            }
+            return Err(DisconnectReason::Eof);
+        }
+        if task.op.failed() {
+            continue;
+        }
+        match task.op {
+            TaskOp::Get(job, i) => {
+                match load(client, conn, &mut inflight, &job.s, i..i + 1, 1).await {
+                    Ok(found) => job.answered(found),
+                    Err(failure) => {
+                        // The GET may have reached the server; the request is
+                        // failed, not retried.
+                        job.fail();
+                        return Err(failure.reason());
+                    }
+                }
+            }
+            TaskOp::Set(job, i) => {
+                if job.first_sent.get().is_none() {
+                    job.first_sent.set(Some(Instant::now()));
+                }
+                match store(client, conn, ctx, rng, &mut inflight, &job.s, &[i], 1).await {
+                    Ok(()) => job.answered(ctx.kv, ctx.shared),
+                    Err(failure) => {
+                        job.fail(ctx.kv);
+                        return Err(failure.reason());
+                    }
+                }
             }
         }
     }
@@ -1319,26 +1878,19 @@ fn record_outcome(req: &Request, o: &Outcome) {
     }
 }
 
-/// Look up and load one trace request, and choose its SETs (`s.sets`).
-/// With `store_inline` also send them; otherwise the caller queues them, and
-/// `o.sets` and `o.store_ns` are left 0. `ready_from` is where `ready_ns`
-/// starts.
-#[allow(clippy::too_many_arguments)]
-async fn run_request(
+/// Step 1, the lookup: fill `s` with `req`'s objects, send their EXISTS, and
+/// choose the SETs the write rule selects (`s.sets`). The outcome has the
+/// lookup's fields and `new_tokens` set.
+async fn lookup(
     client: &mut ringline_redis::Client,
     conn: ConnCtx,
-    ctx: &KvConn<'_>,
-    rng: &mut Xoshiro256PlusPlus,
+    kv: &KvReplay,
     inflight: &mut InFlight,
     s: &mut Scratch,
     req: &Request,
-    ready_from: Instant,
-    store_inline: bool,
 ) -> Result<Outcome, Failure> {
-    let kv = ctx.kv;
-    let input = u64::from(req.input_tokens);
     let mut o = Outcome {
-        new_tokens: input,
+        new_tokens: u64::from(req.input_tokens),
         ..Default::default()
     };
     s.sets.clear();
@@ -1413,52 +1965,6 @@ async fn run_request(
     o.lookup_hit = lookup_prefix(&s.exists, ranks);
     o.hit = o.lookup_hit;
 
-    // 2. Load: GET every object of the hit prefix.
-    let gets = o.lookup_hit * ranks;
-    if gets > 0 {
-        let t0 = Instant::now();
-        let mut next = 0;
-        let mut done = 0;
-        while done < gets {
-            let fired_at = Instant::now();
-            let mut fired = 0u64;
-            while next < gets && client.pending_count() < ctx.pipeline_depth {
-                let before = client.pending_count();
-                if client.fire_get(s.key(next), next as u64).is_err() {
-                    note_failed_fire(before, client.pending_count(), inflight, true);
-                    metrics::REQUESTS_SENT.add(fired);
-                    return Err(send_failed(conn));
-                }
-                inflight.push(fired_at);
-                next += 1;
-                fired += 1;
-            }
-            flush(client, conn, inflight, fired)?;
-            let meta = recv_with_timeout(client.recv_meta(), inflight, conn)
-                .await
-                .map_err(Failure::Disconnect)?
-                .map_err(recv_failed)?;
-            inflight.pop();
-            done += 1;
-            let chunk = s.objects[meta.user_data as usize].chunk_index as usize;
-            let result = map_respmeta(meta);
-            record_counters(&result);
-            if !result.success || result.hit == Some(false) {
-                if result.success {
-                    o.get_nil += 1;
-                    metrics::KV_GET_NIL.increment();
-                }
-                o.hit = o.hit.min(chunk);
-            }
-        }
-        o.gets = gets;
-        o.load_ns = t0.elapsed().as_nanos() as u64;
-    }
-    o.ready_ns = Instant::now()
-        .saturating_duration_since(ready_from)
-        .as_nanos() as u64;
-
-    // 3. Store.
     match kv.write_rule {
         KvWriteRule::SetFromMiss => s.sets.extend(o.lookup_hit * ranks..n),
         KvWriteRule::InsertIfAbsent => {
@@ -1471,13 +1977,68 @@ async fn run_request(
             );
         }
     }
-    if store_inline && !s.sets.is_empty() {
-        let t0 = Instant::now();
-        store(client, conn, ctx, rng, inflight, s, &s.sets).await?;
-        o.sets = s.sets.len();
-        o.store_ns = t0.elapsed().as_nanos() as u64;
-    }
+    Ok(o)
+}
 
+/// What a load's GETs found.
+#[derive(Debug, Default)]
+struct Loaded {
+    /// The first chunk whose GET returned nil or an error.
+    cut: Option<usize>,
+    /// GETs that returned nil.
+    nil: usize,
+}
+
+/// GET the objects `gets` indexes in `s.objects`, at most `depth` in flight.
+async fn load(
+    client: &mut ringline_redis::Client,
+    conn: ConnCtx,
+    inflight: &mut InFlight,
+    s: &Scratch,
+    gets: std::ops::Range<usize>,
+    depth: usize,
+) -> Result<Loaded, Failure> {
+    let mut found = Loaded::default();
+    let mut next = gets.start;
+    let mut done = gets.start;
+    while done < gets.end {
+        let fired_at = Instant::now();
+        let mut fired = 0u64;
+        while next < gets.end && client.pending_count() < depth {
+            let before = client.pending_count();
+            if client.fire_get(s.key(next), next as u64).is_err() {
+                note_failed_fire(before, client.pending_count(), inflight, true);
+                metrics::REQUESTS_SENT.add(fired);
+                return Err(send_failed(conn));
+            }
+            inflight.push(fired_at);
+            next += 1;
+            fired += 1;
+        }
+        flush(client, conn, inflight, fired)?;
+        let meta = recv_with_timeout(client.recv_meta(), inflight, conn)
+            .await
+            .map_err(Failure::Disconnect)?
+            .map_err(recv_failed)?;
+        inflight.pop();
+        done += 1;
+        let chunk = s.objects[meta.user_data as usize].chunk_index as usize;
+        let result = map_respmeta(meta);
+        record_counters(&result);
+        if !result.success || result.hit == Some(false) {
+            if result.success {
+                found.nil += 1;
+                metrics::KV_GET_NIL.increment();
+            }
+            found.cut = Some(found.cut.map_or(chunk, |c| c.min(chunk)));
+        }
+    }
+    Ok(found)
+}
+
+/// Fill in the tokens served and computed for a request whose loaded prefix
+/// is `o.hit` chunks.
+fn settle(o: &mut Outcome, kv: &KvReplay, input: u64) {
     o.cached_tokens = cached_tokens(o.hit as u64, kv.chunk_tokens, input);
     // `cached_tokens` never exceeds its input; the subtraction is checked so
     // a regression there fails loudly in tests instead of panicking a
@@ -1489,11 +2050,136 @@ async fn run_request(
     );
     o.new_tokens = input.saturating_sub(o.cached_tokens);
     o.full_hit = input > 0 && (o.hit as u64).saturating_mul(kv.chunk_tokens) >= input;
+}
+
+/// Look up and load one trace request, and choose its SETs (`s.sets`).
+/// With `store_inline` also send them; otherwise the caller queues them, and
+/// `o.sets` and `o.store_ns` are left 0. `ready_from` is where `ready_ns`
+/// starts.
+#[allow(clippy::too_many_arguments)]
+async fn run_request(
+    client: &mut ringline_redis::Client,
+    conn: ConnCtx,
+    ctx: &KvConn<'_>,
+    rng: &mut Xoshiro256PlusPlus,
+    inflight: &mut InFlight,
+    s: &mut Scratch,
+    req: &Request,
+    ready_from: Instant,
+    store_inline: bool,
+) -> Result<Outcome, Failure> {
+    let kv = ctx.kv;
+    let mut o = lookup(client, conn, kv, inflight, s, req).await?;
+    if req.chunks.is_empty() {
+        return Ok(o);
+    }
+
+    // 2. Load: GET every object of the hit prefix.
+    let gets = o.lookup_hit * kv.mapper.sharding().ranks as usize;
+    if gets > 0 {
+        let t0 = Instant::now();
+        let found = load(client, conn, inflight, s, 0..gets, ctx.pipeline_depth).await?;
+        if let Some(cut) = found.cut {
+            o.hit = o.hit.min(cut);
+        }
+        o.get_nil = found.nil;
+        o.gets = gets;
+        o.load_ns = t0.elapsed().as_nanos() as u64;
+    }
+    o.ready_ns = Instant::now()
+        .saturating_duration_since(ready_from)
+        .as_nanos() as u64;
+
+    // 3. Store.
+    if store_inline && !s.sets.is_empty() {
+        let t0 = Instant::now();
+        store(
+            client,
+            conn,
+            ctx,
+            rng,
+            inflight,
+            s,
+            &s.sets,
+            ctx.pipeline_depth,
+        )
+        .await?;
+        o.sets = s.sets.len();
+        o.store_ns = t0.elapsed().as_nanos() as u64;
+    }
+
+    settle(&mut o, kv, u64::from(req.input_tokens));
     Ok(o)
 }
 
-/// SET the objects `sets` indexes in `s.objects`, at most `pipeline_depth`
-/// in flight.
+/// With `client = "vllm"`: look up one trace request, queue one GET task per
+/// object of its hit prefix, and wait for the last reply. When the request
+/// has SETs to send, `queued` is set to its objects (`sets` among them) for
+/// the caller to queue. `ready_from` is where `ready_ns` starts.
+#[allow(clippy::too_many_arguments)]
+async fn run_request_vllm(
+    client: &mut ringline_redis::Client,
+    conn: ConnCtx,
+    ctx: &KvConn<'_>,
+    inflight: &mut InFlight,
+    s: &mut Scratch,
+    req: &Request,
+    ready_from: Instant,
+    dispatch: &KvDispatcher,
+    queued: &mut Option<Rc<Scratch>>,
+) -> Result<Outcome, Failure> {
+    let kv = ctx.kv;
+    let mut o = lookup(client, conn, kv, inflight, s, req).await?;
+    if req.chunks.is_empty() {
+        return Ok(o);
+    }
+    let gets = o.lookup_hit * kv.mapper.sharding().ranks as usize;
+    // The tasks read the request's keys after this connection has taken the
+    // next request, so they get the objects and this connection a new
+    // `Scratch`.
+    let objects = (gets > 0 || !s.sets.is_empty()).then(|| Rc::new(std::mem::take(s)));
+    if let Some(ref objects) = objects
+        && gets > 0
+    {
+        let t0 = Instant::now();
+        let job = LoadJob::new(Rc::clone(objects), gets, o.lookup_hit);
+        dispatch.queue_load(&job, gets);
+        LoadWait {
+            job: &job,
+            dispatch,
+        }
+        .await;
+        if job.failed.get() {
+            return Err(Failure::Request);
+        }
+        if !job.is_done() {
+            return Err(Failure::Stopped);
+        }
+        o.hit = job.cut.get();
+        o.get_nil = job.get_nil.get();
+        o.gets = gets;
+        o.load_ns = t0.elapsed().as_nanos() as u64;
+    }
+    o.ready_ns = Instant::now()
+        .saturating_duration_since(ready_from)
+        .as_nanos() as u64;
+    settle(&mut o, kv, u64::from(req.input_tokens));
+    match objects {
+        Some(objects) if !objects.sets.is_empty() => *queued = Some(objects),
+        // Every GET task has been dropped, so the buffers come back.
+        Some(objects) => {
+            if let Ok(back) = Rc::try_unwrap(objects) {
+                *s = back;
+            }
+        }
+        None => {}
+    }
+    Ok(o)
+}
+
+/// SET the objects `sets` indexes in `s.objects`, at most `depth` in
+/// flight.
+#[allow(clippy::too_many_arguments)]
 async fn store(
     client: &mut ringline_redis::Client,
     conn: ConnCtx,
@@ -1502,6 +2188,7 @@ async fn store(
     inflight: &mut InFlight,
     s: &Scratch,
     sets: &[usize],
+    depth: usize,
 ) -> Result<(), Failure> {
     let n = sets.len();
     let pool_len = ctx.value_pool.len();
@@ -1510,7 +2197,7 @@ async fn store(
     while done < n {
         let fired_at = Instant::now();
         let mut fired = 0u64;
-        while next < n && client.pending_count() < ctx.pipeline_depth {
+        while next < n && client.pending_count() < depth {
             let i = sets[next];
             let len = s.objects[i].size as usize;
             let before = client.pending_count();
@@ -1673,7 +2360,9 @@ impl KvReplay {
             loads: d(11),
             stores: d(12),
             loads_with_cached_tokens: d(13),
+            client: self.client.as_str(),
             store_connections: self.store_connections,
+            load_connections: self.load_connections,
             stores_dropped: d(14),
             lookup_time: stats(&metrics::KV_LOOKUP_TIME, &base.lookup),
             load_time: stats(&metrics::KV_LOAD_TIME, &base.load),
@@ -1738,7 +2427,9 @@ mod tests {
             key_prefix: "kv:".into(),
             key_format: KvKeyFormat::Hex,
             requests_out: None,
+            client: KvClient::Lmcache,
             store_connections: 0,
+            load_connections: 0,
             store_queue: None,
         }
     }
@@ -1849,6 +2540,59 @@ mod tests {
         assert!(!kv.is_finished());
         kv.reader.stopped.store(true, Ordering::Release);
         assert!(kv.is_finished());
+    }
+
+    /// `client = "vllm"`: a load-priority connection takes the oldest GET
+    /// and a store-priority one the oldest SET, each falling back to the
+    /// other queue only when its own is empty; a store counts against
+    /// `store_queue` until its last SET is taken.
+    #[test]
+    fn a_priority_connection_takes_its_own_queue_first() {
+        let d = KvDispatcher::default();
+        let s = Rc::new(Scratch {
+            sets: vec![2, 3],
+            ..Default::default()
+        });
+        let store = |id: u64| {
+            Rc::new(StoreTasks {
+                req: Request {
+                    timestamp: 0,
+                    req_id: id,
+                    input_tokens: 64,
+                    output_tokens: 1,
+                    chunks: vec![1, 2, 3, 4],
+                    session_id: None,
+                },
+                lag_ns: None,
+                outcome: RefCell::new(Outcome::default()),
+                s: Rc::clone(&s),
+                queued_at: Instant::now(),
+                first_sent: Cell::new(None),
+                untaken: Cell::new(0),
+                remaining: Cell::new(2),
+                failed: Cell::new(false),
+            })
+        };
+        let take = |load_priority: bool| {
+            d.take_task(load_priority).map(|t| match t.op {
+                TaskOp::Get(_, i) => ("GET", i),
+                TaskOp::Set(_, i) => ("SET", i),
+            })
+        };
+        d.queue_load(&LoadJob::new(Rc::clone(&s), 2, 2), 2);
+        assert!(d.queue_store_tasks(&store(1), None));
+        assert_eq!(d.stores_queued.get(), 1);
+        // A second store does not fit a queue of one.
+        assert!(!d.queue_store_tasks(&store(2), Some(1)));
+        assert_eq!(take(false), Some(("SET", 2)));
+        assert_eq!(take(true), Some(("GET", 0)));
+        assert_eq!(take(true), Some(("GET", 1)));
+        assert_eq!(d.stores_queued.get(), 1);
+        // No GET is left: the load-priority connection takes the SET.
+        assert_eq!(take(true), Some(("SET", 3)));
+        assert_eq!(d.stores_queued.get(), 0);
+        assert_eq!(take(false), None);
+        assert!(d.queue_store_tasks(&store(3), Some(1)));
     }
 
     #[test]

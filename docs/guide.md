@@ -409,19 +409,44 @@ per trace request; for `resp://` and `valkey://` they would be spread over
 several connections or threads.
 
 With `store_connections` the replay models an engine whose saves run apart
-from its loads, such as vLLM's file-system offloading tier
-(`DualQueueThreadPool`, `vllm/v1/kv_offload/tiering/fs/thread_pool.py`). That
-pool's load threads take stores and its store threads take loads when their
-own queue is empty; a store connection here sends only stores, and the other
+from its loads: a store connection sends only stores, and the other
 connections never store. Each worker queues a request's SETs once its load has
 finished, and its store connections send them in queue order, so a slow store
-does not hold the connection the next request needs. The engine's
-scheduling is not modelled: a store is queued as soon as the load finishes,
-not when the engine would have computed the KV it stores. vLLM's
-backpressure policies (vLLM main as of 2026-11,
-`vllm/v1/kv_offload/tiering/backpressure.py`) drop some or all
-stores when a tier's store latency is high; `store_queue` drops a store when
-the worker's queue is full.
+does not hold the connection the next request needs.
+
+With `client = "vllm"` the replay sends operations the way a network-store
+tier for vLLM sends them when it runs one task per key on vLLM's
+`DualQueueThreadPool` (`vllm/v1/kv_offload/tiering/fs/thread_pool.py`).
+vLLM's own file-system tier (`fs/manager.py`) runs one task per transfer
+job, which reads or writes the job's files in order on one pool thread; the
+replay does not model that. A lookup connection sends a request's EXISTS in one
+pipeline, queues one GET task per object of the hit prefix on the worker's
+load queue, and waits for the last reply. It then queues one SET task per
+object the write rule selects on the store queue, and takes the next
+request. Load-priority connections (`load_connections`) take the oldest GET,
+or the oldest SET when no GET is queued; store-priority connections
+(`store_connections`) the reverse. Each sends one operation and waits for its
+reply before taking the next, as each pool thread runs one task at a time.
+One request's GETs are therefore spread over every idle load- or
+store-priority connection, where the default client pipelines them on the
+connection that looked up, and a queue of stores slows loads only once every
+load- and store-priority connection is busy. A lookup connection holds its
+request until the load finishes, so the lookup connections bound the
+requests looking up or loading at once.
+
+In both modes the engine's scheduling is not modelled: a store is queued as
+soon as the load finishes, not when the engine would have computed the KV it
+stores. vLLM's backpressure policies (vLLM main as of 2026-11,
+`vllm/v1/kv_offload/tiering/backpressure.py`) drop some or all stores when a
+tier's store latency is high; `store_queue` drops a store when the worker's
+queue is full. vLLM's `AsyncLookupManager` (vLLM main as of 2026-11,
+`vllm/v1/kv_offload/tiering/async_lookup.py`) sends lookups on one thread,
+one request's batch at a time, and the scheduler sees the result no earlier
+than its next step. It keeps one result per block while a request that asked for it is
+running, gives it to later requests without asking the tier, and sets it to
+present when a store of the block finishes. The replay's lookup connections
+send their EXISTS concurrently and use the result at once, and every request
+sends its own EXISTS.
 
 ### What is not modelled
 
@@ -461,6 +486,14 @@ the worker's queue is full.
   a store connection that cannot reconnect does not keep the run going until
   `duration`. Stores still queued when the run reaches `duration` are not
   sent.
+- With `client = "vllm"`, a GET or SET whose connection fails after sending
+  it fails its request, which is not retried; the request's other queued
+  tasks are not sent. A task that reaches a connection already closed, with
+  nothing sent, goes back to the front of its queue, at most once per load-
+  and store-priority connection on the worker. Queued tasks are failed, with
+  their requests, when none of the worker's load- or store-priority
+  connections is in its loop and a connect attempt has failed since they were
+  queued.
 
 ## Prefill
 

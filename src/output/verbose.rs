@@ -230,13 +230,24 @@ impl OutputFormatter for VerboseFormatter {
                 ("store", &kv.store_time),
                 ("ready", &kv.ready_time),
             ];
-            if kv.store_connections > 0 {
+            if kv.stores_queued() {
                 rows.push(("store_queue", &kv.store_queue_time));
-                tracing::info!(
-                    "kv_replay stores: connections={} dropped={}",
-                    kv.store_connections,
-                    kv.stores_dropped
-                );
+                if kv.load_connections > 0 || kv.client != "lmcache" {
+                    tracing::info!(
+                        "kv_replay stores: client={} load_connections={} store_connections={} \
+                         dropped={}",
+                        kv.client,
+                        kv.load_connections,
+                        kv.store_connections,
+                        kv.stores_dropped
+                    );
+                } else {
+                    tracing::info!(
+                        "kv_replay stores: connections={} dropped={}",
+                        kv.store_connections,
+                        kv.stores_dropped
+                    );
+                }
             }
             if !kv.closed_loop {
                 rows.push(("schedule_lag", &kv.schedule_lag));

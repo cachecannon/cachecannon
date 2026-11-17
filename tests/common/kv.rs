@@ -30,12 +30,14 @@ pub fn key(chunk: u64, rank: u64) -> Vec<u8> {
     format!("kv:{id:016x}").into_bytes()
 }
 
-/// One command the server received: its name (upper case), key, and when it
-/// was read.
+/// One command the server received: its name (upper case), key, the
+/// connection it came on (numbered from 0 in accept order), and when it was
+/// read.
 #[derive(Debug, Clone)]
 pub struct Op {
     pub cmd: String,
     pub key: Vec<u8>,
+    pub conn: usize,
     pub at: Instant,
 }
 
@@ -50,6 +52,12 @@ pub struct Hooks {
     /// Hold the reply to the first SET of this key this long. Other
     /// connections are served meanwhile.
     pub delay_set: Option<(Vec<u8>, Duration)>,
+    /// Hold the reply to the first GET of this key this long. Other
+    /// connections are served meanwhile.
+    pub delay_get: Option<(Vec<u8>, Duration)>,
+    /// Shut down the connection that sends the first GET of this key,
+    /// without replying.
+    pub close_on_get: Option<Vec<u8>>,
     /// After replying to this many SETs in total, wait this long and close
     /// the connection, as a server closes an idle connection.
     pub close_after_sets: Option<(usize, Duration)>,
@@ -80,6 +88,8 @@ struct State {
     refusing: bool,
     /// Set by `drop_new_after_close_all`.
     dropping_new: bool,
+    /// Connections accepted so far.
+    accepted: usize,
 }
 
 /// A RESP2 server holding every SET in memory. Answers PING, EXISTS (one
@@ -138,14 +148,16 @@ impl Server {
                             let _ = stream.shutdown(std::net::Shutdown::Both);
                             continue;
                         }
-                        {
+                        let conn = {
                             let mut st = state.lock().unwrap();
                             if st.hooks.close_all_after_sets.is_some() {
                                 st.streams.push(stream.try_clone().unwrap());
                             }
-                        }
+                            st.accepted += 1;
+                            st.accepted - 1
+                        };
                         let state = Arc::clone(&state);
-                        std::thread::spawn(move || serve(stream, state));
+                        std::thread::spawn(move || serve(stream, conn, state));
                     }
                     Err(_) => std::thread::sleep(Duration::from_millis(1)),
                 }
@@ -165,7 +177,7 @@ fn read_line(reader: &mut impl BufRead) -> Option<Vec<u8>> {
     Some(line)
 }
 
-fn serve(stream: TcpStream, state: Arc<Mutex<State>>) {
+fn serve(stream: TcpStream, conn: usize, state: Arc<Mutex<State>>) {
     let mut writer = stream.try_clone().unwrap();
     let mut reader = BufReader::new(stream);
     while let Some(header) = read_line(&mut reader) {
@@ -191,6 +203,7 @@ fn serve(stream: TcpStream, state: Arc<Mutex<State>>) {
             st.log.push(Op {
                 cmd: cmd.clone(),
                 key: key.clone(),
+                conn,
                 at: Instant::now(),
             });
             match cmd.as_str() {
@@ -203,15 +216,26 @@ fn serve(stream: TcpStream, state: Arc<Mutex<State>>) {
                     }
                     format!(":{}\r\n", u8::from(found)).into_bytes()
                 }
-                "GET" => match st.store.get(&key) {
-                    Some(v) => {
-                        let mut r = format!("${}\r\n", v.len()).into_bytes();
-                        r.extend_from_slice(v);
-                        r.extend_from_slice(b"\r\n");
-                        r
+                "GET" => {
+                    if st.hooks.delay_get.as_ref().is_some_and(|(k, _)| *k == key) {
+                        delay = st.hooks.delay_get.take().map(|(_, d)| d);
                     }
-                    None => b"$-1\r\n".to_vec(),
-                },
+                    if st.hooks.close_on_get.as_ref() == Some(&key) {
+                        st.hooks.close_on_get = None;
+                        drop(st);
+                        let _ = writer.shutdown(std::net::Shutdown::Both);
+                        return;
+                    }
+                    match st.store.get(&key) {
+                        Some(v) => {
+                            let mut r = format!("${}\r\n", v.len()).into_bytes();
+                            r.extend_from_slice(v);
+                            r.extend_from_slice(b"\r\n");
+                            r
+                        }
+                        None => b"$-1\r\n".to_vec(),
+                    }
+                }
                 "SET" => {
                     if st.hooks.delay_set.as_ref().is_some_and(|(k, _)| *k == key) {
                         delay = st.hooks.delay_set.take().map(|(_, d)| d);

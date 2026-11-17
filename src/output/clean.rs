@@ -552,17 +552,29 @@ impl OutputFormatter for CleanFormatter {
                 "{}",
                 format_latency_row(&self.cyan(&pad_name("store")), &kv.store_time)
             );
-            if kv.store_connections > 0 {
+            if kv.stores_queued() {
                 println!(
                     "{}",
                     format_latency_row(&self.cyan(&pad_name("store q")), &kv.store_queue_time)
                 );
-                println!(
-                    "{}       {} store connections, {} stores dropped at a full queue",
-                    self.cyan("stores"),
-                    format_count(kv.store_connections as u64),
-                    format_count(kv.stores_dropped)
-                );
+                if kv.load_connections > 0 || kv.client != "lmcache" {
+                    println!(
+                        "{}       client {}, {} load- and {} store-priority connections, {} \
+                         stores dropped at a full queue",
+                        self.cyan("stores"),
+                        kv.client,
+                        format_count(kv.load_connections as u64),
+                        format_count(kv.store_connections as u64),
+                        format_count(kv.stores_dropped)
+                    );
+                } else {
+                    println!(
+                        "{}       {} store connections, {} stores dropped at a full queue",
+                        self.cyan("stores"),
+                        format_count(kv.store_connections as u64),
+                        format_count(kv.stores_dropped)
+                    );
+                }
             }
             println!(
                 "{}",
