@@ -400,7 +400,9 @@ key_format = "hex"
 # store_connections = 8
 # With store_connections: stores each worker may hold queued and not yet
 # started. A store that finds the queue full is dropped whole: none of its
-# SETs is sent, and its request completes without them. Unset is no limit.
+# SETs is sent, and its request completes without them. A store put back
+# after it reached a closed store connection goes in even when the queue is
+# full. Unset is no limit.
 # store_queue = 1024
 ```
 
@@ -408,10 +410,14 @@ The object id is kvtrace's `chunk << 16 | slot << 12 | rank`, with slot 0.
 A SET's value is the object's size in bytes, taken from the shared value pool;
 an object larger than the pool (1 GiB) is rejected at startup.
 
-Related settings keep their meaning: `connection.connections` bounds the trace
-requests in flight (one per connection, less `store_connections`),
-`connection.pipeline_depth` bounds the GETs or SETs one trace request has in
-flight (with `store_connections`, the SETs one store connection has in flight), and `connection.request_timeout`
+Related settings keep their meaning: `connection.connections` less
+`store_connections` bounds the trace requests looking up or loading at once
+(one per connection). With `store_connections`, a request whose store is
+queued or being sent is still in flight, so the requests in flight can exceed
+that bound by the queued stores (at most `store_queue` per worker) and the
+stores being sent. `connection.pipeline_depth` bounds the GETs or SETs one
+trace request has in flight, or with `store_connections` the SETs one store
+connection has in flight, and `connection.request_timeout`
 applies to every EXISTS, GET and SET. `general.duration` is an upper bound: the
 run ends when every trace request has finished. Trace requests that finish
 during `general.warmup` are not recorded.

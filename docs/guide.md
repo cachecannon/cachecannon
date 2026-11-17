@@ -415,12 +415,12 @@ pool's load threads take stores and its store threads take loads when their
 own queue is empty; a store connection here sends only stores, and the other
 connections never store. Each worker queues a request's SETs once its load has
 finished, and its store connections send them in queue order, so a slow store
-no longer holds the connection the next request needs. The engine's
+does not hold the connection the next request needs. The engine's
 scheduling is not modelled: a store is queued as soon as the load finishes,
 not when the engine would have computed the KV it stores. vLLM's
-backpressure policies drop a store when a tier is under pressure;
-`store_queue` drops one when the worker's queue is full, which is a simpler
-rule.
+backpressure policies (on its main branch, not yet released) drop some or all
+stores when a tier's store latency is high; `store_queue` drops a store when
+the worker's queue is full.
 
 ### What is not modelled
 
@@ -454,8 +454,12 @@ rule.
 - With `store_connections`, a store whose connection fails after sending any
   SET fails its request, which is not retried. One that reaches a store
   connection already closed, with nothing sent, runs on the next store
-  connection, at most once per store connection on the worker. Stores still
-  queued when the run reaches `duration` are not sent.
+  connection, at most once per store connection on the worker. A queued
+  store is counted as failed when none of its worker's store connections is
+  in the store loop and a connect attempt has failed since it was queued, so
+  a store connection that cannot reconnect does not keep the run going until
+  `duration`. Stores still queued when the run reaches `duration` are not
+  sent.
 
 ## Prefill
 

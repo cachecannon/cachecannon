@@ -33,8 +33,9 @@
 //! its store has finished, or at once when it has nothing to store or its
 //! store was dropped at a full queue (`store_queue`). A store queued after its
 //! load can reach the server after a later request's lookup of the same
-//! objects, which then misses them; an engine saving asynchronously has the
-//! same race.
+//! objects, which then misses them. vLLM's offloading manager reports a chunk
+//! whose write is in flight as pending instead of missing; the replay has no
+//! such state.
 //!
 //! Token accounting is in [`cached_tokens`].
 //!
@@ -577,6 +578,8 @@ struct StoreJob {
     /// Times it reached a store connection already closed, before anything
     /// was sent. Bounded by the worker's store connection count.
     dead_handovers: u32,
+    /// The worker's `connect_failures` when it was queued or put back.
+    failures_at: u64,
 }
 
 /// One idle connection waiting for a trace request, or a store connection
@@ -726,7 +729,8 @@ impl KvDispatcher {
     }
 
     /// Put back a store that reached a closed store connection with nothing
-    /// sent, to run next. Returns false, and keeps nothing, once it has
+    /// sent, to run next. It goes in even when the queue holds `store_queue`
+    /// stores already: it was accepted once. Returns false, and keeps nothing, once it has
     /// reached as many closed connections as the worker has store
     /// connections: the caller counts its request as failed.
     fn requeue_store(&self, job: StoreJob) -> bool {
@@ -735,6 +739,7 @@ impl KvDispatcher {
         }
         let job = StoreJob {
             dead_handovers: job.dead_handovers + 1,
+            failures_at: self.connect_failures.get(),
             ..job
         };
         if let Some(slot) = self.store_waiting.borrow_mut().pop_front() {
@@ -746,7 +751,27 @@ impl KvDispatcher {
         true
     }
 
-    /// Wait for the next queued store. Returns `None` once the run stops.
+    /// Fail the queued stores whose worker has had no store connection in
+    /// the store loop since a connect attempt failed after they were queued,
+    /// rather than wait for a store connection that may never come. Returns
+    /// how many were failed.
+    fn fail_stranded_stores(&self) -> usize {
+        if self.storing.get() > 0 {
+            return 0;
+        }
+        let failures = self.connect_failures.get();
+        let mut stores = self.stores.borrow_mut();
+        let before = stores.len();
+        stores.retain(|job| failures <= job.failures_at);
+        let failed = before - stores.len();
+        for _ in 0..failed {
+            metrics::KV_STORE_QUEUE_DEPTH.decrement();
+        }
+        failed
+    }
+
+    /// Wait for the next queued store. Returns `None` once the run stops, or
+    /// at once when this worker's dispatcher failed to start.
     async fn next_store(&self) -> Option<StoreJob> {
         if self.closed.get() {
             return None;
@@ -948,6 +973,12 @@ async fn run_dispatcher(dispatch: Rc<KvDispatcher>, kv: Arc<KvReplay>, shared: A
                 metrics::KV_REQUESTS_FAILED.increment();
             }
         }
+        // The same for stores: no store connection is in the store loop and
+        // a connect attempt failed since the store was queued.
+        for _ in 0..dispatch.fail_stranded_stores() {
+            kv.mark_finished();
+            metrics::KV_REQUESTS_FAILED.increment();
+        }
         let mut reader_behind = false;
         if has_slot && pending.is_none() && !exhausted {
             match kv.claim() {
@@ -1148,6 +1179,7 @@ pub(crate) async fn drive(
                     sets: std::mem::take(&mut scratch.sets),
                     queued_at: Instant::now(),
                     dead_handovers: 0,
+                    failures_at: dispatch.connect_failures.get(),
                 };
                 // A queued store is finished by the store connection that
                 // sends it.
@@ -1203,11 +1235,17 @@ async fn drive_stores(
             return Err(DisconnectReason::Eof);
         }
         let Some(mut job) = dispatch.next_store().await else {
-            // `None` only once the run stops.
-            return Ok(());
+            // The run stopped. Otherwise this worker's dispatcher failed to
+            // start; stay connected until the run stops, so the connection
+            // count the runner reports is the one the run had.
+            if ctx.shared.phase().should_stop() {
+                return Ok(());
+            }
+            ringline::sleep(IDLE_SLEEP_MAX).await;
+            continue;
         };
         // Closed while it waited (a server closes idle connections): nothing
-        // was sent, so the store runs on another store connection.
+        // was sent, so the store runs on the next store connection to ask.
         if !client.is_alive() {
             let req_failed = !dispatch.requeue_store(job);
             if req_failed {

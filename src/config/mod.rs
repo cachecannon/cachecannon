@@ -462,7 +462,9 @@ pub struct KvReplay {
     pub store_connections: usize,
     /// With `store_connections`: stores each worker may hold queued, not yet
     /// started. A store that finds the queue full is dropped whole and
-    /// counted in `kv_stores_dropped`. Unset (the default) is no limit.
+    /// counted in `kv_stores_dropped`. A store put back after it reached a
+    /// closed store connection goes in even when the queue is full. Unset
+    /// (the default) is no limit.
     #[serde(default)]
     pub store_queue: Option<usize>,
 }
@@ -1887,14 +1889,14 @@ mod validation_tests {
                 "[connection]\nconnections = 4",
                 "fewer than connection.connections",
             ),
-            // Worker 1 would have no writer: 1 store connection over 2 threads.
+            // Worker 1 would have no store connection: 1 over 2 threads.
             (
                 "store_connections = 1",
                 "[general]\nthreads = 2\n[connection]\nconnections = 4",
                 "every worker",
             ),
-            // Worker 1 would have no reader: 3 connections over 2 threads
-            // give it 1, and 2 store connections give it 1.
+            // Worker 1 would have no lookup connection: 3 connections over 2
+            // threads give it 1, and 2 store connections give it 1.
             (
                 "store_connections = 2",
                 "[general]\nthreads = 2\n[connection]\nconnections = 3",

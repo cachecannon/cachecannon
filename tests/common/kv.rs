@@ -53,6 +53,9 @@ pub struct Hooks {
     /// After replying to this many SETs in total, wait this long and close
     /// the connection, as a server closes an idle connection.
     pub close_after_sets: Option<(usize, Duration)>,
+    /// With `close_after_sets`: stop accepting connections when it closes,
+    /// so every reconnect is refused while the other connections stay open.
+    pub refuse_after_close: bool,
     /// After replying to this many SETs in total, wait this long and shut
     /// down every connection open then, as an idle timeout closing all idle
     /// connections at once.
@@ -264,6 +267,12 @@ fn serve(stream: TcpStream, state: Arc<Mutex<State>>) {
         }
         if let Some(after) = close {
             std::thread::sleep(after);
+            {
+                let mut st = state.lock().unwrap();
+                if st.hooks.refuse_after_close {
+                    st.refusing = true;
+                }
+            }
             // Shut down rather than only drop: another handle to the socket
             // (kept for `close_all_after_sets`) would keep it open.
             let _ = writer.shutdown(std::net::Shutdown::Both);
