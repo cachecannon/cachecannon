@@ -340,6 +340,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     a `query worker:` error.
 
 ### Fixed
+- The `io_engine` line printed at startup and the JSON output's `engine`
+  field name the I/O backend the binary was built with. Since 0.0.12 they
+  said `io_uring` for every Linux build, including one built on a kernel too
+  old for ringline's io_uring driver (older than 6.1 in this release, 6.0 in
+  earlier ones), where ringline uses mio.
 - The viewer's Server and Client sections draw their charts. Their queries
   went to the benchmark recording, so every one returned `Metric not found`.
   Each section now queries its own recording, over that recording's time range.
