@@ -555,10 +555,13 @@ fn default_kv_key_prefix() -> String {
 
 /// Configuration for saturation search mode.
 ///
-/// When enabled, the benchmark will start at `start_rate` and geometrically
-/// increase the rate by `step_multiplier` after each `sample_window`. The
-/// search stops when the SLO is violated for `stop_after_failures` consecutive
-/// steps, and reports the last compliant rate.
+/// When enabled, the benchmark starts at `start_rate` and multiplies the rate
+/// by `step_multiplier` after each passing `sample_window`. At the first
+/// confirmed failure it bisects between the last passing rate and the failing
+/// rate until the interval is within `bisect_tolerance` or `max_bisect_steps`
+/// bisection steps have run, and reports the highest passing rate. While no
+/// rate has passed, `floor_improvement_ratio` can end the search early with
+/// no knee.
 #[derive(Debug, Clone, Deserialize)]
 pub struct SaturationSearch {
     /// SLO thresholds that must be met.
@@ -580,7 +583,8 @@ pub struct SaturationSearch {
     /// measurements. The drain window discards that period before sampling.
     #[serde(default = "default_drain_window", with = "humantime_serde")]
     pub drain_window: Duration,
-    /// Number of consecutive SLO failures before stopping.
+    /// Deprecated and ignored. A value other than the default logs a warning;
+    /// `bisect_tolerance` and `max_bisect_steps` end the search.
     #[serde(default = "default_stop_after_failures")]
     pub stop_after_failures: u32,
     /// Maximum rate to try (absolute ceiling).
@@ -594,7 +598,6 @@ pub struct SaturationSearch {
     /// Default is 0.9 (90%).
     #[serde(default = "default_min_throughput_ratio")]
     pub min_throughput_ratio: f64,
-    /// Relative interval width at which bisection stops (0.0-1.0).
     /// Extra consecutive measurements required to confirm an SLO failure
     /// before the search acts on it.
     ///
@@ -630,9 +633,11 @@ pub struct SaturationSearch {
     /// "SLO never met". Set to 0 to disable and always bisect to the step limit.
     #[serde(default = "default_floor_improvement_ratio")]
     pub floor_improvement_ratio: f64,
+    /// Relative interval width at which bisection stops (0.0-1.0).
     #[serde(default = "default_bisect_tolerance")]
     pub bisect_tolerance: f64,
-    /// Hard cap on the number of bisection probes.
+    /// Hard cap on the number of bisection steps. A failing midpoint that is
+    /// re-measured under `confirm_failures` counts as one step.
     #[serde(default = "default_max_bisect_steps")]
     pub max_bisect_steps: u32,
 }

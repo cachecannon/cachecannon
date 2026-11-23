@@ -48,11 +48,16 @@ cargo build --release
 # Binary is at ./target/release/cachecannon
 ```
 
-Requires Rust 1.89+ and Linux 6.0+ (for io_uring support).
+Requires Rust 1.89+ and Linux 6.1+ (for io_uring support).
 
 </details>
 
 ## Quick Start
+
+The `config/` paths below are in a checkout of this repository. The packages
+install only the commented example config, at
+`/etc/cachecannon/benchmark.toml.example`; copy and edit it, or fetch a file
+from [`config/`](config/).
 
 ```bash
 # Run against a local Valkey or Redis server
@@ -69,7 +74,7 @@ cachecannon view results.parquet
 ## Features
 
 - **Multiple protocols** — Valkey/Redis RESP2/RESP3, Memcache ASCII/binary, Ping
-- **io_uring I/O** — Same high-performance ringline framework as the server (Linux 6.0+)
+- **io_uring I/O** — Same high-performance ringline framework as the server (Linux 6.1+)
 - **Request pipelining** — Configurable pipeline depth per connection
 - **Latency histograms** — p50, p90, p99, p99.9, p99.99, plus GET time-to-first-byte
 - **[Prefill and backfill](docs/guide.md#prefill)** — Pre-populate the cache or auto-SET on miss (cache-aside)

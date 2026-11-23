@@ -714,7 +714,7 @@ pub fn run_benchmark_full(
 
         // Check if we're done.
         // When saturation search is configured, the search controls its own
-        // termination (stop_after_failures, max_rate), so we only stop on
+        // termination (bisection tolerance, step cap, latency-floor stop, max_rate), so we only stop on
         // the duration timer if no saturation search is configured.
         let saturation_done = saturation_state.as_ref().is_some_and(|s| s.is_completed());
         let has_saturation = config.workload.saturation_search.is_some();

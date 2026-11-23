@@ -24,12 +24,6 @@ threads = 4
 # Formats: "0-3", "0,2,4,6", "0-3,8-11"
 cpu_list = "0-3"
 
-# I/O engine selection
-# "auto" - Use io_uring if available, fallback to mio
-# "uring" - Force io_uring (Linux 6.0+ only)
-# "mio" - Force mio (portable)
-io_engine = "auto"
-
 # Print ringline's per-worker event-loop diagnostics to stderr at shutdown
 # (`[ringline diag]` iteration mix and `[ringline stall]` stall buckets).
 # io_uring only; off by default.
@@ -654,9 +648,6 @@ sample_window = "5s"
 # Drain in-flight requests after a rate change before sampling
 drain_window = "500ms"
 
-# Stop after this many consecutive SLO violations
-stop_after_failures = 3
-
 # Maximum rate to try (absolute ceiling)
 max_rate = 100000000
 
@@ -678,9 +669,12 @@ floor_improvement_ratio = 0.10
 # Relative interval width at which the bisection stops (0.0-1.0)
 bisect_tolerance = 0.05
 
-# Hard cap on the number of bisection probes
+# Hard cap on the number of bisection steps
 max_bisect_steps = 8
 ```
+
+`stop_after_failures` is deprecated and ignored; a value other than 3 logs a
+warning.
 
 The latency half of the SLO is evaluated against **perceived** latency
 (`response_latency + schedule_slip`), not response latency alone. See
