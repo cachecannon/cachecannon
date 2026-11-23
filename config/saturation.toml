@@ -52,9 +52,6 @@ sample_window = "5s"
 # Prevents old-rate responses from biasing the new step's measurements.
 drain_window = "500ms"
 
-# Stop after this many consecutive SLO violations
-stop_after_failures = 3
-
 # Maximum rate to try (absolute ceiling)
 max_rate = 100000000
 

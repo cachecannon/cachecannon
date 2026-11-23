@@ -592,7 +592,7 @@ This lets you distinguish organic write traffic from cache-filling writes when a
 
 ## Saturation Search
 
-Saturation search automatically finds the **maximum throughput that meets your latency SLO**. Instead of manually tuning rate limits, the benchmark starts at a low rate and geometrically increases until the SLO is consistently violated.
+Saturation search automatically finds the **maximum throughput that meets your latency SLO**. Instead of manually tuning rate limits, the benchmark starts at a low rate, raises it geometrically until a step fails the SLO, then bisects between the last passing rate and the failing one.
 
 ### Enabling Saturation Search
 
@@ -611,9 +611,6 @@ step_multiplier = 1.05
 # Duration to sample at each rate level
 sample_window = "5s"
 
-# Stop after this many consecutive SLO violations
-stop_after_failures = 3
-
 # Maximum rate to try (absolute ceiling)
 max_rate = 100000000
 
@@ -631,11 +628,14 @@ min_throughput_ratio = 0.9
 4. Check the dual SLO:
    - **Latency**: All specified percentile thresholds must be met (e.g., p99.9 < 1ms), measured against **perceived** latency — see [Perceived latency is the criterion](#perceived-latency-is-the-criterion)
    - **Throughput**: Achieved throughput must be at least `min_throughput_ratio` of the target rate (default: 90%). This detects when the server can't keep up regardless of latency.
-5. If the SLO passes: record this rate as the current maximum, multiply by `step_multiplier`, continue
+5. If the SLO passes: record this rate as the last passing rate, multiply by `step_multiplier`, continue
 6. If the SLO fails: re-measure the same rate `confirm_failures` more times (default 1) before acting on it; a retry that passes clears the failure
-7. If consecutive failures reach `stop_after_failures` (default: 3): stop and report
-8. Otherwise: continue stepping up
-9. The rate is capped at `max_rate` (default: 100M req/s)
+7. At the first confirmed failure: bisect between the last passing rate (0 if none) and the failing rate, probing the midpoint each step
+8. Stop when (upper − lower) / upper ≤ `bisect_tolerance` (default 0.05) or after `max_bisect_steps` bisection steps (default 8), and report the lower bound as the knee; if no rate passed, no knee is reported. A failing midpoint is re-measured under `confirm_failures` before it counts as a step.
+   - While no rate has passed, if halving the rate improves the response-latency SLO percentile (p999 if set, else p99, else p50) by less than `floor_improvement_ratio` (default 0.10), the search stops and reports no knee: the target's latency floor is above the SLO.
+9. The climb is capped at `max_rate` (default: 100M req/s); a pass at `max_rate` ends the search there
+
+`stop_after_failures` is deprecated: a value other than 3 logs a warning and is otherwise ignored.
 
 ### SLO Options
 
@@ -1072,7 +1072,6 @@ Use round-robin unless you're specifically testing pipeline batching behavior.
 # which is what you want here. Setting it explicitly caps the generator, and
 # nothing in the output tells you that you did — see "Is the generator the
 # bottleneck?" below.
-io_engine = "uring"
 
 [connection]
 connections = 64           # see "Sizing connections" below
@@ -1092,7 +1091,6 @@ length = 64                # Small values
 [general]
 threads = 4                # Deliberate: must match the cpu_list below
 cpu_list = "0-3"           # Pin to dedicated cores
-io_engine = "uring"
 
 [connection]
 connections = 4            # 1 per thread
@@ -1345,8 +1343,7 @@ configuration.
 For consistent measurements:
 1. Use `cpu_list` to pin threads to dedicated cores
 2. Disable CPU frequency scaling
-3. Use `io_engine = "uring"` on Linux 6.0+
-4. Increase warmup period
+3. Increase warmup period
 
 ### Memory Usage
 
