@@ -44,7 +44,7 @@ impl OutputFormatter for VerboseFormatter {
             );
             tracing::info!("value_size: {} bytes", config.workload.values.length);
         }
-        tracing::info!("io_engine: ringline ({})", crate::output::IO_ENGINE);
+        tracing::info!("io_engine: ringline ({})", ringline::backend());
         // The geometry that decides whether a response lands in one buffer or
         // several, and how many can land at once per worker. Printed because it
         // is derived rather than configured by default, and because it is the

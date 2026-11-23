@@ -313,7 +313,7 @@ fn config_output(config: &Config) -> ConfigOutput {
                 crate::config::KvKeyFormat::Decimal => "decimal",
             },
         }),
-        engine: crate::output::IO_ENGINE.to_string(),
+        engine: ringline::backend().to_string(),
         ratelimit: config.workload.rate_limit,
         warmup_secs: config.general.warmup.as_secs(),
         duration_secs: config.general.duration.as_secs(),

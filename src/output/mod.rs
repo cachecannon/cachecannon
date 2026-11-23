@@ -12,12 +12,6 @@ mod json;
 mod quiet;
 mod verbose;
 
-/// Name of the ringline I/O backend in use on this platform.
-#[cfg(target_os = "linux")]
-pub const IO_ENGINE: &str = "io_uring";
-#[cfg(not(target_os = "linux"))]
-pub const IO_ENGINE: &str = "mio";
-
 /// How a KV replay is configured, for the clean and verbose config summaries:
 /// the trace, its timing, the geometry input and the write rule. A KV replay
 /// ignores the synthetic keyspace and value settings, so the summaries print
