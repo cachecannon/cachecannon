@@ -764,6 +764,10 @@ protocol = "resp"
 cluster = true
 ```
 
+`protocol = "resp"`, `"resp3"` and `"dma"` support cluster mode. Under `dma`, `[dma] module`
+must be `"vdma"`. Each DMA connection sends its hello to the node it serves, and the redirect
+handling below applies to `DMA.GET` and `DMA.SET` as it does to GET and SET.
+
 ### How It Works
 
 **Topology Discovery:**

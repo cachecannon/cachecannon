@@ -1965,17 +1965,10 @@ async fn drive_resp_workload(
 
                 write_key(key_buf, key_id);
 
-                // Keys were partitioned to this endpoint at init time, so
-                // routing should always match. The only way it wouldn't is
-                // a slot-table update mid-prefill (RESP cluster topology
-                // change). In that case, hand the key to the new owner's
-                // queue and move on — no busy-loop.
-                if multi_endpoint {
-                    let routed = route_key(&state.task_state, key_buf);
-                    if routed != endpoint_idx {
-                        state.task_state.prefill_queues.push_back(routed, key_id);
-                        continue;
-                    }
+                if multi_endpoint
+                    && handed_to_new_owner(&state.task_state, endpoint_idx, key_buf, key_id)
+                {
+                    continue;
                 }
 
                 // Pace after the key is known to be ours: a token taken for an
@@ -2664,7 +2657,7 @@ pub(crate) fn map_respmeta(meta: ringline_redis::RespMeta) -> RequestResult {
 }
 
 /// Parse a Valkey/Redis error message for MOVED/ASK redirect.
-fn parse_resp_redirect(msg: &str) -> Option<resp_proto::Redirect> {
+pub(crate) fn parse_resp_redirect(msg: &str) -> Option<resp_proto::Redirect> {
     let (kind, rest) = if let Some(rest) = msg.strip_prefix("MOVED ") {
         (resp_proto::RedirectKind::Moved, rest)
     } else {
@@ -2684,7 +2677,10 @@ fn parse_resp_redirect(msg: &str) -> Option<resp_proto::Redirect> {
 }
 
 /// Handle a parsed MOVED redirect by updating the slot table.
-fn check_resp_redirect_parsed(redirect: &resp_proto::Redirect, state: &Arc<SharedWorkerState>) {
+pub(crate) fn check_resp_redirect_parsed(
+    redirect: &resp_proto::Redirect,
+    state: &Arc<SharedWorkerState>,
+) {
     metrics::CLUSTER_REDIRECTS.increment();
 
     if redirect.kind != resp_proto::RedirectKind::Moved {
@@ -2996,15 +2992,10 @@ async fn drive_memcache_workload(
 
                 write_key(key_buf, key_id);
 
-                // Keys were partitioned to this endpoint at init time; only
-                // a slot-table change mid-prefill can land one here that no
-                // longer routes to us. Hand it to the new owner's queue.
-                if multi_endpoint {
-                    let routed = route_key(&state.task_state, key_buf);
-                    if routed != endpoint_idx {
-                        state.task_state.prefill_queues.push_back(routed, key_id);
-                        continue;
-                    }
+                if multi_endpoint
+                    && handed_to_new_owner(&state.task_state, endpoint_idx, key_buf, key_id)
+                {
+                    continue;
                 }
 
                 // Pace after the key is known to be ours: a token taken for an
@@ -4902,6 +4893,23 @@ pub(crate) fn max_routing_attempts(num_endpoints: usize) -> usize {
 pub(crate) fn route_key(state: &TaskSharedState, key: &[u8]) -> usize {
     let slot_table = state.slot_table.read().unwrap();
     route_partition(&slot_table, &state.ring, state.endpoints.len(), key)
+}
+
+/// Hand a prefill key to its owner's queue when a slot-table change mid-prefill (a cluster MOVED)
+/// routes it away from `endpoint_idx`, the only way it can land on a queue it doesn't route to.
+/// True if it went elsewhere. `key_buf` holds the key.
+pub(crate) fn handed_to_new_owner(
+    state: &TaskSharedState,
+    endpoint_idx: usize,
+    key_buf: &[u8],
+    key_id: usize,
+) -> bool {
+    let routed = route_key(state, key_buf);
+    if routed == endpoint_idx {
+        return false;
+    }
+    state.prefill_queues.push_back(routed, key_id);
+    true
 }
 
 /// Drain in-flight prefill keys on disconnect and re-route each one against

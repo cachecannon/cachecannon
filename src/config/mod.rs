@@ -1255,6 +1255,14 @@ impl Config {
             }
 
             #[cfg(feature = "dma")]
+            if self.target.cluster && self.dma.module != DmaModule::Vdma {
+                return Err(ConfigError::Validation(
+                    "cluster = true with protocol = \"dma\" needs [dma] module = \"vdma\""
+                        .to_string(),
+                ));
+            }
+
+            #[cfg(feature = "dma")]
             if let Some(capacity) = self.dma.buffer_capacity
                 && capacity < self.workload.values.length
             {
@@ -3113,6 +3121,30 @@ mod append_config_tests {
             dma_config("module = \"vdma\"").unwrap().dma.module,
             DmaModule::Vdma
         );
+    }
+
+    #[cfg(feature = "dma")]
+    fn dma_cluster_config(module: &str) -> Result<Config, ConfigError> {
+        parse_config(&format!(
+            r#"
+            [target]
+            endpoints = ["127.0.0.1:6379"]
+            protocol = "dma"
+            cluster = true
+            [workload.values]
+            length = 4096
+            [dma]
+            module = "{module}"
+            "#
+        ))
+    }
+
+    #[cfg(feature = "dma")]
+    #[test]
+    fn dma_cluster_needs_vdma() {
+        assert!(dma_cluster_config("vdma").unwrap().target.cluster);
+        let error = dma_cluster_config("largeobj").unwrap_err().to_string();
+        assert!(error.contains("module = \"vdma\""), "{error}");
     }
 
     #[cfg(feature = "dma")]

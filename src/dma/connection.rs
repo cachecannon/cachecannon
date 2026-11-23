@@ -19,8 +19,9 @@ use crate::config::{DmaModule, DmaProvider};
 use crate::keydist::KeyDist;
 use crate::metrics;
 use crate::worker::{
-    CloseOnDrop, DisconnectReason, InFlight, Phase, SharedWorkerState, confirm_prefill_key,
-    dispatcher, establish_connection, max_routing_attempts, record_counters, recv_with_timeout,
+    CloseOnDrop, DisconnectReason, InFlight, Phase, SharedWorkerState, check_resp_redirect_parsed,
+    confirm_prefill_key, dispatcher, establish_connection, handed_to_new_owner,
+    max_routing_attempts, parse_resp_redirect, record_counters, recv_with_timeout,
     resolve_tls_server_name, route_key, take_token, value_offset, wait_for_token, write_key,
 };
 
@@ -283,6 +284,12 @@ async fn run_transfers(
         let (key_id, op, source) = if prefill {
             match state.task_state.prefill_queues.pop_front(endpoint_idx) {
                 Some(key_id) => {
+                    write_key(key_buf, key_id);
+                    if multi_endpoint
+                        && handed_to_new_owner(&state.task_state, endpoint_idx, key_buf, key_id)
+                    {
+                        continue;
+                    }
                     // Pace after the key is known: a token taken for an empty queue would be
                     // spent on nothing while another connection waits for it.
                     if let Some(ref pacer) = state.task_state.prefill_ratelimiter
@@ -459,8 +466,15 @@ async fn run_transfers(
 
         let failed = outcome.is_err();
         // The server replied with an ERR. Anything else is the socket or the fabric.
-        let is_error_response =
-            matches!(outcome, Err(Error::Resp(ringline_redis::Error::Redis(_))));
+        let (is_error_response, redirect) = match &outcome {
+            Err(Error::Resp(ringline_redis::Error::Redis(message))) => {
+                (true, parse_resp_redirect(message))
+            }
+            _ => (false, None),
+        };
+        if let Some(ref redirect) = redirect {
+            check_resp_redirect_parsed(redirect, state);
+        }
         record_counters(&RequestResult {
             id: key_id as u64,
             success: !failed,
@@ -474,7 +488,7 @@ async fn run_transfers(
             backfill: source == Source::Backfill,
             prefill: source == Source::Prefill,
             append: false,
-            redirect: None,
+            redirect,
         });
 
         if backfill_on_miss && hit == Some(false) {
