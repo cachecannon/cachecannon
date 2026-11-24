@@ -8,7 +8,7 @@ A high-performance load generator for cache servers with support for multiple pr
 curl -fsSL https://cachecannon.cc/install.sh | bash
 ```
 
-This configures the package repository for your OS and installs cachecannon. Future updates come through `apt upgrade` or `dnf upgrade`. Supports Debian/Ubuntu and RHEL/Fedora on amd64 and arm64.
+This configures the package repository for your OS and installs cachecannon. Future updates come through `apt upgrade` or `dnf upgrade`. Supports Debian/Ubuntu and RHEL/Fedora on amd64 and arm64. The packages are built with io_uring and need Linux 6.1 or later; on an older kernel, [build from source](#build-from-source) (under Other installation methods) on that host.
 
 <details>
 <summary>Other installation methods</summary>
@@ -48,7 +48,12 @@ cargo build --release
 # Binary is at ./target/release/cachecannon
 ```
 
-Requires Rust 1.89+ and Linux 6.1+ (for io_uring support).
+Requires Rust 1.89+. Runs on Linux and macOS. The I/O backend is chosen when
+the binary is built: io_uring if the build machine runs Linux 6.1 or later,
+otherwise ringline's mio backend. A binary built with io_uring does not fall
+back to mio at run time, so it needs Linux 6.1 or later on the host where it
+runs. To build with mio on a 6.1+ machine, for example for an older
+deployment host, pass `--features ringline/force-mio`.
 
 </details>
 
@@ -74,7 +79,7 @@ cachecannon view results.parquet
 ## Features
 
 - **Multiple protocols** — Valkey/Redis RESP2/RESP3, Memcache ASCII/binary, Ping
-- **io_uring I/O** — Same high-performance ringline framework as the server (Linux 6.1+)
+- **I/O backend** — ringline, on io_uring or mio as chosen at build time (see [Build from source](#build-from-source), under Other installation methods). The published packages use io_uring and need Linux 6.1 or later
 - **Request pipelining** — Configurable pipeline depth per connection
 - **Latency histograms** — p50, p90, p99, p99.9, p99.99, plus GET time-to-first-byte
 - **[Prefill and backfill](docs/guide.md#prefill)** — Pre-populate the cache or auto-SET on miss (cache-aside)
@@ -154,7 +159,7 @@ cachecannon config/valkey.toml
 | Feature | cachecannon | valkey-benchmark | memtier_benchmark |
 |---------|-------------------|-----------------|-------------------|
 | io_uring support | Yes | No | No |
-| Zero-copy send | Yes | No | No |
+| Zero-copy send | Yes (io_uring builds) | No | No |
 | Multiple protocols | RESP, Memcache | RESP only | RESP, Memcache |
 | Parquet export | Yes | No | No |
 | Web dashboard | Yes | No | No |

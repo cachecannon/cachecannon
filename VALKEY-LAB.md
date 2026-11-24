@@ -2,7 +2,7 @@
 
 A high-performance Valkey/Redis benchmark tool powered by [cachecannon](https://github.com/cachecannon/cachecannon).
 
-Uses `io_uring` for kernel-bypassed I/O, per-connection pipelining, and multi-threaded workers to saturate modern cache servers.
+It uses the same engine as cachecannon (ringline, on io_uring or mio as chosen at build time), per-connection pipelining, and multi-threaded workers.
 
 ## Quick Start
 
@@ -26,7 +26,7 @@ valkey-lab saturate --slo-p999 1ms --start-rate 100000
 cargo install --path . --bin valkey-lab
 ```
 
-Requires Linux (io_uring). Tested on kernel 5.10+.
+Runs on Linux and macOS. It uses io_uring when built on Linux 6.1 or later, and ringline's mio backend otherwise. The backend is fixed when the binary is built, so an io_uring build needs Linux 6.1 or later on the host where it runs. The cachecannon apt and yum repositories also carry a `valkey-lab` package, and install.sh installs it. It is built with io_uring and needs Linux 6.1 or later. To build with mio on a 6.1+ machine, pass `--features ringline/force-mio`.
 
 ## CLI Reference
 
@@ -160,7 +160,7 @@ valkey-lab saturate --slo-p999 1ms --start-rate 100000 --step 1.1 -c 16 -P 32
 
 valkey-lab is an additive companion binary that ships alongside cachecannon. It provides a streamlined CLI for the most common use case — benchmarking Valkey/Redis servers — while cachecannon remains the full-featured tool supporting TOML configs, Memcache, and advanced workflow options.
 
-Both binaries share the same engine: io_uring workers, latency histograms, cluster discovery, prefill/backfill, saturation search, and Parquet output.
+Both binaries share the same engine: ringline workers, latency histograms, cluster discovery, prefill/backfill, saturation search, and Parquet output.
 
 ## License
 
