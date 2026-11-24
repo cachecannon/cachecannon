@@ -1523,7 +1523,7 @@ pub fn key_share_endpoints(shares: &[f64], total: usize) -> Vec<usize> {
 ///
 /// Every connection task closes its connection before it reconnects and when
 /// it returns, including after a failed HELLO, precheck or DMA hello. Since
-/// ringline 5b546b7, dropping the last half of a connection closes it, with
+/// ringline #743, dropping the last half of a connection closes it, with
 /// the same graceful close as `close()`; a client owns both halves. Each task
 /// keeps the `Connection`, then the client built on it, in a local of its
 /// reconnect loop's body, so the drop at `continue`, at the end of the body,
@@ -4452,17 +4452,12 @@ impl RecvFailed {
 /// caller closes the connection with it as soon as the recv future is dropped,
 /// requeues its own bookkeeping and reconnects.
 ///
-/// The deadline timer is not armed per recv. When this was written, a ringline
-/// timer was an io_uring timeout SQE, and cancelling a pending one
-/// (`io_timeout_cancel`) walked the ring's whole pending-timeout list, which
-/// held about one timer per connection, so arming a timeout for every reply
-/// and cancelling it when the reply arrived made each reply cost
-/// O(connections per worker). Profiled at 4096 closed-loop connections on 8
-/// workers, that cancel was 69% of generator CPU and pinned every worker; with
-/// the timeout disabled the same cell used 2.16 cores and ran 22% faster.
-/// Since ringline #838 a timer is an entry in a per-worker heap and submits
-/// nothing to the ring, so that cost is gone; a timer per recv would now cost
-/// a heap insert and a removal per reply, which has not been measured here.
+/// The deadline timer is not armed per recv. A ringline timer is an entry in
+/// a per-worker heap and submits nothing to the ring (ringline #838), so a
+/// timer per recv would cost a heap insert and a removal per reply, which has
+/// not been measured here. The repo's CLAUDE.md ("Price any per-request
+/// timer") records the cost of the io_uring timeout timers ringline used
+/// before #838.
 ///
 /// Instead the timer lives in `InFlight` across recvs. It is armed for the
 /// oldest request's deadline and left running when that reply arrives. The

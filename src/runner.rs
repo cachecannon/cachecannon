@@ -363,9 +363,10 @@ pub fn run_benchmark_full(
                 if e.to_string().contains("RLIMIT_MEMLOCK") =>
             {
                 format!(
-                    "{e}\ncachecannon: raise the limit (`ulimit -l`), or run fewer workers \
-                     (`general.threads`) or connections; the connection table is sized from \
-                     the workload and has no setting"
+                    "{e}\ncachecannon: raise the limit (`ulimit -l`) or run fewer connections: \
+                     the rings need about 330-660 bytes per connection plus at least 44 KiB \
+                     per worker, and the connection table is sized from the workload and has \
+                     no setting"
                 )
                 .into()
             }

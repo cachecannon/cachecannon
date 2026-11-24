@@ -1133,7 +1133,31 @@ it raises offered load, so a wide sweep can walk the generator into saturation
 while the request rate stays flat. Sweep connections with the generator-bound
 check below in the loop, not after it.
 
+One worker holds at most 16,000 connections, main and append together. A
+config that puts more on one worker is refused at startup; raise `threads`.
+
+On Linux 6.14 to 7.2 (except 7.2.y from 7.2.11 and 6.18.y from 6.18.58), each
+worker's io_uring rings count against `RLIMIT_MEMLOCK`, summed over all of the
+user's processes. The rings are sized from the connection count: about 330 to
+660 bytes per connection, and at least 44 KiB per worker. When they do not fit
+under the hard limit, startup fails; see
+[Startup fails on RLIMIT_MEMLOCK](#startup-fails-on-rlimit_memlock).
+
 ## Troubleshooting
+
+### Startup fails on RLIMIT_MEMLOCK
+
+```
+... RLIMIT_MEMLOCK ...
+cachecannon: raise the limit (`ulimit -l`) or run fewer connections: ...
+```
+
+The io_uring rings for the configured connections do not fit under the
+locked-memory limit (see [Sizing connections](#sizing-connections)). Raise it
+for the shell that runs cachecannon (`ulimit -l unlimited`, which needs the
+hard limit to allow it; `sudo prlimit --pid $$ --memlock=unlimited:unlimited`
+raises both), or lower `connections`. Under systemd the default is 8 MiB,
+which holds about 13,000 to 25,000 connections in total.
 
 ### Connection Refused
 

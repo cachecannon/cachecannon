@@ -269,7 +269,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     ringline keeps the arrival log behind it on every connection. ringline
     #672 estimates the log at 1-3% of server CPU per request from A/B runs
     of an earlier lookup, and measured +0.4% at one cell for the current
-    one. Its cost in cachecannon has not been measured.
+    one. In cachecannon, generator-limited (2 workers, 256 connections,
+    pipeline 16, 64 B values against memcached), reading each reply's
+    arrival cost about 2.9% of throughput and the log's upkeep about 2.1%,
+    with `Instant` times; ringline #1017 (below) removes most of the first.
   - The timer pool is ringline's fixed 65,536 slots per worker (ringline
     #661). cachecannon sized it at two timers per connection on each worker.
     ringline's connection table holds 16,000 connections per worker, which
@@ -282,7 +285,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   are counted in `requests_send_failed`. Before, the cap was applied without
   a message.
 - rustls 0.23.45 → 0.23.46 for RUSTSEC-2026-0346, -0347, -0348 and -0349,
-  published 2026-10-14, which failed `cargo audit` in CI.
+  published 2026-10-14, which failed `cargo audit` in CI. rustls has since
+  left the build (TLS comes from ringline's fork, `ringline-tls`; see the
+  ringline move below), so `cargo audit` no longer reports rustls
+  advisories against cachecannon.
 - `keyspace.zipf_theta` must now be in (0, 10]; larger values were accepted
   before. A large theta could underflow every key weight on an endpoint,
   which the per-endpoint alias tables cannot sample.
@@ -354,34 +360,57 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     64 B and 4 KiB unpipelined. Against memcached with 16,000 connections it
     measured 11% less client CPU per GET at 4 KiB depth 16, 12% less at
     64 KiB depth 1, and 2-4% more at 64 B depth 1. Those are ringline's
-    measurements; no cachecannon run has compared the two receive paths.
-  - `ringline/pool{op="recv_parked"}`, `{op="recv_fallback"}`,
-    `{op="forward_throttled"}` and `ringline/bytes{op="fallback_received"}`
-    are no longer in `/metrics` or the parquet recording; they counted the
-    removed ring. `ringline/recv_direct` counts the new receives, and
-    `ringline/pool{op="standalone_tasks_exhausted"}` counts connection tasks
-    a worker could not spawn.
+    measurements, taken on builds without the `POLLRDHUP` poll; the
+    16,000-connection figures are from one or two runs. No cachecannon run
+    has compared the two receive paths directly.
+  - These ringline series are no longer in `/metrics` or the parquet
+    recording, most of them because they counted the removed ring:
+    `ringline/recv_preflight_failed`; every `ringline/recv_ring` op except
+    `bytes_copied` (`plain`, `incremental`, `view_created`, `view_released`,
+    `view_release_dropped`, `view_release_remote`, `threshold_copied`,
+    `hold_cap_copied`, `lend_refused`); `ringline/pool` ops `recv_parked`,
+    `recv_fallback`, `forward_throttled` and `segment_stranded_adopted`;
+    `ringline/bytes{op="fallback_received"}`; `ringline/park_abandoned` ops
+    `chain`, `direct_echo`, `forward_write`, `recv_fallback`,
+    `segment_reader` and `tls_session`; `ringline/park_diag{op="rearm_suppressed"}`;
+    and `ringline/connections{op="accept_backlog_dropped"}`. New series
+    include `ringline/recv_direct`, which counts the new receives,
+    `ringline/pool{op="standalone_tasks_exhausted"}`, which counts connection
+    tasks a worker could not spawn, `ringline/ring` ops `cq_overflow`,
+    `cqe_dropped`, `cqe_dropped_reported`, `push_retry_waits` and
+    `send_fixed_buffer`, and the gauges `ringline/ring/push_retries_pending`,
+    `ringline/ring/fixed_buffer_sends` and
+    `ringline/ring/fixed_buffer_sends_base_pages`.
   - Timers no longer submit anything to the io_uring ring
     (ringline-rs/ringline#838): the request-timeout timer, the connect
     timeout and every `sleep` in the idle and rate-limit paths are entries in
     a per-worker heap, with no SQE or CQE each, and a timer that is dropped
     before it fires submits no cancel.
-  - The io_uring backend needs Linux 6.8 or later (was 6.1;
-    ringline-rs/ringline#932). A build on an older Linux host gets the mio
-    backend without an error, which the `io_engine` line names; an io_uring
-    build fails at launch on an older kernel.
-  - Each worker's ring defaults to 4096 submission and 65536 completion
-    entries (was 256 and 1024), about 2.5 MiB per worker. Linux 6.14 to 7.2,
-    except 7.2.y from 7.2.11 and 6.18.y from 6.18.58, charges that to
-    `RLIMIT_MEMLOCK` summed over the user's processes. Under a lower limit
-    ringline shrinks the rings. cachecannon sets each worker's connection
-    table to twice the busiest worker's main and append connections, and
-    ringline does not shrink the rings below what that table needs; when they
-    do not fit, the run fails at startup with ringline's error, which names
-    the limit, and a line naming `ulimit -l`, `general.threads` and the
-    connection count. Left at ringline's default, the table would shrink with
-    the rings and the connections past it would fail to connect while the run
-    continued.
+  - Breaking: the packages, and any binary built with io_uring, need Linux
+    6.8 or later (was 6.1; ringline-rs/ringline#932). On an older kernel,
+    for example Debian 12's 6.1, they fail at launch. A build on an older
+    Linux host gets the mio backend without an error, which the `io_engine`
+    line names; `--features ringline/force-mio` selects it on any host.
+  - Breaking: each worker's ring defaults to 4096 submission and 65536
+    completion entries (was 256 and 1024), about 2.5 MiB per worker. Linux
+    6.14 to 7.2, except 7.2.y from 7.2.11 and 6.18.y from 6.18.58, charges
+    that to `RLIMIT_MEMLOCK` summed over the user's processes. ringline
+    raises the soft limit when the hard limit allows, and under a lower hard
+    limit shrinks the rings. cachecannon sets each worker's connection table
+    to twice the busiest worker's main and append connections, at most
+    16,000, and ringline does not shrink the rings below what that table
+    needs: about 330 to 660 bytes per connection (the completion ring is a
+    power of two), and at least 44 KiB per worker. When they do not fit, the
+    run fails at startup with ringline's error, which names the limit, and a
+    line naming `ulimit -l` and the connection count. Under systemd's default
+    8 MiB limit on those kernels, a run of more than about 13,000 to 25,000
+    connections in total that ran on v0.0.34 fails until the limit is
+    raised. Left at ringline's default, the table would shrink with the
+    rings and the connections past it would fail to connect while the run
+    continued. The smaller table also means that against a server that
+    stops reading, connections closing after a request timeout, whose
+    queued sends drain with no time bound, can hold every spare slot, and
+    later reconnects fail and count in `disconnects_connect_failed`.
   - Breaking: more than 16,000 connections (main and append) on one worker is
     refused at startup, naming `general.threads`. Before, the connections past
     ringline's 16,000-slot table failed to connect and were retried while the
@@ -415,11 +444,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     logger forwards: the `general.ringline_diag` lines are logged at `info`,
     and the `[ringline diag]` line no longer has `parks=` or `fallbacks=`.
   - Each reply's GET TTFB is computed from integer nanosecond times
-    (ringline-rs/ringline#1017) instead of `Instant` arithmetic. In a
-    generator-limited memcache run (2 workers on one core, 256 connections,
-    pipeline 16, 64 B values, 5 rounds) that raised throughput by 2.0%
-    [1.6%, 3.5%] and cut client user instructions per response by 4.3%
-    against ringline 5b546b7.
+    (ringline-rs/ringline#1017) instead of `Instant` arithmetic. Measured on
+    #1017's branch head against ringline 5b546b7, with 2 workers on vCPUs
+    0-1, 256 connections, pipeline 16 and 64 B values against memcached, 5
+    paired rounds: client user instructions per response fell by a median
+    4.3% (range 4.0-5.3%; two identical builds differed by at most 0.4%),
+    and throughput rose by a median 2.0% (range 1.6-3.5%; identical builds
+    -0.7% to +1.8%).
 
 ### Fixed
 - `install.sh` on macOS or another non-Linux host says there is no package

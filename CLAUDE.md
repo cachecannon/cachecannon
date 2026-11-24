@@ -81,7 +81,7 @@ enough to meet the 1 s deadline, so the run also reported ~480K timeouts per
 60 s that the timer had caused.
 
 That cost came from ringline's timers being io_uring timeout SQEs. Since
-ringline #838 (in cachecannon from the move to ringline 5b546b7) a timer is an
+ringline #838 a timer is an
 entry in a per-worker heap and submits nothing to the ring, so a per-recv timer
 no longer walks a kernel list. The per-connection timer is kept; a per-recv
 timer on the heap has not been measured.
@@ -109,7 +109,7 @@ values included, into one send, and the send pool is sized without zero-copy
 value bytes. Adding another pool user means checking whether it needs the same
 treatment.
 
-**Receive buffers are per connection since ringline 5b546b7.** ringline removed
+**Receive buffers are per connection (ringline #716).** ringline removed
 the shared TCP provided-buffer ring (ringline #716), and with it
 `general.recv_ring_size` and `general.recv_buffer_size`, which config load now
 rejects. On io_uring a connection holds a 32 KiB buffer (`recv_direct_region`)
