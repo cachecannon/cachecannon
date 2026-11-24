@@ -164,4 +164,4 @@ Both binaries share the same engine: ringline workers, latency histograms, clust
 
 ## License
 
-Same as cachecannon — see [LICENSE](LICENSE).
+Same as cachecannon — see [License](README.md#license).
