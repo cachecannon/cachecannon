@@ -343,18 +343,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     The verbose output's `recv_buffer:` line is gone with them.
   - On io_uring each connection receives into its own buffer: a one-shot
     receive armed when the client waits for a reply, in place of the
-    multishot receives from the per-worker ring that earlier builds used
-    A connection holds a 32 KiB buffer
-    from its first receive, about 313 MiB at 10,000 connections; a reply
-    that does not fit borrows a larger buffer from a per-worker pool that
-    keeps up to 16 MiB of free buffers. Each connection also arms a
-    `POLLRDHUP` poll when it opens. Neither size is configurable. ringline
-    measured, as a client against Valkey and memcached with 1,000
-    connections, 1.8-6.8% less client CPU at a fixed rate than the ring at
-    4 KiB pipelined and larger values, and within 1% at 64 B and 4 KiB
-    unpipelined. Against memcached with 16,000 connections it measured 11%
-    less client CPU per GET at 4 KiB depth 16, 12% less at 64 KiB depth 1,
-    and 2-4% more at 64 B depth 1.
+    multishot receives from the per-worker ring that earlier builds used. A
+    connection holds a 32 KiB buffer from its first receive, about 313 MiB at
+    10,000 connections; a reply that does not fit borrows a larger buffer
+    from a per-worker pool that keeps up to 16 MiB of free buffers. Each
+    connection also arms a `POLLRDHUP` poll when it opens. Neither size is
+    configurable. ringline measured, as a client against Valkey and
+    memcached with 1,000 connections, 1.8-6.8% less client CPU at a fixed
+    rate than the ring at 4 KiB pipelined and larger values, and within 1% at
+    64 B and 4 KiB unpipelined. Against memcached with 16,000 connections it
+    measured 11% less client CPU per GET at 4 KiB depth 16, 12% less at
+    64 KiB depth 1, and 2-4% more at 64 B depth 1. Those are ringline's
+    measurements; no cachecannon run has compared the two receive paths.
   - `ringline/pool{op="recv_parked"}`, `{op="recv_fallback"}`,
     `{op="forward_throttled"}` and `ringline/bytes{op="fallback_received"}`
     are no longer in `/metrics` or the parquet recording; they counted the
@@ -373,14 +373,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Each worker's ring defaults to 4096 submission and 65536 completion
     entries (was 256 and 1024), about 2.5 MiB per worker. Linux 6.14 to 7.2,
     except 7.2.y from 7.2.11 and 6.18.y from 6.18.58, charges that to
-    `RLIMIT_MEMLOCK` summed over the user's processes. cachecannon sets the
-    per-worker connection table to 16,000, ringline's default, explicitly, so
-    ringline does not shrink the rings or the table to fit a low limit; when
-    the rings do not fit, the run fails at startup with ringline's
-    `ResourceLimit` error naming the limit. An 8 MiB limit holds the rings of
-    at most 3 workers, fewer when the user's other processes lock memory. Left at the default,
-    ringline would lower the table with the rings and the connections past it
-    would fail to connect while the run continued.
+    `RLIMIT_MEMLOCK` summed over the user's processes. Under a lower limit
+    ringline shrinks the rings. cachecannon sets each worker's connection
+    table from the workload (twice the busiest worker's main and append
+    connections, plus 16, between 256 and ringline's default of 16,000), and
+    ringline does not shrink the rings below what that table needs; when they
+    do not fit, the run fails at startup with ringline's `ResourceLimit`
+    error, which names the limit, and a line naming `ulimit -l` and
+    `general.threads`. Left at ringline's default, the table would shrink
+    with the rings and the connections past it would fail to connect while
+    the run continued.
   - On io_uring a worker's idle tick is 10 ms (was 1 ms), so a worker can
     notice the end of a run up to 10 ms later.
   - Dropping a connection, or a client built on one, closes it

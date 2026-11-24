@@ -95,9 +95,11 @@ the highest connection count, before trusting the counters it drives.
 `standalone_task_capacity` is scaled by connections-per-worker in
 `src/runner.rs` (it was silently capping runs at 2040 connections). The timer
 pool is fixed by ringline at 65536 slots per worker (`ringline::TIMER_SLOTS`),
-four per connection at the connection table of 16,000 per worker, which
-cachecannon sets explicitly (`RINGLINE_MAX_CONNECTIONS`) so ringline cannot
-lower it to fit a low `RLIMIT_MEMLOCK`. The send pool and zero-copy send slab
+at least four per connection at ringline's largest connection table of 16,000
+per worker. cachecannon sizes that table from the workload
+(`ringline_max_connections`): left at ringline's default, ringline shrinks it
+along with the io_uring rings under a low `RLIMIT_MEMLOCK`, and connections past
+it fail to connect while the run goes on. The send pool and zero-copy send slab
 are sized from connections, pipeline depth, batch size, value length and TLS
 (`SendLoad`; at ringline's defaults some connections sent almost nothing and
 went unmeasured). `zero_copy_hold_cap` is set to `usize::MAX`: at ringline's

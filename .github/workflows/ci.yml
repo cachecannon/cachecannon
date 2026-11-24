@@ -68,7 +68,13 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - run: cargo test --all
+      # ubuntu-latest (kernel 6.17) charges each worker's io_uring rings, about
+      # 2.5 MiB at ringline's defaults, to RLIMIT_MEMLOCK summed over the user's
+      # processes, and the runner's limit is 8 MiB. Tests run in parallel, so
+      # the limit is lifted, in the same shell as the tests.
+      - run: |
+          if [ "$RUNNER_OS" = Linux ]; then sudo prlimit --pid $$ --memlock=unlimited:unlimited; fi
+          cargo test --all
 
   test-release:
     name: Test (release)
@@ -82,4 +88,6 @@ jobs:
       # resident on macOS, and the runner has 16 GB. With the default of one
       # job per CPU (4), this job was killed mid-build (exit 143) twice, which
       # we take to be memory exhaustion.
-      - run: cargo test --all --release -j 1
+      - run: |
+          sudo prlimit --pid $$ --memlock=unlimited:unlimited
+          cargo test --all --release -j 1

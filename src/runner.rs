@@ -320,7 +320,7 @@ pub fn run_benchmark_full(
         .standalone_task_capacity(standalone_task_capacity)
         .send_pool(send_pool_slots, RINGLINE_SEND_SLOT_SIZE)
         .send_slab_slots(send_slab_slots)
-        .max_connections(RINGLINE_MAX_CONNECTIONS)
+        .max_connections(ringline_max_connections(&config, num_threads))
         .pin_to_core(false) // We pin in create_for_worker instead
         .core_offset(0)
         .tcp_nodelay(true)
@@ -352,8 +352,17 @@ pub fn run_benchmark_full(
 
     // Launch ringline workers (client-only, no bind)
     tracing::debug!(num_threads, "launching ringline workers");
-    let (shutdown_handle, handles) =
-        RinglineBuilder::new(ringline_config).launch::<crate::worker::BenchHandler>()?;
+    let (shutdown_handle, handles) = RinglineBuilder::new(ringline_config)
+        .launch::<crate::worker::BenchHandler>()
+        .map_err(|e| match e {
+            ringline::Error::ResourceLimit(msg) if msg.contains("RLIMIT_MEMLOCK") => format!(
+                "{msg}\ncachecannon: raise the limit (`ulimit -l`) or run fewer workers \
+                 (`general.threads`); the connection table is sized from the workload and \
+                 has no setting"
+            )
+            .into(),
+            e => Box::<dyn std::error::Error>::from(e),
+        })?;
     tracing::debug!(workers = handles.len(), "ringline workers launched");
 
     formatter.print_precheck();
@@ -1508,13 +1517,33 @@ const APPEND_INFO_LOG_MIN_INTERVAL: Duration = Duration::from_secs(10);
 /// ringline's default send-pool slot size, kept so a slot still holds one
 /// 16 KiB TLS record.
 pub(crate) const RINGLINE_SEND_SLOT_SIZE: u32 = 16448;
-/// Connection slots per worker: ringline's default, set explicitly. When
-/// `RLIMIT_MEMLOCK` is too low for a worker's io_uring rings, ringline lowers
-/// a `max_connections` left at its default along with the rings, and the
-/// connections past the smaller table fail to connect while the run goes on.
-/// Set by the caller, it is not lowered, and `launch()` fails with
-/// `ResourceLimit` naming the limit instead.
-const RINGLINE_MAX_CONNECTIONS: u32 = 16_000;
+/// ringline's default connection table, per worker; the ceiling for
+/// [`ringline_max_connections`].
+const RINGLINE_MAX_CONNECTIONS: usize = 16_000;
+
+/// Connection slots to request from ringline, per worker.
+///
+/// When `RLIMIT_MEMLOCK` is too low for a worker's io_uring rings, ringline
+/// shrinks the rings, and a `max_connections` left at its default shrinks with
+/// them: the connections past the smaller table fail to connect while the run
+/// goes on. A `max_connections` set by the caller is not lowered; ringline
+/// shrinks the rings only as far as still covers it, and otherwise `launch()`
+/// fails with `ResourceLimit`.
+///
+/// The busiest worker's main and append connections, doubled so a connection
+/// whose close has not completed does not block its replacement, plus
+/// [`POOL_HEADROOM`], between ringline's pool default and its table default.
+/// ringline allocates the table once and does no per-request work over it, so
+/// the size does not change the hot path.
+fn ringline_max_connections(config: &Config, num_threads: usize) -> u32 {
+    let append = config.workload.append.as_ref().map_or(0, |a| a.connections);
+    let busiest = connections_per_worker(config.connection.total_connections(), num_threads)
+        + connections_per_worker(append, num_threads);
+    busiest
+        .saturating_mul(2)
+        .saturating_add(POOL_HEADROOM)
+        .clamp(RINGLINE_POOL_DEFAULT, RINGLINE_MAX_CONNECTIONS) as u32
+}
 /// Plaintext bytes in one TLS record, which takes one send-pool slot.
 const TLS_RECORD_PLAINTEXT: usize = 16384;
 /// ringline's defaults for the send copy pool and the zero-copy send slab, per
@@ -1799,9 +1828,38 @@ fn check_send_pool(loads: &[SendLoad], num_threads: usize) -> Result<Option<Stri
 #[cfg(test)]
 mod tests {
     use super::{
-        SendLoad, check_send_pool, send_pool_slots, send_slab_slots, standalone_task_capacity,
+        SendLoad, check_send_pool, ringline_max_connections, send_pool_slots, send_slab_slots,
+        standalone_task_capacity,
     };
     use crate::config::Config;
+
+    #[test]
+    fn the_connection_table_covers_the_busiest_worker_twice_over() {
+        let config = |connections: usize, append: Option<usize>| -> Config {
+            let append = append.map_or(String::new(), |n| {
+                format!("[workload.append]\nbatch = 1\nevery = \"1s\"\nconnections = {n}\n")
+            });
+            toml::from_str(&format!(
+                "[target]\nendpoints = [\"127.0.0.1:6379\"]\n\
+                 [connection]\nconnections = {connections}\n{append}"
+            ))
+            .unwrap()
+        };
+        // Small runs get ringline's pool default.
+        assert_eq!(ringline_max_connections(&config(256, None), 8), 256);
+        // 10,001 over 4 workers: the busiest has 2,501.
+        assert_eq!(
+            ringline_max_connections(&config(10_001, None), 4),
+            2 * 2_501 + 16
+        );
+        // Append writers share the workers' tables: 3,000 + 501 on the busiest.
+        assert_eq!(
+            ringline_max_connections(&config(12_000, Some(2_001)), 4),
+            2 * (3_000 + 501) + 16
+        );
+        // Never above ringline's default table.
+        assert_eq!(ringline_max_connections(&config(40_000, None), 1), 16_000);
+    }
 
     #[test]
     fn routed_needs_a_connection_to_every_node_on_every_worker() {
