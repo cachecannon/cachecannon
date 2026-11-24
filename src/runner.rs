@@ -364,9 +364,9 @@ pub fn run_benchmark_full(
             {
                 format!(
                     "{e}\ncachecannon: raise the limit (`ulimit -l`) or run fewer connections: \
-                     the rings need about 330-660 bytes per connection plus at least 44 KiB \
-                     per worker, and the connection table is sized from the workload and has \
-                     no setting"
+                     each worker's rings need about 330-660 bytes per connection, at least \
+                     44 KiB and at most 2.5 MiB, and the connection table is sized from the \
+                     workload and has no setting"
                 )
                 .into()
             }

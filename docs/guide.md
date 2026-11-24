@@ -1138,8 +1138,10 @@ config that puts more on one worker is refused at startup; raise `threads`.
 
 On Linux 6.14 to 7.2 (except 7.2.y from 7.2.11 and 6.18.y from 6.18.58), each
 worker's io_uring rings count against `RLIMIT_MEMLOCK`, summed over all of the
-user's processes. The rings are sized from the connection count: about 330 to
-660 bytes per connection, and at least 44 KiB per worker. When they do not fit
+user's processes. The rings default to about 2.5 MiB per worker. Under a lower
+hard limit ringline shrinks them, but not below what the worker's connections
+need: about 330 to 660 bytes per connection, at least 44 KiB, and the full
+2.5 MiB from about 4,000 connections per worker. When even that does not fit
 under the hard limit, startup fails; see
 [Startup fails on RLIMIT_MEMLOCK](#startup-fails-on-rlimit_memlock).
 
@@ -1157,7 +1159,7 @@ locked-memory limit (see [Sizing connections](#sizing-connections)). Raise it
 for the shell that runs cachecannon (`ulimit -l unlimited`, which needs the
 hard limit to allow it; `sudo prlimit --pid $$ --memlock=unlimited:unlimited`
 raises both), or lower `connections`. Under systemd the default is 8 MiB,
-which holds about 13,000 to 25,000 connections in total.
+which holds the rings of three workers at full size.
 
 ### Connection Refused
 

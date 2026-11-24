@@ -399,13 +399,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     limit shrinks the rings. cachecannon sets each worker's connection table
     to twice the busiest worker's main and append connections, at most
     16,000, and ringline does not shrink the rings below what that table
-    needs: about 330 to 660 bytes per connection (the completion ring is a
-    power of two), and at least 44 KiB per worker. When they do not fit, the
-    run fails at startup with ringline's error, which names the limit, and a
-    line naming `ulimit -l` and the connection count. Under systemd's default
-    8 MiB limit on those kernels, a run of more than about 13,000 to 25,000
-    connections in total that ran on v0.0.34 fails until the limit is
-    raised. Left at ringline's default, the table would shrink with the
+    needs. A worker's rings then take between 44 KiB and the full 2.5 MiB:
+    about 330 to 660 bytes per connection on that worker (the completion
+    ring is a power of two), and the full size from about 4,000 connections
+    per worker. When they do not fit, the run fails at startup with
+    ringline's error, which names the limit, and a line naming `ulimit -l`
+    and the connection count. systemd's default 8 MiB limit holds three
+    full-size workers, so on those kernels a run that ran on v0.0.34, for
+    example 25,000 connections on 4 workers (10 MiB), fails until the limit
+    is raised. Left at ringline's default, the table would shrink with the
     rings and the connections past it would fail to connect while the run
     continued. The smaller table also means that against a server that
     stops reading, connections closing after a request timeout, whose
