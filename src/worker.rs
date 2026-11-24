@@ -301,10 +301,9 @@ pub(crate) struct ValuePoolGuard {
 }
 
 impl SendGuard for ValuePoolGuard {
-    fn as_ptr_len(&self) -> (*const u8, u32) {
-        // SAFETY: offset + len is always within the pool bounds (enforced at construction).
-        let ptr = unsafe { self.pool.as_ptr().add(self.offset as usize) };
-        (ptr, self.len)
+    fn as_bytes(&self) -> &[u8] {
+        let start = self.offset as usize;
+        &self.pool[start..start + self.len as usize]
     }
 
     fn region(&self) -> RegionId {

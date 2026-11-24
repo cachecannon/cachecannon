@@ -334,8 +334,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `valkey-lab search`: a query task that panicked or was cancelled resolves
     its `JoinHandle` to a `JoinError` (ringline-rs/ringline#557), reported as
     a `query worker:` error.
-- ringline moves from ab81ceb to 5b546b7 (ringline main after
-  ringline-rs/ringline#1009, ringline 0.7.0-alpha.187), which brings these
+- ringline moves from ab81ceb to b7f1a5a (ringline main after
+  ringline-rs/ringline#1017, ringline 0.7.0-alpha.189), which brings these
   changes:
   - Breaking: `general.recv_ring_size` and `general.recv_buffer_size` are
     rejected at config load, with any value. They sized the provided-buffer
@@ -414,6 +414,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - ringline writes its messages through the `log` crate, which cachecannon's
     logger forwards: the `general.ringline_diag` lines are logged at `info`,
     and the `[ringline diag]` line no longer has `parks=` or `fallbacks=`.
+  - Each reply's GET TTFB is computed from integer nanosecond times
+    (ringline-rs/ringline#1017) instead of `Instant` arithmetic. In a
+    generator-limited memcache run (2 workers on one core, 256 connections,
+    pipeline 16, 64 B values, 5 rounds) that raised throughput by 2.0%
+    [1.6%, 3.5%] and cut client user instructions per response by 4.3%
+    against ringline 5b546b7.
 
 ### Fixed
 - `install.sh` on macOS or another non-Linux host says there is no package
