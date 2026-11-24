@@ -320,7 +320,7 @@ pub fn run_benchmark_full(
         .standalone_task_capacity(standalone_task_capacity)
         .send_pool(send_pool_slots, RINGLINE_SEND_SLOT_SIZE)
         .send_slab_slots(send_slab_slots)
-        .max_connections(ringline_max_connections(&config, num_threads))
+        .max_connections(ringline_max_connections(&config, num_threads)?)
         .pin_to_core(false) // We pin in create_for_worker instead
         .core_offset(0)
         .tcp_nodelay(true)
@@ -355,12 +355,16 @@ pub fn run_benchmark_full(
     let (shutdown_handle, handles) = RinglineBuilder::new(ringline_config)
         .launch::<crate::worker::BenchHandler>()
         .map_err(|e| match e {
-            ringline::Error::ResourceLimit(msg) if msg.contains("RLIMIT_MEMLOCK") => format!(
-                "{msg}\ncachecannon: raise the limit (`ulimit -l`) or run fewer workers \
-                 (`general.threads`); the connection table is sized from the workload and \
-                 has no setting"
-            )
-            .into(),
+            ringline::Error::ResourceLimit(msg) | ringline::Error::RingSetup(msg)
+                if msg.contains("RLIMIT_MEMLOCK") =>
+            {
+                format!(
+                    "{msg}\ncachecannon: raise the limit (`ulimit -l`), or run fewer workers \
+                     (`general.threads`) or connections; the connection table is sized from \
+                     the workload and has no setting"
+                )
+                .into()
+            }
             e => Box::<dyn std::error::Error>::from(e),
         })?;
     tracing::debug!(workers = handles.len(), "ringline workers launched");
@@ -1530,19 +1534,34 @@ const RINGLINE_MAX_CONNECTIONS: usize = 16_000;
 /// shrinks the rings only as far as still covers it, and otherwise `launch()`
 /// fails with `ResourceLimit`.
 ///
-/// The busiest worker's main and append connections, doubled so a connection
-/// whose close has not completed does not block its replacement, plus
-/// [`POOL_HEADROOM`], between ringline's pool default and its table default.
-/// ringline allocates the table once and does no per-request work over it, so
-/// the size does not change the hot path.
-fn ringline_max_connections(config: &Config, num_threads: usize) -> u32 {
+/// The table is twice the busiest worker's main and append connections, so a
+/// connection whose close has not completed does not block its replacement.
+/// Nothing is added beyond that: ringline needs a completion queue of the next
+/// power of two above `table * 65536 / 16000` entries, so a table of exactly
+/// twice a round count (2,000 for 1,000 connections) keeps the smallest queue
+/// that covers it, and a table may be as small as 2. ringline allocates the
+/// table once and does no per-request work over it, so the size does not
+/// change the hot path; which queue size ringline picks is set by the limit,
+/// as it is with the default table.
+///
+/// A graceful close waits for the peer to read what was sent, so a server that
+/// stops reading holds each timed-out connection's slot; after two request
+/// timeouts on one task its reconnects fail until the server reads or resets.
+///
+/// More than 16,000 connections on one worker is refused: the table would
+/// exceed ringline's default, and the timer pool (65,536 per worker) is sized
+/// for about four timers per connection at that table.
+fn ringline_max_connections(config: &Config, num_threads: usize) -> Result<u32, String> {
     let append = config.workload.append.as_ref().map_or(0, |a| a.connections);
     let busiest = connections_per_worker(config.connection.total_connections(), num_threads)
         + connections_per_worker(append, num_threads);
-    busiest
-        .saturating_mul(2)
-        .saturating_add(POOL_HEADROOM)
-        .clamp(RINGLINE_POOL_DEFAULT, RINGLINE_MAX_CONNECTIONS) as u32
+    if busiest > RINGLINE_MAX_CONNECTIONS {
+        return Err(format!(
+            "{busiest} connections on one worker (main and append) exceed {RINGLINE_MAX_CONNECTIONS}; \
+             raise `general.threads` or lower the connection count"
+        ));
+    }
+    Ok(busiest.saturating_mul(2).clamp(1, RINGLINE_MAX_CONNECTIONS) as u32)
 }
 /// Plaintext bytes in one TLS record, which takes one send-pool slot.
 const TLS_RECORD_PLAINTEXT: usize = 16384;
@@ -1845,20 +1864,22 @@ mod tests {
             ))
             .unwrap()
         };
-        // Small runs get ringline's pool default.
-        assert_eq!(ringline_max_connections(&config(256, None), 8), 256);
+        let table = |c: &Config, threads| ringline_max_connections(c, threads).unwrap();
+        // One connection on each of 128 workers: a table of 2, which ringline's
+        // smallest completion queue (1,024 entries, 250 connections) covers.
+        assert_eq!(table(&config(128, None), 128), 2);
         // 10,001 over 4 workers: the busiest has 2,501.
-        assert_eq!(
-            ringline_max_connections(&config(10_001, None), 4),
-            2 * 2_501 + 16
-        );
+        assert_eq!(table(&config(10_001, None), 4), 2 * 2_501);
         // Append writers share the workers' tables: 3,000 + 501 on the busiest.
-        assert_eq!(
-            ringline_max_connections(&config(12_000, Some(2_001)), 4),
-            2 * (3_000 + 501) + 16
-        );
-        // Never above ringline's default table.
-        assert_eq!(ringline_max_connections(&config(40_000, None), 1), 16_000);
+        assert_eq!(table(&config(12_000, Some(2_001)), 4), 2 * (3_000 + 501));
+        // 1,000 per worker is a table of 2,000, which an 8,192-entry queue covers
+        // (2,000 * 65536 / 16000 = 8,192); one more slot would need 16,384.
+        assert_eq!(table(&config(16_000, None), 16), 2_000);
+        assert_eq!(2_000 * 65_536 / 16_000, 8_192);
+        // Over 8,000 per worker the doubling stops at ringline's default table.
+        assert_eq!(table(&config(10_000, None), 1), 16_000);
+        // Over 16,000 per worker is refused.
+        assert!(ringline_max_connections(&config(16_001, None), 1).is_err());
     }
 
     #[test]

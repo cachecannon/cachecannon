@@ -375,14 +375,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     except 7.2.y from 7.2.11 and 6.18.y from 6.18.58, charges that to
     `RLIMIT_MEMLOCK` summed over the user's processes. Under a lower limit
     ringline shrinks the rings. cachecannon sets each worker's connection
-    table from the workload (twice the busiest worker's main and append
-    connections, plus 16, between 256 and ringline's default of 16,000), and
+    table to twice the busiest worker's main and append connections, and
     ringline does not shrink the rings below what that table needs; when they
-    do not fit, the run fails at startup with ringline's `ResourceLimit`
-    error, which names the limit, and a line naming `ulimit -l` and
-    `general.threads`. Left at ringline's default, the table would shrink
-    with the rings and the connections past it would fail to connect while
-    the run continued.
+    do not fit, the run fails at startup with ringline's error, which names
+    the limit, and a line naming `ulimit -l`, `general.threads` and the
+    connection count. Left at ringline's default, the table would shrink with
+    the rings and the connections past it would fail to connect while the run
+    continued.
+  - Breaking: more than 16,000 connections (main and append) on one worker is
+    refused at startup, naming `general.threads`. Before, the connections past
+    ringline's 16,000-slot table failed to connect and were retried while the
+    run continued.
   - On io_uring a worker's idle tick is 10 ms (was 1 ms), so a worker can
     notice the end of a run up to 10 ms later.
   - Dropping a connection, or a client built on one, closes it
