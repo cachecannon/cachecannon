@@ -26,9 +26,7 @@ Since #151 the generator's own runtime counters reach `/metrics` and the parquet
 snapshot: `ringline/pool{op="send_exhausted"}`,
 `ringline/pool{op="standalone_tasks_exhausted"}`,
 `ringline/ring{op="sqe_submit_failures"}`, `ringline/ring{op="push_retry_waits"}`.
-Non-zero means the client is the story. The receive-ring counters this list
-named before (`recv_parked`, `fallback_received`) went with ringline's TCP
-provided-buffer ring (ringline #716).
+Non-zero means the client is the story.
 
 **A metric pinned at its ceiling cannot show an improvement.** Per-worker CPU
 reading 1.00 in both arms of an A/B does not mean unchanged — it means the

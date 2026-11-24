@@ -1529,8 +1529,7 @@ pub fn key_share_endpoints(shares: &[f64], total: usize) -> Vec<usize> {
 /// keeps the `Connection`, then the client built on it, in a local of its
 /// reconnect loop's body, so the drop at `continue`, at the end of the body,
 /// or at `return` closes it before the next connect. A request timeout closes
-/// it at once through [`RecvFailed::close`]. Before 5b546b7 a dropped
-/// connection stayed open, and each task held a guard that closed it.
+/// it at once through [`RecvFailed::close`].
 pub(crate) async fn establish_connection(
     endpoint: SocketAddr,
     worker_id: usize,

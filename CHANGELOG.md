@@ -320,9 +320,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Handlers take an owned `ringline::Connection` in `on_accept`.
   - `connect` returns a builder that resolves to a `Connection`, with TLS set
     by `.tls(name)` (ringline-rs/ringline#533). The client crates take that
-    `Connection`, and building a client no longer fails. Clients do not
-    expose their `ConnCtx`, so cachecannon keeps `Connection::as_conn()` for
-    closing on a request timeout and for logging. `connect_timeout` still
+    `Connection`, and building a client no longer fails. `connect_timeout` still
     bounds the TCP connect and the TLS handshake together, through
     `try_timeout`; the builder's own `timeout` would cover only the TCP
     connect. A connect ringline cannot submit (no free connection slot) now
@@ -330,17 +328,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     and counted in `disconnects_connect_failed` as well as
     `connections_failed`; before, it was a `connect initiation failed`
     warning counted in `connections_failed` only.
-  - On io_uring, ringline arms one-shot TCP receives by default
-    (ringline-rs/ringline#647). cachecannon sets `recv_multishot(true)`, so
-    its connections keep the multishot receives every earlier cachecannon
-    build used. Other ringline changes in this range change the default
-    io_uring path, including ringline-rs/ringline#637 (queued copy sends
-    merged across send calls) and #639 and #640 (the receive throttle); see
-    ringline's CHANGELOG for the rest. No io_uring run has compared results
-    before and after. ringline made one-shot
-    the default for servers with many connections and large messages, where
-    a multishot receive lets some connections hold the receive ring while
-    others get no buffers; one-shot costs an SQE per received buffer.
+  - Other ringline changes in this range change the default io_uring path,
+    including ringline-rs/ringline#637 (queued copy sends merged across send
+    calls); see ringline's CHANGELOG for the rest.
   - `valkey-lab search`: a query task that panicked or was cancelled resolves
     its `JoinHandle` to a `JoinError` (ringline-rs/ringline#557), reported as
     a `query worker:` error.
@@ -354,15 +344,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - On io_uring each connection receives into its own buffer: a one-shot
     receive armed when the client waits for a reply, in place of the
     multishot receives from the per-worker ring that earlier builds used
-    (`recv_multishot(true)` is gone too). A connection holds a 32 KiB buffer
+    A connection holds a 32 KiB buffer
     from its first receive, about 313 MiB at 10,000 connections; a reply
     that does not fit borrows a larger buffer from a per-worker pool that
     keeps up to 16 MiB of free buffers. Each connection also arms a
     `POLLRDHUP` poll when it opens. Neither size is configurable. ringline
-    measured, as a client against Valkey and memcached, 1.8-6.8% less
-    client CPU at a fixed rate than the ring with 1,000 connections at 4 KiB
-    pipelined and larger values, and 2-4% more at 64-byte values, depth 1,
-    with 16,000 connections. No cachecannon run has compared the two.
+    measured, as a client against Valkey and memcached with 1,000
+    connections, 1.8-6.8% less client CPU at a fixed rate than the ring at
+    4 KiB pipelined and larger values, and within 1% at 64 B and 4 KiB
+    unpipelined. Against memcached with 16,000 connections it measured 11%
+    less client CPU per GET at 4 KiB depth 16, 12% less at 64 KiB depth 1,
+    and 2-4% more at 64 B depth 1.
   - `ringline/pool{op="recv_parked"}`, `{op="recv_fallback"}`,
     `{op="forward_throttled"}` and `ringline/bytes{op="fallback_received"}`
     are no longer in `/metrics` or the parquet recording; they counted the
