@@ -320,6 +320,7 @@ pub fn run_benchmark_full(
         .standalone_task_capacity(standalone_task_capacity)
         .send_pool(send_pool_slots, RINGLINE_SEND_SLOT_SIZE)
         .send_slab_slots(send_slab_slots)
+        .max_connections(RINGLINE_MAX_CONNECTIONS)
         .pin_to_core(false) // We pin in create_for_worker instead
         .core_offset(0)
         .tcp_nodelay(true)
@@ -1507,6 +1508,13 @@ const APPEND_INFO_LOG_MIN_INTERVAL: Duration = Duration::from_secs(10);
 /// ringline's default send-pool slot size, kept so a slot still holds one
 /// 16 KiB TLS record.
 pub(crate) const RINGLINE_SEND_SLOT_SIZE: u32 = 16448;
+/// Connection slots per worker: ringline's default, set explicitly. When
+/// `RLIMIT_MEMLOCK` is too low for a worker's io_uring rings, ringline lowers
+/// a `max_connections` left at its default along with the rings, and the
+/// connections past the smaller table fail to connect while the run goes on.
+/// Set by the caller, it is not lowered, and `launch()` fails with
+/// `ResourceLimit` naming the limit instead.
+const RINGLINE_MAX_CONNECTIONS: u32 = 16_000;
 /// Plaintext bytes in one TLS record, which takes one send-pool slot.
 const TLS_RECORD_PLAINTEXT: usize = 16384;
 /// ringline's defaults for the send copy pool and the zero-copy send slab, per

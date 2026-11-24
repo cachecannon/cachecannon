@@ -373,10 +373,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Each worker's ring defaults to 4096 submission and 65536 completion
     entries (was 256 and 1024), about 2.5 MiB per worker. Linux 6.14 to 7.2,
     except 7.2.y from 7.2.11 and 6.18.y from 6.18.58, charges that to
-    `RLIMIT_MEMLOCK` summed over the user's processes. When the hard limit is
-    too low, ringline shrinks the rings and the per-worker connection table
-    to fit, down to 1024 completion entries, and logs a warning naming the
-    sizes.
+    `RLIMIT_MEMLOCK` summed over the user's processes. cachecannon sets the
+    per-worker connection table to 16,000, ringline's default, explicitly, so
+    ringline does not shrink the rings or the table to fit a low limit; when
+    the rings do not fit, the run fails at startup with ringline's
+    `ResourceLimit` error naming the limit. An 8 MiB limit holds the rings of
+    at most 3 workers, fewer when the user's other processes lock memory. Left at the default,
+    ringline would lower the table with the rings and the connections past it
+    would fail to connect while the run continued.
   - On io_uring a worker's idle tick is 10 ms (was 1 ms), so a worker can
     notice the end of a run up to 10 ms later.
   - Dropping a connection, or a client built on one, closes it
