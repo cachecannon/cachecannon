@@ -171,7 +171,7 @@ pub fn info() -> DmaCommand {
     }
 }
 
-/// `DMA.SET <address> <rkey> <remote-address> <length> <key> [<crc>]`, or
+/// `DMA.SET <key> <length> <address> <rkey> <remote-address> [<crc>]`, or
 /// `BLOB.RDMA_SET <key> <length> <rkey> <remote-address> <length>`.
 pub fn set(
     dialect: Dialect,
@@ -204,7 +204,7 @@ pub fn set(
     }
 }
 
-/// `DMA.GET <address> <rkey> <remote-address> <capacity> <key> [<crc-flag>]`, or
+/// `DMA.GET <key> <capacity> <address> <rkey> <remote-address> [<crc-flag>]`, or
 /// `BLOB.RDMA_GET <key> <rkey> <remote-address> <capacity>`. largeobj returns a CRC-32c
 /// unconditionally.
 pub fn get(
@@ -240,13 +240,8 @@ fn transfer(
     key: &[u8],
     length: usize,
 ) -> DmaCommand {
-    let mut arguments: Vec<Vec<u8>> = advertisement
-        .to_args()
-        .into_iter()
-        .map(String::into_bytes)
-        .collect();
-    arguments.push(number(length as u64));
-    arguments.push(key.to_vec());
+    let mut arguments = vec![key.to_vec(), number(length as u64)];
+    arguments.extend(advertisement.to_args().into_iter().map(String::into_bytes));
     DmaCommand { name, arguments }
 }
 
@@ -297,7 +292,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(command.name(), "DMA.SET");
-        assert_eq!(arguments(&command), ["dead", "7", "4096", "64", "key"]);
+        assert_eq!(arguments(&command), ["key", "64", "dead", "7", "4096"]);
     }
 
     #[test]
@@ -311,7 +306,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(command.name(), "DMA.GET");
-        assert_eq!(arguments(&command), ["dead", "7", "4096", "64", "key"]);
+        assert_eq!(arguments(&command), ["key", "64", "dead", "7", "4096"]);
     }
 
     #[test]
@@ -355,7 +350,7 @@ mod tests {
             &DmaSetOptions::default(),
         )
         .unwrap();
-        assert_eq!(command.arguments().last().unwrap().as_slice(), [0x00, 0xff]);
+        assert_eq!(command.arguments()[0].as_slice(), [0x00, 0xff]);
     }
 
     #[test]

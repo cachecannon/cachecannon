@@ -8,6 +8,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `cluster = true` works with `protocol = "dma"` and `[dma] module = "vdma"`. It was refused at
+  startup with "cluster mode requires resp protocol". Keys route by hash slot, a `MOVED` reply to
+  `DMA.GET` or `DMA.SET` updates the worker's slot table, and a prefill key whose slot moved goes
+  to its new owner's queue, as on the RESP path. With `module = "largeobj"`, config load refuses
+  cluster mode.
 - `[workload.kv_replay]` gains `client = "vllm"`, which sends a trace
   request's operations the way a network-store tier sends them when it runs
   one task per key on vLLM's `DualQueueThreadPool`. A lookup connection sends

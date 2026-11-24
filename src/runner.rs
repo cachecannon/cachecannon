@@ -1253,9 +1253,13 @@ pub(crate) fn resolve_endpoints(
 ) -> Result<Option<Vec<u16>>, Box<dyn std::error::Error>> {
     let slot_table = if config.target.cluster {
         match config.target.protocol {
-            CacheProtocol::Resp | CacheProtocol::Resp3 => {}
+            // Config validation refuses dma with any module but vdma.
+            CacheProtocol::Resp | CacheProtocol::Resp3 | CacheProtocol::Dma => {}
             other => {
-                return Err(format!("cluster mode requires resp protocol, got {:?}", other).into());
+                return Err(format!(
+                    "cluster mode requires resp, resp3 or dma protocol, got {other:?}"
+                )
+                .into());
             }
         }
         let (endpoints, table) = crate::cluster::discover_topology(&config.target.endpoints)?;
