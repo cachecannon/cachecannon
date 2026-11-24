@@ -20,7 +20,7 @@ require_linux() {
     case "$(uname -s)" in
         Linux) ;;
         *)
-            die "$(uname -s) is not supported. cachecannon requires Linux (io_uring)."
+            die "$(uname -s) has no cachecannon package. Build from source instead: ${README_URL}#build-from-source"
             ;;
     esac
 }

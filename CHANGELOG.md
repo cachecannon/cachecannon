@@ -340,6 +340,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     a `query worker:` error.
 
 ### Fixed
+- `install.sh` on macOS or another non-Linux host says there is no package
+  for it and links to the build-from-source instructions. It said
+  cachecannon requires Linux, though source builds have run on macOS since
+  0.0.14.
 - The `io_engine` line printed at startup and the JSON output's `engine`
   field name the I/O backend the binary was built with. Since 0.0.12 they
   said `io_uring` for every Linux build, including one built on a kernel too
