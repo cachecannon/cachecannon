@@ -23,8 +23,8 @@ use std::time::{Duration, Instant};
 /// Every third GET on a connection is answered with a miss.
 pub const MISS_EVERY: u64 = 3;
 
-/// Large enough to span many receive buffers: io_uring's provided buffers are
-/// 16 KiB by default and mio reads 8 KiB at a time.
+/// Larger than a connection's receive buffer: 32 KiB on io_uring, after which
+/// a reply moves to a larger buffer, and mio reads 8 KiB at a time.
 pub const LARGE_VALUE_LEN: usize = 256 * 1024;
 
 /// What the fake servers return: a value of `value_len` bytes for each GET,

@@ -12,14 +12,13 @@ use crate::dma::{
 };
 use rand::{Rng, SeedableRng};
 use rand_xoshiro::Xoshiro256PlusPlus;
-use ringline::ConnCtx;
 
 use crate::client::{RequestResult, RequestType};
 use crate::config::{DmaModule, DmaProvider};
 use crate::keydist::KeyDist;
 use crate::metrics;
 use crate::worker::{
-    CloseOnDrop, DisconnectReason, InFlight, Phase, SharedWorkerState, check_resp_redirect_parsed,
+    CloseConn, DisconnectReason, InFlight, Phase, SharedWorkerState, check_resp_redirect_parsed,
     confirm_prefill_key, dispatcher, establish_connection, handed_to_new_owner,
     max_routing_attempts, parse_resp_redirect, record_counters, recv_with_timeout,
     resolve_tls_server_name, route_key, take_token, value_offset, wait_for_token, write_key,
@@ -64,12 +63,17 @@ enum Source {
     Workload,
 }
 
-/// One established connection: the client, the token that closes it on a timeout, and its
+/// One established connection: the client, which owns the control connection, and its
 /// deadline timer.
 struct Connection {
     dma: DmaClient,
-    conn: ConnCtx,
     inflight: InFlight,
+}
+
+impl CloseConn for DmaClient {
+    fn close_conn(&mut self) {
+        self.close();
+    }
 }
 
 /// A window of this worker's registered value pool, or `None` if the pool never registered.
@@ -193,8 +197,6 @@ pub(crate) async fn dma_connection_task(
             }
         };
 
-        let conn = connection.as_conn();
-        let _close = CloseOnDrop(conn);
         metrics::CONNECTIONS_ACTIVE.increment();
         let client = ringline_redis::Client::new(connection);
         // Registration happens here, not on first use: `fi_mr_reg` pins pages and is slow, and
@@ -217,7 +219,6 @@ pub(crate) async fn dma_connection_task(
 
         let mut connection = Connection {
             dma,
-            conn,
             // only pipeline depth 1 currently supported
             inflight: InFlight::new(config.connection.request_timeout, 1),
         };
@@ -246,12 +247,7 @@ async fn run_transfers(
     key_buf: &mut [u8],
     backfill_queue: &mut Vec<usize>,
 ) -> Result<(), DisconnectReason> {
-    let Connection {
-        dma,
-        conn,
-        inflight,
-    } = connection;
-    let conn = *conn;
+    let Connection { dma, inflight } = connection;
     let config = &state.task_state.config;
     let num_endpoints = state.task_state.endpoints.len();
     let multi_endpoint = num_endpoints > 1;
@@ -399,13 +395,11 @@ async fn run_transfers(
                     &state.task_state.value_pool[at..at + value_len],
                 );
                 match source_window(at, value_len) {
-                    Some(window) => recv_with_timeout(
-                        dma.set_registered(key_buf, &window, checksum),
-                        inflight,
-                        conn,
-                    )
-                    .await
-                    .map(|outcome| (outcome.map(|receipt| receipt.bytes_written), None)),
+                    Some(window) => {
+                        recv_with_timeout(dma.set_registered(key_buf, &window, checksum), inflight)
+                            .await
+                            .map(|outcome| (outcome.map(|receipt| receipt.bytes_written), None))
+                    }
                     None => Ok((
                         Err(Error::Dma(crate::dma::DmaError::Fabric(
                             "the value pool is not registered on this worker".into(),
@@ -414,23 +408,24 @@ async fn run_transfers(
                     )),
                 }
             }
-            Op::Get => recv_with_timeout(dma.get(key_buf), inflight, conn)
+            Op::Get => recv_with_timeout(dma.get(key_buf), inflight)
                 .await
                 .map(|outcome| match outcome {
                     Ok(Some(receipt)) => (Ok(receipt.bytes_written), Some(true)),
                     Ok(None) => (Ok(0), Some(false)),
                     Err(error) => (Err(error), None),
                 }),
-            Op::Delete => recv_with_timeout(dma.delete(key_buf), inflight, conn)
+            Op::Delete => recv_with_timeout(dma.delete(key_buf), inflight)
                 .await
                 .map(|outcome| (outcome.map(|_| 0), None)),
         };
         inflight.pop();
         let (outcome, hit) = match timed {
             Ok(result) => result,
-            Err(reason) => {
-                // The deadline counted the request as a timeout and closed the connection. A
+            Err(failed) => {
+                // The deadline counted the request as a timeout; close the connection. A
                 // prefill key goes back on the queue so the phase cannot finish without it.
+                let reason = failed.close(dma);
                 if source == Source::Prefill {
                     state
                         .task_state

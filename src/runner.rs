@@ -19,6 +19,7 @@ use rand::RngCore;
 use rand_xoshiro::Xoshiro256PlusPlus;
 use rand_xoshiro::rand_core::SeedableRng;
 use ringline::RinglineBuilder;
+use ringline::tls_config::rustls;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
@@ -290,7 +291,7 @@ pub fn run_benchmark_full(
     let needs_tls = config.target.tls;
     let tls_client = if needs_tls {
         let tls_config = build_tls_client_config(&config.target)?;
-        Some(ringline::TlsClientConfig::new(std::sync::Arc::new(
+        Some(ringline::TlsClientConfig::from_rustls(std::sync::Arc::new(
             tls_config,
         )))
     } else {
@@ -314,8 +315,6 @@ pub fn run_benchmark_full(
         tracing::warn!("{warning}");
     }
 
-    let (recv_ring_size, recv_buffer_size) = resolved_recv_geometry(&config);
-
     let mut ringline_builder = ringline::ConfigBuilder::new()
         .workers(num_threads)
         .standalone_task_capacity(standalone_task_capacity)
@@ -324,15 +323,15 @@ pub fn run_benchmark_full(
         .pin_to_core(false) // We pin in create_for_worker instead
         .core_offset(0)
         .tcp_nodelay(true)
-        .recv_buffer(recv_ring_size, recv_buffer_size)
-        // Multishot TCP receives, as before ringline #647 made one-shot the
-        // default on io_uring. Kept so a run measures the same receive path it
-        // did before the ringline move; one-shot costs an SQE per received
-        // buffer. ringline's reason for the new default is a server with many
-        // connections and large messages, where a multishot receive lets some
-        // connections hold the ring while others get no buffers. mio ignores
-        // the setting.
-        .recv_multishot(true)
+        // No per-connection cap on zero-copy send slab entries. ringline's
+        // default (16, applied once the slab is over half used) protects a
+        // server from peers that stop reading; at the cap ringline-redis and
+        // ringline-memcache copy a guarded batch, values included, into one
+        // send, which the send pool is not sized for (`send_pool_slots`
+        // counts no zero-copy value bytes). The slab is sized for the
+        // workload's own sends (`send_slab_slots`), as it was before ringline
+        // added the cap.
+        .zero_copy_hold_cap(usize::MAX)
         .loop_diag(config.general.ringline_diag);
     if let Some(tls_client) = tls_client {
         ringline_builder = ringline_builder.tls_client(tls_client);
@@ -1505,46 +1504,6 @@ fn standalone_task_capacity(total_connections: usize, num_threads: usize) -> u32
 /// logged at info. Below it they are logged at debug.
 const APPEND_INFO_LOG_MIN_INTERVAL: Duration = Duration::from_secs(10);
 
-/// ringline's own defaults for the recv ring, restated so the resolved geometry
-/// is visible in one place and so the verbose line can print it.
-///
-/// Neither is derived. An earlier revision of this change sized `buffer_size`
-/// from the value length so one response fit one buffer, on the theory that a
-/// multi-buffer response shrinks the ring's effective depth and invites
-/// `ENOBUFS` parking. Rig measurement refuted it: at 10,000 connections and
-/// 20,000 req/s of 56 KiB values -- four buffers per response against a
-/// 256-buffer ring -- every worker reported `parks=0 fallbacks=0`. The ring
-/// never ran dry, because buffers are held only for the instant between a
-/// completion and the client draining it, not for the life of a connection.
-///
-/// The CQE argument does not rescue it either: that generator was spending
-/// ~12M CQEs/s to move 20k requests, of which request I/O is under 1%. Sizing
-/// the buffer to the response removes three recv CQEs per response, about 0.5%
-/// of the total -- unmeasurable on a generator that is CPU-bound elsewhere.
-///
-/// So the geometry stays ringline's until something measures otherwise. The
-/// config keys exist to make that measurement a one-line change.
-const RECV_RING_SIZE_DEFAULT: u16 = 256;
-const RECV_BUFFER_SIZE_DEFAULT: u32 = 16 * 1024;
-
-/// The recv-ring geometry a run will actually use: `(ring_size, buffer_size)`,
-/// taken from config where set and ringline's default otherwise.
-///
-/// Shared with the verbose formatter so the printed geometry is the one handed
-/// to ringline rather than a second, drifting derivation of it.
-pub(crate) fn resolved_recv_geometry(config: &Config) -> (u16, u32) {
-    (
-        config
-            .general
-            .recv_ring_size
-            .unwrap_or(RECV_RING_SIZE_DEFAULT),
-        config
-            .general
-            .recv_buffer_size
-            .unwrap_or(RECV_BUFFER_SIZE_DEFAULT),
-    )
-}
-
 /// ringline's default send-pool slot size, kept so a slot still holds one
 /// 16 KiB TLS record.
 pub(crate) const RINGLINE_SEND_SLOT_SIZE: u32 = 16448;
@@ -1832,8 +1791,7 @@ fn check_send_pool(loads: &[SendLoad], num_threads: usize) -> Result<Option<Stri
 #[cfg(test)]
 mod tests {
     use super::{
-        RECV_BUFFER_SIZE_DEFAULT, RECV_RING_SIZE_DEFAULT, SendLoad, check_send_pool,
-        resolved_recv_geometry, send_pool_slots, send_slab_slots, standalone_task_capacity,
+        SendLoad, check_send_pool, send_pool_slots, send_slab_slots, standalone_task_capacity,
     };
     use crate::config::Config;
 
@@ -1885,13 +1843,10 @@ mod tests {
         super::check_node_counts(&pooled, 3).unwrap();
     }
 
-    /// A minimal parsed config with the two recv keys set as given.
-    fn test_config(ring: Option<u16>, buffer: Option<u32>) -> Config {
-        let mut config: Config = toml::from_str("[target]\nendpoints = [\"127.0.0.1:6379\"]\n")
-            .expect("test config must parse");
-        config.general.recv_ring_size = ring;
-        config.general.recv_buffer_size = buffer;
-        config
+    /// A minimal parsed config.
+    fn test_config() -> Config {
+        toml::from_str("[target]\nendpoints = [\"127.0.0.1:6379\"]\n")
+            .expect("test config must parse")
     }
 
     fn load(connections: usize, depth: usize, batch: usize, value_len: usize) -> SendLoad {
@@ -2015,7 +1970,7 @@ mod tests {
     #[test]
     fn sizes_follow_the_parsed_config() {
         // 2048 connections, depth 16, batch 16, 64 KiB values over 4 threads.
-        let mut config = test_config(None, None);
+        let mut config = test_config();
         config.connection.connections = 2048;
         config.connection.pipeline_depth = 16;
         config.workload.values.length = 65536;
@@ -2029,7 +1984,7 @@ mod tests {
 
     #[test]
     fn append_writers_send_one_request_at_a_time() {
-        let mut config = test_config(None, None);
+        let mut config = test_config();
         config.workload.values.length = 65536;
         config.workload.append =
             toml::from_str("batch = 1\nevery = \"1s\"\nconnections = 64\npipeline_depth = 32\n")
@@ -2071,33 +2026,6 @@ mod tests {
     #[test]
     fn zero_threads_does_not_divide_by_zero() {
         assert_eq!(standalone_task_capacity(64, 0), 256);
-    }
-
-    #[test]
-    fn recv_geometry_falls_back_to_ringlines_defaults() {
-        // Unset must mean "exactly what ringline would have done", so that
-        // merging this knob changes no existing run's behaviour.
-        let config = test_config(None, None);
-        assert_eq!(
-            resolved_recv_geometry(&config),
-            (RECV_RING_SIZE_DEFAULT, RECV_BUFFER_SIZE_DEFAULT)
-        );
-    }
-
-    #[test]
-    fn recv_geometry_takes_each_half_from_config_independently() {
-        assert_eq!(
-            resolved_recv_geometry(&test_config(Some(4096), None)),
-            (4096, RECV_BUFFER_SIZE_DEFAULT)
-        );
-        assert_eq!(
-            resolved_recv_geometry(&test_config(None, Some(65536))),
-            (RECV_RING_SIZE_DEFAULT, 65536)
-        );
-        assert_eq!(
-            resolved_recv_geometry(&test_config(Some(16), Some(262144))),
-            (16, 262144)
-        );
     }
 
     #[test]

@@ -564,7 +564,6 @@ dependencies = [
  "ringline-ping",
  "ringline-redis",
  "rmp-serde",
- "rustls",
  "serde",
  "serde_json",
  "socket2 0.5.10",
@@ -1485,9 +1484,9 @@ dependencies = [
 
 [[package]]
 name = "libc"
-version = "0.2.186"
+version = "0.2.191"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "68ab91017fe16c622486840e4c83c9a37afeff978bd239b5293d61ece587de66"
+checksum = "65cd87c9a6d60536580b316ad985726104730a5151c99845f2490428ef91240a"
 
 [[package]]
 name = "libloading"
@@ -2341,25 +2340,27 @@ dependencies = [
 
 [[package]]
 name = "ringline"
-version = "0.7.0-alpha.0"
-source = "git+https://github.com/ringline-rs/ringline?rev=ab81ceb#ab81ceb6fe77f0be866fb51ec53ffcbc1b4354cc"
+version = "0.7.0-alpha.187"
+source = "git+https://github.com/ringline-rs/ringline?rev=5b546b7#5b546b7f0645506634a658af49ce6f7d858ed645"
 dependencies = [
  "bytes",
  "crossbeam-channel",
  "futures-io",
  "io-uring",
  "libc",
+ "log",
  "metriken",
  "mio",
  "pin-project-lite",
- "rustls",
+ "ringline-tls",
+ "ringline-tls-config",
  "thiserror",
 ]
 
 [[package]]
 name = "ringline-memcache"
 version = "0.7.2"
-source = "git+https://github.com/ringline-rs/ringline?rev=ab81ceb#ab81ceb6fe77f0be866fb51ec53ffcbc1b4354cc"
+source = "git+https://github.com/ringline-rs/ringline?rev=5b546b7#5b546b7f0645506634a658af49ce6f7d858ed645"
 dependencies = [
  "bytes",
  "histogram 0.11.5",
@@ -2373,7 +2374,7 @@ dependencies = [
 [[package]]
 name = "ringline-ping"
 version = "0.6.0"
-source = "git+https://github.com/ringline-rs/ringline?rev=ab81ceb#ab81ceb6fe77f0be866fb51ec53ffcbc1b4354cc"
+source = "git+https://github.com/ringline-rs/ringline?rev=5b546b7#5b546b7f0645506634a658af49ce6f7d858ed645"
 dependencies = [
  "histogram 0.11.5",
  "ping-proto",
@@ -2384,7 +2385,7 @@ dependencies = [
 [[package]]
 name = "ringline-redis"
 version = "0.7.0"
-source = "git+https://github.com/ringline-rs/ringline?rev=ab81ceb#ab81ceb6fe77f0be866fb51ec53ffcbc1b4354cc"
+source = "git+https://github.com/ringline-rs/ringline?rev=5b546b7#5b546b7f0645506634a658af49ce6f7d858ed645"
 dependencies = [
  "bytes",
  "histogram 0.11.5",
@@ -2392,6 +2393,30 @@ dependencies = [
  "ketama 0.0.2",
  "resp-proto",
  "ringline",
+ "thiserror",
+]
+
+[[package]]
+name = "ringline-tls"
+version = "0.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2d4ee6564b812bee7374cdeaa60d019b6aee3709c2e3396452d8c3c09687a720"
+dependencies = [
+ "once_cell",
+ "ring",
+ "rustls-pki-types",
+ "rustls-webpki",
+ "subtle",
+ "zeroize",
+]
+
+[[package]]
+name = "ringline-tls-config"
+version = "0.1.0"
+source = "git+https://github.com/ringline-rs/ringline?rev=5b546b7#5b546b7f0645506634a658af49ce6f7d858ed645"
+dependencies = [
+ "ringline-tls",
+ "rustls-pki-types",
  "thiserror",
 ]
 
@@ -2427,20 +2452,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cfcb3a22ef46e85b45de6ee7e79d063319ebb6594faafcf1c225ea92ab6e9b92"
 dependencies = [
  "semver",
-]
-
-[[package]]
-name = "rustls"
-version = "0.23.46"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "48e13bd8c0e9365c43cfa5c9e8f9ad49d3c8444926c9aac819e0e4dc503c8fdf"
-dependencies = [
- "once_cell",
- "ring",
- "rustls-pki-types",
- "rustls-webpki",
- "subtle",
- "zeroize",
 ]
 
 [[package]]

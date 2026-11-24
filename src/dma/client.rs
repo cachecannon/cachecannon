@@ -61,6 +61,11 @@ impl DmaClient {
         self
     }
 
+    /// Close the control connection. Does nothing on a connection already closed.
+    pub(crate) fn close(&mut self) {
+        self.client.close();
+    }
+
     /// `DMA.GET`: the server writes the value at `key` into the registered buffer.
     ///
     /// `None` if the key is absent. The value is the first `bytes_written` bytes of the buffer.

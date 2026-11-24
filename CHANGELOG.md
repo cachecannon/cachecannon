@@ -177,8 +177,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   value, so client CPU per request includes reading the value. RESP
   then receives through ringline-redis `recv`, which holds each whole reply
   in contiguous memory, instead of `recv_meta`, which drains values as they
-  arrive. On io_uring that adds one copy out of the provided buffers; on mio
-  replies are copied into that buffer either way, so only the CRC is added.
+  arrive. A reply larger than the connection's 32 KiB receive buffer on
+  io_uring moves to a larger buffer, which copies the bytes already received;
+  otherwise only the CRC is added, on either backend.
   Memcache already received whole replies and gains the CRC. Client memory
   rises to up to connections × `pipeline_depth` × value size. Rejected with
   `protocol = "ping"` and `protocol = "dma"`; for DMA, `[dma] checksum = true`
@@ -343,6 +344,75 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `valkey-lab search`: a query task that panicked or was cancelled resolves
     its `JoinHandle` to a `JoinError` (ringline-rs/ringline#557), reported as
     a `query worker:` error.
+- ringline moves from ab81ceb to 5b546b7 (ringline main after
+  ringline-rs/ringline#1009, ringline 0.7.0-alpha.187), which brings these
+  changes:
+  - Breaking: `general.recv_ring_size` and `general.recv_buffer_size` are
+    rejected at config load, with any value. They sized the provided-buffer
+    receive ring that ringline removed for TCP (ringline-rs/ringline#716).
+    The verbose output's `recv_buffer:` line is gone with them.
+  - On io_uring each connection receives into its own buffer: a one-shot
+    receive armed when the client waits for a reply, in place of the
+    multishot receives from the per-worker ring that earlier builds used
+    (`recv_multishot(true)` is gone too). A connection holds a 32 KiB buffer
+    from its first receive, about 313 MiB at 10,000 connections; a reply
+    that does not fit borrows a larger buffer from a per-worker pool that
+    keeps up to 16 MiB of free buffers. Each connection also arms a
+    `POLLRDHUP` poll when it opens. Neither size is configurable. ringline
+    measured, as a client against Valkey and memcached, 1.8-6.8% less
+    client CPU at a fixed rate than the ring with 1,000 connections at 4 KiB
+    pipelined and larger values, and 2-4% more at 64-byte values, depth 1,
+    with 16,000 connections. No cachecannon run has compared the two.
+  - `ringline/pool{op="recv_parked"}`, `{op="recv_fallback"}`,
+    `{op="forward_throttled"}` and `ringline/bytes{op="fallback_received"}`
+    are no longer in `/metrics` or the parquet recording; they counted the
+    removed ring. `ringline/recv_direct` counts the new receives, and
+    `ringline/pool{op="standalone_tasks_exhausted"}` counts connection tasks
+    a worker could not spawn.
+  - Timers no longer submit anything to the io_uring ring
+    (ringline-rs/ringline#838): the request-timeout timer, the connect
+    timeout and every `sleep` in the idle and rate-limit paths are entries in
+    a per-worker heap, with no SQE or CQE each, and a timer that is dropped
+    before it fires submits no cancel.
+  - The io_uring backend needs Linux 6.8 or later (was 6.1;
+    ringline-rs/ringline#932). A build on an older Linux host gets the mio
+    backend without an error, which the `io_engine` line names; an io_uring
+    build fails at launch on an older kernel.
+  - Each worker's ring defaults to 4096 submission and 65536 completion
+    entries (was 256 and 1024), about 2.5 MiB per worker. Linux 6.14 to 7.2,
+    except 7.2.y from 7.2.11 and 6.18.y from 6.18.58, charges that to
+    `RLIMIT_MEMLOCK` summed over the user's processes. When the hard limit is
+    too low, ringline shrinks the rings and the per-worker connection table
+    to fit, down to 1024 completion entries, and logs a warning naming the
+    sizes.
+  - On io_uring a worker's idle tick is 10 ms (was 1 ms), so a worker can
+    notice the end of a run up to 10 ms later.
+  - Dropping a connection, or a client built on one, closes it
+    (ringline-rs/ringline#743). cachecannon's close guard is removed: every
+    connection task still closes its connection before it reconnects and
+    when it returns, by dropping the client, and closes it at once on a
+    request timeout.
+  - TLS client configs are built with ringline's rustls fork
+    (`ringline-tls` 0.1.2, through `ringline::tls_config::rustls`), and
+    cachecannon no longer depends on `rustls` directly. TLS 1.2 is offered
+    as well as TLS 1.3; earlier builds offered only TLS 1.3. ringline's
+    unbuffered TLS engine is the default, and on io_uring a TLS connection
+    receives ciphertext directly.
+  - On io_uring a copy send wider than one send-pool slot (16 KiB), such as
+    a batch of copied values or the ciphertext of a TLS send that fills two
+    or more slots, goes to the kernel as one
+    `sendmsg` when nothing else is in flight on the connection; before, its
+    first slot went alone and the rest followed (ringline-rs/ringline#697).
+  - ringline's per-connection cap on zero-copy send slab entries
+    (`zero_copy_hold_cap`, 16 by default) is turned off. At the cap the
+    clients copy a guarded batch, values included, into the send pool, which
+    is sized without zero-copy value bytes.
+  - ringline's worker threads are named `rl-work-N` (were
+    `ringline-worker`, as Linux truncated the old names), so per-thread CPU
+    filters that match the old name need the new one.
+  - ringline writes its messages through the `log` crate, which cachecannon's
+    logger forwards: the `general.ringline_diag` lines are logged at `info`,
+    and the `[ringline diag]` line no longer has `parks=` or `fallbacks=`.
 
 ### Fixed
 - `install.sh` on macOS or another non-Linux host says there is no package
@@ -352,7 +422,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The `io_engine` line printed at startup and the JSON output's `engine`
   field name the I/O backend the binary was built with. Since 0.0.12 they
   said `io_uring` for every Linux build, including one built on a kernel too
-  old for ringline's io_uring driver (older than 6.1 in this release, 6.0 in
+  old for ringline's io_uring driver (older than 6.8 in this release, 6.0 in
   earlier ones), where ringline uses mio.
 - The viewer's Server and Client sections draw their charts. Their queries
   went to the benchmark recording, so every one returned `Metric not found`.

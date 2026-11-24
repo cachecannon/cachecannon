@@ -194,8 +194,6 @@ pub fn run(args: SearchArgs) -> Result<(), Box<dyn std::error::Error>> {
         .workers(1)
         .pin_to_core(false)
         .tcp_nodelay(true)
-        // Multishot TCP receives, as before ringline #647; see `runner.rs`.
-        .recv_multishot(true)
         .build()?;
     let (shutdown_handle, handles) =
         ringline::RinglineBuilder::new(ringline_config).launch::<SearchHandler>()?;

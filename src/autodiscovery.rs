@@ -9,6 +9,9 @@
 //! Discovery runs once. Nodes added or removed during the run are not seen.
 
 use crate::config::Target;
+// The rustls the connection tasks build their client config from: ringline's
+// fork, re-exported. Discovery takes the same config.
+use ringline::tls_config::rustls;
 use std::io::{self, Read, Write};
 use std::net::{IpAddr, SocketAddr, TcpStream, ToSocketAddrs};
 use std::sync::Arc;

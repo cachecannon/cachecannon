@@ -38,7 +38,6 @@ use cachetrace::{Op, TraceEntry, TraceReader};
 use parquet::file::reader::{FileReader, SerializedFileReader};
 use parquet::file::statistics::Statistics;
 use rand_xoshiro::Xoshiro256PlusPlus;
-use ringline::ConnCtx;
 use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::fs::File;
@@ -566,12 +565,11 @@ pub(crate) struct TraceConn<'a> {
 /// claimed rows that were not sent go to the shared returned queue.
 pub(crate) async fn drive(
     client: &mut ringline_redis::Client,
-    conn: ConnCtx,
     ctx: &TraceConn<'_>,
     rng: &mut Xoshiro256PlusPlus,
 ) -> Result<(), DisconnectReason> {
     let mut sent: VecDeque<Sent> = VecDeque::with_capacity(ctx.pipeline_depth);
-    let result = run(client, conn, ctx, rng, &mut sent).await;
+    let result = run(client, ctx, rng, &mut sent).await;
     // At a stop the rows in flight are left out of every count, whether the
     // connection sees the stop or is closed by shutdown first.
     if !ctx.shared.phase().should_stop() {
@@ -587,7 +585,6 @@ pub(crate) async fn drive(
 
 async fn run(
     client: &mut ringline_redis::Client,
-    conn: ConnCtx,
     ctx: &TraceConn<'_>,
     rng: &mut Xoshiro256PlusPlus,
     sent: &mut VecDeque<Sent>,
@@ -780,11 +777,11 @@ async fn run(
             continue;
         }
 
-        let result = match recv_with_timeout(client.recv_meta(), &mut inflight, conn).await {
+        let result = match recv_with_timeout(client.recv_meta(), &mut inflight).await {
             Ok(Ok(meta)) => map_respmeta(meta),
             Ok(Err(ringline_redis::Error::ConnectionClosed)) => return Err(DisconnectReason::Eof),
             Ok(Err(_)) => return Err(DisconnectReason::RecvError),
-            Err(reason) => return Err(reason),
+            Err(failed) => return Err(failed.close(client)),
         };
         inflight.pop();
         let done = sent

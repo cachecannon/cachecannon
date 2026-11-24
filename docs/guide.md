@@ -1104,35 +1104,22 @@ pipeline_depth = 1         # No pipelining
 Pinning is the main reason to set `threads` by hand: the count has to match the
 `cpu_list`. Everywhere else, leave it at the default.
 
-### Sizing the recv buffer ring
+### Receive buffers
 
-Each worker receives responses through a ring of provided buffers, shared by
-every connection on that worker. Both halves are exposed:
+There is no receive ring to size. On io_uring each connection receives into its
+own buffer, 32 KiB from its first receive. A reply that does not fit borrows a
+larger buffer from a per-worker pool, which keeps at most 16 MiB of free
+buffers for reuse. On mio each connection's accumulator starts at 4 KiB and
+grows. Neither size is configurable, and `general.recv_ring_size` and
+`general.recv_buffer_size`, which sized the shared ring earlier builds used,
+are rejected at config load.
 
-```toml
-[general]
-recv_ring_size = 256       # buffers per worker, power of two
-recv_buffer_size = 16384   # bytes per buffer
-```
-
-Unset, both take ringline's defaults, which is almost certainly what you want.
-Check what a run resolved to with `format = "verbose"`:
-
-```
-recv_buffer: 256 x 16384 bytes per worker (4 buffers per response)
-```
-
-A response spanning several buffers costs one recv CQE per buffer, and more
-than one buffer per response is worth noticing — but it is not, on its own, a
-problem. A buffer is held only between a completion and the client draining it,
-not for the life of a connection, so a 256-buffer ring serves thousands of
-connections without running dry. Measured on a 16-worker generator at 10,000
-connections and 20,000 req/s of 56 KiB values — four buffers per response —
-every worker reported zero `ENOBUFS` parks.
-
-So reach for these keys to *test* a hypothesis, not to fix a slow run. If you
-do change them, confirm the effect with `ringline/pool{op="recv_parked"}` and
-client CPU rather than by reading latency, for the reason in the next section.
+Receive memory therefore grows with the connection count: about 32 KiB per
+connection on io_uring, or 313 MiB at 10,000 connections. With replies larger
+than 32 KiB, `ringline/recv_direct{op="pool_allocated"}` counts the large
+buffers the pool allocated instead of reusing a free one. A count that keeps
+rising through the run means a worker has more large replies in flight than
+16 MiB of free buffers covers.
 
 ### Sizing connections
 
@@ -1260,11 +1247,14 @@ machine's load average can both look fine while every worker is pinned. But
 and acting on that reading alone can waste most of a machine.
 
 A ringline worker blocks only when it has nothing runnable
-(`backend/uring/event_loop.rs`):
+(`backend/uring/event_loop.rs`, simplified):
 
 ```rust
-if self.executor.ready_queue.is_empty() {
-    self.driver.ring.submit_and_wait(1)?;      // blocks
+// may_block(): the ready queue is empty, and no close or deferred
+// receive is waiting
+if self.may_block() {
+    // blocks until a completion, the next tick or the earliest timer
+    self.driver.ring.submit_and_wait_timeout(1, bound)?;
 } else {
     self.driver.ring.submit_and_get_events()?; // returns immediately
 }
