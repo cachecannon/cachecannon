@@ -89,7 +89,6 @@ use crate::worker::{
 use kvtrace::{Geometry, KvObject, ModelSizes, ObjectMapper, Request, RequestReader};
 use metriken::histogram::Histogram;
 use rand_xoshiro::Xoshiro256PlusPlus;
-use ringline::ConnCtx;
 use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
 use std::fs::File;
@@ -1515,7 +1514,6 @@ pub(crate) struct KvConn<'a> {
 /// the connection fails.
 pub(crate) async fn drive(
     client: &mut ringline_redis::Client,
-    conn: ConnCtx,
     ctx: &KvConn<'_>,
     rng: &mut Xoshiro256PlusPlus,
 ) -> Result<(), DisconnectReason> {
@@ -1526,14 +1524,14 @@ pub(crate) async fn drive(
     let vllm = dispatch.vllm.get();
     if dispatch.loading.get() < dispatch.load_target.get() {
         let _loading = Loading::new(&dispatch);
-        return drive_tasks(client, conn, ctx, rng, &dispatch, true).await;
+        return drive_tasks(client, ctx, rng, &dispatch, true).await;
     }
     if dispatch.storing.get() < dispatch.store_target.get() {
         let _storing = Storing::new(&dispatch);
         if vllm {
-            return drive_tasks(client, conn, ctx, rng, &dispatch, false).await;
+            return drive_tasks(client, ctx, rng, &dispatch, false).await;
         }
-        return drive_stores(client, conn, ctx, rng, &dispatch).await;
+        return drive_stores(client, ctx, rng, &dispatch).await;
     }
     let _live = Live::new(&dispatch);
     let store_inline = !vllm && dispatch.store_target.get() == 0;
@@ -1585,7 +1583,6 @@ pub(crate) async fn drive(
         let result = if vllm {
             run_request_vllm(
                 client,
-                conn,
                 ctx,
                 &mut inflight,
                 &mut scratch,
@@ -1598,7 +1595,6 @@ pub(crate) async fn drive(
         } else {
             run_request(
                 client,
-                conn,
                 ctx,
                 rng,
                 &mut inflight,
@@ -1692,7 +1688,6 @@ fn finish(kv: &KvReplay, shared: &SharedState, req: &Request, lag_ns: Option<u64
 /// run stops or the connection fails.
 async fn drive_stores(
     client: &mut ringline_redis::Client,
-    conn: ConnCtx,
     ctx: &KvConn<'_>,
     rng: &mut Xoshiro256PlusPlus,
     dispatch: &Rc<KvDispatcher>,
@@ -1732,7 +1727,6 @@ async fn drive_stores(
         scratch.fill(ctx.kv, &job.req);
         match store(
             client,
-            conn,
             ctx,
             rng,
             &mut inflight,
@@ -1775,7 +1769,6 @@ impl Failure {
 /// connection the reverse.
 async fn drive_tasks(
     client: &mut ringline_redis::Client,
-    conn: ConnCtx,
     ctx: &KvConn<'_>,
     rng: &mut Xoshiro256PlusPlus,
     dispatch: &Rc<KvDispatcher>,
@@ -1812,7 +1805,7 @@ async fn drive_tasks(
         }
         match task.op {
             TaskOp::Get(job, i) => {
-                match load(client, conn, &mut inflight, &job.s, i..i + 1, 1).await {
+                match load(client, &mut inflight, &job.s, i..i + 1, 1).await {
                     Ok(found) => job.answered(found),
                     Err(failure) => {
                         // The GET may have reached the server; the request is
@@ -1826,7 +1819,7 @@ async fn drive_tasks(
                 if job.first_sent.get().is_none() {
                     job.first_sent.set(Some(Instant::now()));
                 }
-                match store(client, conn, ctx, rng, &mut inflight, &job.s, &[i], 1).await {
+                match store(client, ctx, rng, &mut inflight, &job.s, &[i], 1).await {
                     Ok(()) => job.answered(ctx.kv, ctx.shared),
                     Err(failure) => {
                         job.fail(ctx.kv);
@@ -1883,7 +1876,6 @@ fn record_outcome(req: &Request, o: &Outcome) {
 /// lookup's fields and `new_tokens` set.
 async fn lookup(
     client: &mut ringline_redis::Client,
-    conn: ConnCtx,
     kv: &KvReplay,
     inflight: &mut InFlight,
     s: &mut Scratch,
@@ -1915,9 +1907,9 @@ async fn lookup(
     for _ in 0..n {
         inflight.push(fired_at);
     }
-    let replies = recv_with_timeout(pipeline.execute(), inflight, conn)
+    let replies = recv_with_timeout(pipeline.execute(), inflight)
         .await
-        .map_err(Failure::Disconnect)?;
+        .map_err(|failed| Failure::Disconnect(failed.close(client)))?;
     inflight.forget_newest(n);
     o.lookup_ns = fired_at.elapsed().as_nanos() as u64;
     let values = match replies {
@@ -1992,7 +1984,6 @@ struct Loaded {
 /// GET the objects `gets` indexes in `s.objects`, at most `depth` in flight.
 async fn load(
     client: &mut ringline_redis::Client,
-    conn: ConnCtx,
     inflight: &mut InFlight,
     s: &Scratch,
     gets: std::ops::Range<usize>,
@@ -2009,16 +2000,16 @@ async fn load(
             if client.fire_get(s.key(next), next as u64).is_err() {
                 note_failed_fire(before, client.pending_count(), inflight, true);
                 metrics::REQUESTS_SENT.add(fired);
-                return Err(send_failed(conn));
+                return Err(send_failed(client));
             }
             inflight.push(fired_at);
             next += 1;
             fired += 1;
         }
-        flush(client, conn, inflight, fired)?;
-        let meta = recv_with_timeout(client.recv_meta(), inflight, conn)
+        flush(client, inflight, fired)?;
+        let meta = recv_with_timeout(client.recv_meta(), inflight)
             .await
-            .map_err(Failure::Disconnect)?
+            .map_err(|failed| Failure::Disconnect(failed.close(client)))?
             .map_err(recv_failed)?;
         inflight.pop();
         done += 1;
@@ -2059,7 +2050,6 @@ fn settle(o: &mut Outcome, kv: &KvReplay, input: u64) {
 #[allow(clippy::too_many_arguments)]
 async fn run_request(
     client: &mut ringline_redis::Client,
-    conn: ConnCtx,
     ctx: &KvConn<'_>,
     rng: &mut Xoshiro256PlusPlus,
     inflight: &mut InFlight,
@@ -2069,7 +2059,7 @@ async fn run_request(
     store_inline: bool,
 ) -> Result<Outcome, Failure> {
     let kv = ctx.kv;
-    let mut o = lookup(client, conn, kv, inflight, s, req).await?;
+    let mut o = lookup(client, kv, inflight, s, req).await?;
     if req.chunks.is_empty() {
         return Ok(o);
     }
@@ -2078,7 +2068,7 @@ async fn run_request(
     let gets = o.lookup_hit * kv.mapper.sharding().ranks as usize;
     if gets > 0 {
         let t0 = Instant::now();
-        let found = load(client, conn, inflight, s, 0..gets, ctx.pipeline_depth).await?;
+        let found = load(client, inflight, s, 0..gets, ctx.pipeline_depth).await?;
         if let Some(cut) = found.cut {
             o.hit = o.hit.min(cut);
         }
@@ -2093,17 +2083,7 @@ async fn run_request(
     // 3. Store.
     if store_inline && !s.sets.is_empty() {
         let t0 = Instant::now();
-        store(
-            client,
-            conn,
-            ctx,
-            rng,
-            inflight,
-            s,
-            &s.sets,
-            ctx.pipeline_depth,
-        )
-        .await?;
+        store(client, ctx, rng, inflight, s, &s.sets, ctx.pipeline_depth).await?;
         o.sets = s.sets.len();
         o.store_ns = t0.elapsed().as_nanos() as u64;
     }
@@ -2119,7 +2099,6 @@ async fn run_request(
 #[allow(clippy::too_many_arguments)]
 async fn run_request_vllm(
     client: &mut ringline_redis::Client,
-    conn: ConnCtx,
     ctx: &KvConn<'_>,
     inflight: &mut InFlight,
     s: &mut Scratch,
@@ -2129,7 +2108,7 @@ async fn run_request_vllm(
     queued: &mut Option<Rc<Scratch>>,
 ) -> Result<Outcome, Failure> {
     let kv = ctx.kv;
-    let mut o = lookup(client, conn, kv, inflight, s, req).await?;
+    let mut o = lookup(client, kv, inflight, s, req).await?;
     if req.chunks.is_empty() {
         return Ok(o);
     }
@@ -2182,7 +2161,6 @@ async fn run_request_vllm(
 #[allow(clippy::too_many_arguments)]
 async fn store(
     client: &mut ringline_redis::Client,
-    conn: ConnCtx,
     ctx: &KvConn<'_>,
     rng: &mut Xoshiro256PlusPlus,
     inflight: &mut InFlight,
@@ -2211,16 +2189,16 @@ async fn store(
             if sent.is_err() {
                 note_failed_fire(before, client.pending_count(), inflight, true);
                 metrics::REQUESTS_SENT.add(fired);
-                return Err(send_failed(conn));
+                return Err(send_failed(client));
             }
             inflight.push(fired_at);
             next += 1;
             fired += 1;
         }
-        flush(client, conn, inflight, fired)?;
-        let meta = recv_with_timeout(client.recv_meta(), inflight, conn)
+        flush(client, inflight, fired)?;
+        let meta = recv_with_timeout(client.recv_meta(), inflight)
             .await
-            .map_err(Failure::Disconnect)?
+            .map_err(|failed| Failure::Disconnect(failed.close(client)))?
             .map_err(recv_failed)?;
         inflight.pop();
         done += 1;
@@ -2253,7 +2231,6 @@ fn decimal_len(mut v: usize) -> usize {
 /// Send what the fire loop buffered and count it.
 fn flush(
     client: &mut ringline_redis::Client,
-    conn: ConnCtx,
     inflight: &mut InFlight,
     fired: u64,
 ) -> Result<(), Failure> {
@@ -2261,7 +2238,7 @@ fn flush(
     if client.flush().is_err() {
         let discarded = note_discarded(before, client.pending_count(), inflight, true);
         metrics::REQUESTS_SENT.add(fired - discarded as u64);
-        return Err(send_failed(conn));
+        return Err(send_failed(client));
     }
     metrics::REQUESTS_SENT.add(fired);
     Ok(())
@@ -2270,8 +2247,8 @@ fn flush(
 /// A GET or SET of a request could not be sent. Earlier ones of the same
 /// request are on the wire, so the request cannot finish in order; drop the
 /// connection and let it reconnect.
-fn send_failed(conn: ConnCtx) -> Failure {
-    conn.close();
+fn send_failed(client: &mut ringline_redis::Client) -> Failure {
+    client.close();
     Failure::Disconnect(DisconnectReason::SendError)
 }
 

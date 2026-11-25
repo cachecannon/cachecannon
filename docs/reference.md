@@ -24,24 +24,14 @@ threads = 4
 # Formats: "0-3", "0,2,4,6", "0-3,8-11"
 cpu_list = "0-3"
 
-# Print ringline's per-worker event-loop diagnostics to stderr at shutdown
-# (`[ringline diag]` iteration mix and `[ringline stall]` stall buckets).
-# io_uring only; off by default.
+# Log ringline's per-worker event-loop diagnostics to stderr at shutdown
+# (`[ringline diag]` iteration mix and `[ringline stall]` stall buckets), at
+# `info`. io_uring only; off by default.
 ringline_diag = false
 
-# Provided recv-buffer ring, per worker. Both default to ringline's own values;
-# the resolved geometry is printed by `format = "verbose"`.
-#
-# Buffers in the ring, shared by every connection on the worker. Must be a
-# power of two. Default: 256. A buffer is held only between a completion and
-# the client draining it, not for the life of a connection, so this serves
-# thousands of connections without running dry — measured at 10,000 connections
-# and 20,000 req/s of 56 KiB values with zero ENOBUFS parks.
-# recv_ring_size = 256
-
-# Bytes per buffer. Default: 16384. A response larger than this spans several
-# buffers and costs one recv CQE each.
-# recv_buffer_size = 16384
+# `recv_ring_size` and `recv_buffer_size` were removed and are rejected: the
+# provided-buffer receive ring they sized is gone from ringline. On io_uring
+# each connection receives into its own buffer.
 
 # Seed for the per-connection RNGs that choose keys and commands. Unset draws
 # one from OS entropy, so separate processes send different key sequences; the
@@ -310,7 +300,7 @@ lists.
 
 | Protocol and backend | Option off | Option on |
 |----------------------|------------|-----------|
-| resp, resp3 on io_uring | value drained from the kernel-filled provided buffers; no userspace copy | each reply copied from the provided buffers into the accumulator (one userspace copy), then CRC-32c |
+| resp, resp3 on io_uring | the kernel receives into the connection's accumulator and the value is drained from it; no userspace copy | the kernel receives into the accumulator; a reply larger than its 32 KiB buffer moves to a larger buffer, copying at most the 32 KiB already received; then CRC-32c |
 | resp, resp3 on mio | each 8 KiB read copied into the accumulator and the value drained from it | same copy; the option adds the CRC-32c and holds the whole reply until it is parsed |
 | memcache, memcache-binary (both backends) | `recv` already assembles each reply in the accumulator | adds the CRC-32c over the returned slice |
 
@@ -326,7 +316,8 @@ Differences from the default path:
   latency of later replies on the same worker.
 - Client memory. `recv` holds each whole reply until it is parsed, so peak
   accumulator memory is up to connections × `pipeline_depth` × value size.
-  `recv_meta` holds about one read burst per connection.
+  `recv_meta` holds about one read burst per connection, which on io_uring
+  fits in the connection's 32 KiB receive buffer.
 - An unexpected reply type to a RESP GET is a per-request error and the
   connection stays open. With the option off it closes the connection, which
   is counted in `disconnects_recv_error`.

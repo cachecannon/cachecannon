@@ -8,7 +8,7 @@ A high-performance load generator for cache servers with support for multiple pr
 curl -fsSL https://cachecannon.cc/install.sh | bash
 ```
 
-This configures the package repository for your OS and installs cachecannon. Future updates come through `apt upgrade` or `dnf upgrade`. Supports Debian/Ubuntu and RHEL/Fedora on amd64 and arm64. The packages are built with io_uring and need Linux 6.1 or later; on an older kernel, [build from source](#build-from-source) (under Other installation methods) on that host.
+This configures the package repository for your OS and installs cachecannon. Future updates come through `apt upgrade` or `dnf upgrade`. Supports Debian/Ubuntu and RHEL/Fedora on amd64 and arm64. The packages are built with io_uring and need Linux 6.8 or later; on an older kernel, [build from source](#build-from-source) (under Other installation methods) on that host.
 
 <details>
 <summary>Other installation methods</summary>
@@ -49,10 +49,10 @@ cargo build --release
 ```
 
 Requires Rust 1.89+. Runs on Linux and macOS. The I/O backend is chosen when
-the binary is built: io_uring if the build machine runs Linux 6.1 or later,
+the binary is built: io_uring if the build machine runs Linux 6.8 or later,
 otherwise ringline's mio backend. A binary built with io_uring does not fall
-back to mio at run time, so it needs Linux 6.1 or later on the host where it
-runs. To build with mio on a 6.1+ machine, for example for an older
+back to mio at run time, so it needs Linux 6.8 or later on the host where it
+runs. To build with mio on a 6.8+ machine, for example for an older
 deployment host, pass `--features ringline/force-mio`.
 
 </details>
@@ -79,7 +79,7 @@ cachecannon view results.parquet
 ## Features
 
 - **Multiple protocols** — Valkey/Redis RESP2/RESP3, Memcache ASCII/binary, Ping
-- **I/O backend** — ringline, on io_uring or mio as chosen at build time (see [Build from source](#build-from-source), under Other installation methods). The published packages use io_uring and need Linux 6.1 or later
+- **I/O backend** — ringline, on io_uring or mio as chosen at build time (see [Build from source](#build-from-source), under Other installation methods). The published packages use io_uring and need Linux 6.8 or later
 - **Request pipelining** — Configurable pipeline depth per connection
 - **Latency histograms** — p50, p90, p99, p99.9, p99.99, plus GET time-to-first-byte
 - **[Prefill and backfill](docs/guide.md#prefill)** — Pre-populate the cache or auto-SET on miss (cache-aside)

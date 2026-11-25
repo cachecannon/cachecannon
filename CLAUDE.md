@@ -23,9 +23,10 @@ comparing achieved throughput, not CPU — flat throughput means the workers wer
 spinning and the extra ones are pure cost. `docs/guide.md` has the procedure.
 
 Since #151 the generator's own runtime counters reach `/metrics` and the parquet
-snapshot: `ringline/pool{op="recv_parked"}`, `ringline/bytes{op="fallback_received"}`,
-`ringline/ring{op="sqe_submit_failures"}`. Non-zero means the client is the
-story.
+snapshot: `ringline/pool{op="send_exhausted"}`,
+`ringline/pool{op="standalone_tasks_exhausted"}`,
+`ringline/ring{op="sqe_submit_failures"}`, `ringline/ring{op="push_retry_waits"}`.
+Non-zero means the client is the story.
 
 **A metric pinned at its ceiling cannot show an improvement.** Per-worker CPU
 reading 1.00 in both arms of an A/B does not mean unchanged — it means the
@@ -79,27 +80,45 @@ timer per connection. At that cost the workers could not read replies fast
 enough to meet the 1 s deadline, so the run also reported ~480K timeouts per
 60 s that the timer had caused.
 
+That cost came from ringline's timers being io_uring timeout SQEs. Since
+ringline #838 a timer is an
+entry in a per-worker heap and submits nothing to the ring, so a per-recv timer
+no longer walks a kernel list. The per-connection timer is kept; a per-recv
+timer on the heap has not been measured.
+
 Measure any new per-request kernel operation against the same path disabled, at
 the highest connection count, before trusting the counters it drives.
 
 ## ringline
 
 **Per-worker pools default to fixed sizes, independent of the workload.**
-Five matter: `standalone_task_capacity` is scaled by connections-per-worker in
-`src/runner.rs` (it was silently capping runs at 2040 connections); the timer
+`standalone_task_capacity` is scaled by connections-per-worker in
+`src/runner.rs` (it was silently capping runs at 2040 connections). The timer
 pool is fixed by ringline at 65536 slots per worker (`ringline::TIMER_SLOTS`),
-four per connection at ringline's default connection table of 16,000 per
-worker, which cachecannon does not raise; the send pool and zero-copy
-send slab are sized from connections, pipeline depth, batch size, value length
-and TLS (`SendLoad`; at ringline's defaults some connections sent almost nothing
-and went unmeasured); `recv_buffer.ring_size` is deliberately left at ringline's
-default and exposed as `general.recv_ring_size` instead. Adding another pool
-user means checking whether it needs the same treatment.
+at least four per connection up to 16,000 connections per worker, ringline's
+default connection table and the most cachecannon accepts on one worker.
+cachecannon sizes that table from the workload (`ringline_max_connections`):
+left at ringline's default, ringline shrinks it along with the io_uring rings
+under a low `RLIMIT_MEMLOCK`, and connections past it fail to connect while the
+run goes on. The send pool and zero-copy send slab
+are sized from connections, pipeline depth, batch size, value length and TLS
+(`SendLoad`; at ringline's defaults some connections sent almost nothing and
+went unmeasured). `zero_copy_hold_cap` is set to `usize::MAX`: at ringline's
+default of 16 slab entries per connection the clients copy a guarded batch,
+values included, into one send, and the send pool is sized without zero-copy
+value bytes. Adding another pool user means checking whether it needs the same
+treatment.
 
-**Recv buffers are not held per connection.** A buffer is held only between a
-completion and the client draining it, so ring depth divided by connection count
-is not a meaningful ratio. Measured: 10,000 connections, 56 KiB responses, four
-buffers per response against a 256-buffer ring — `parks=0` on every worker.
+**Receive buffers are per connection (ringline #716).** ringline removed
+the shared TCP provided-buffer ring (ringline #716), and with it
+`general.recv_ring_size` and `general.recv_buffer_size`, which config load now
+rejects. On io_uring a connection holds a 32 KiB buffer (`recv_direct_region`)
+from its first receive, so receive memory grows with the connection count:
+10,000 connections hold about 313 MiB. A reply that does not fit borrows a
+buffer from a per-worker pool that keeps at most 16 MiB of free buffers
+(`recv_direct_pool_max`); `ringline/recv_direct{op="pool_allocated"}` counts the
+borrows the pool could not serve from a free buffer. cachecannon leaves both at
+ringline's defaults and exposes neither; measure before adding a key.
 
 **Linking ringline registers its metrics globally** via metriken, whether or not
 this crate mentions them. They arrive as `ShardedCounterGroup`, which surfaces as

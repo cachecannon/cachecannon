@@ -9,7 +9,7 @@ use std::time::Duration;
 /// High-performance Valkey/Redis benchmark tool.
 ///
 /// A drop-in benchmarking CLI compatible with valkey-benchmark conventions,
-/// powered by the cachecannon engine (io_uring when built on Linux 6.1 or
+/// powered by the cachecannon engine (io_uring when built on Linux 6.8 or
 /// later, mio otherwise) with per-connection pipelining.
 #[derive(Parser, Debug)]
 #[command(name = "valkey-lab")]

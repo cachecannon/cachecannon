@@ -286,12 +286,13 @@ fn generate_prometheus_output() -> String {
             }
             // Counter groups are one registry entry holding N labelled slots.
             // ringline exposes its whole runtime this way -- `ringline/pool`
-            // carries RECV_PARKED and BUFFER_RING_EMPTY, `ringline/bytes`
-            // carries FALLBACK_RECEIVED -- so without this arm the generator's
-            // own saturation signals were counted at runtime and then dropped
-            // here, which is exactly how a buffer-starved run reads as server
-            // latency. Same silent-drop the `Histogram` arm above was added to
-            // fix; groups were left behind.
+            // carries SEND_EXHAUSTED and STANDALONE_TASKS_EXHAUSTED,
+            // `ringline/ring` carries SQE_SUBMIT_FAILURES and PUSH_RETRY_WAITS
+            // -- so without this arm the generator's own saturation signals
+            // were counted at runtime and then dropped here, which is how a
+            // generator short of capacity reads as server latency. Same
+            // silent-drop the `Histogram` arm above was added to fix; groups
+            // were left behind.
             //
             // Slot labels come from ringline's `init_metadata()`, which its
             // worker startup calls, so only slots the runtime declared are
@@ -402,7 +403,7 @@ fn sanitize_name(name: &str) -> String {
 }
 
 /// Render one counter-group slot's metadata as a Prometheus label set,
-/// `{op="recv_parked"}`. Returns an empty string for a slot with no labels, so
+/// `{op="send_exhausted"}`. Returns an empty string for a slot with no labels, so
 /// the caller can concatenate unconditionally.
 ///
 /// Keys are sorted: `metadata_snapshot()` hands back a `HashMap` per slot, and
@@ -509,7 +510,7 @@ fn create_snapshot() -> Snapshot {
             //
             // Naming follows metriken-exposition's own snapshotter: the slot
             // index is appended as `x{idx}`, the base name stays in the `metric`
-            // metadata key, and the slot's labels (`op = recv_parked`) are
+            // metadata key, and the slot's labels (`op = send_exhausted`) are
             // merged in. Getting this right now means a recording written today
             // still lines up when cachecannon moves off 0.16.
             Some(metriken::Value::CounterGroup(group)) => {
@@ -803,7 +804,7 @@ mod tests {
 
     #[test]
     fn counter_groups_reach_the_prometheus_endpoint() {
-        TEST_PROMETHEUS_GROUP.insert_metadata(0, "op".into(), "recv_parked".into());
+        TEST_PROMETHEUS_GROUP.insert_metadata(0, "op".into(), "send_exhausted".into());
         assert!(TEST_PROMETHEUS_GROUP.add(0, 7));
 
         let output = generate_prometheus_output();
@@ -813,7 +814,7 @@ mod tests {
             "counter group missing from the exposition output:\n{output}"
         );
         assert!(
-            output.contains("test_prometheus_group{op=\"recv_parked\"} 7"),
+            output.contains("test_prometheus_group{op=\"send_exhausted\"} 7"),
             "slot not rendered as a labelled series:\n{output}"
         );
         // Slot 1 was never written, so it has no metadata and no value. An
@@ -827,7 +828,7 @@ mod tests {
 
     #[test]
     fn counter_groups_reach_the_msgpack_snapshot() {
-        TEST_SNAPSHOT_GROUP.insert_metadata(1, "op".into(), "fallback_received".into());
+        TEST_SNAPSHOT_GROUP.insert_metadata(1, "op".into(), "send_eagain".into());
         assert!(TEST_SNAPSHOT_GROUP.add(1, 9));
 
         let AdminBody::Msgpack(bytes) = respond("/metrics/binary") else {
@@ -848,7 +849,7 @@ mod tests {
         assert_eq!(slot.value, 9);
         assert_eq!(
             slot.metadata.get("op").map(String::as_str),
-            Some("fallback_received")
+            Some("send_eagain")
         );
         // The base name stays queryable via the `metric` key; the slot is
         // distinguished by its label, not by the column name.
@@ -865,15 +866,16 @@ mod tests {
     /// `ringline/pool` namespace would fail here rather than silently going
     /// missing from a dashboard again.
     ///
-    /// `RECV_PARKED` is the specific counter that distinguishes a
-    /// buffer-starved generator from a slow server, which is why it is the one
-    /// pinned here.
+    /// `STANDALONE_TASKS_EXHAUSTED` is pinned because it is the counter that
+    /// says this process failed to create connections: every connection is a
+    /// standalone task, and a spawn on a full slab is refused (see
+    /// `standalone_task_capacity` in `runner.rs`).
     #[test]
     fn ringlines_own_pool_group_is_exposed_with_its_labels() {
         // Backend-agnostic: ringline registers slot labels from `launch()`, but
         // a unit test never launches a worker, so do it directly. Idempotent.
         ringline::metrics::init_metadata();
-        ringline::metrics::POOL.add(ringline::metrics::pool::RECV_PARKED, 3);
+        ringline::metrics::POOL.add(ringline::metrics::pool::STANDALONE_TASKS_EXHAUSTED, 3);
 
         let output = generate_prometheus_output();
 
@@ -882,8 +884,8 @@ mod tests {
             "ringline/pool missing from the exposition output:\n{output}"
         );
         assert!(
-            output.contains("ringline_pool{op=\"recv_parked\"}"),
-            "recv_parked not rendered as a labelled series:\n{output}"
+            output.contains("ringline_pool{op=\"standalone_tasks_exhausted\"}"),
+            "standalone_tasks_exhausted not rendered as a labelled series:\n{output}"
         );
     }
 
@@ -943,12 +945,12 @@ mod tests {
     #[test]
     fn labels_are_sorted_and_escaped() {
         let metadata = HashMap::from([
-            ("op".to_string(), "recv_parked".to_string()),
+            ("op".to_string(), "send_exhausted".to_string()),
             ("id".to_string(), "a\"b".to_string()),
         ]);
         assert_eq!(
             format_labels(&metadata),
-            "{id=\"a\\\"b\",op=\"recv_parked\"}"
+            "{id=\"a\\\"b\",op=\"send_exhausted\"}"
         );
         assert_eq!(format_labels(&HashMap::new()), "");
     }

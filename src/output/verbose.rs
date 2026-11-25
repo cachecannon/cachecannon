@@ -45,30 +45,6 @@ impl OutputFormatter for VerboseFormatter {
             tracing::info!("value_size: {} bytes", config.workload.values.length);
         }
         tracing::info!("io_engine: ringline ({})", ringline::backend());
-        // The geometry that decides whether a response lands in one buffer or
-        // several, and how many can land at once per worker. Printed because it
-        // is derived rather than configured by default, and because it is the
-        // first thing to check when reported latency outruns the target's own.
-        let (ring_size, buffer_size) = crate::runner::resolved_recv_geometry(config);
-        if config.workload.kv_replay.is_some() || config.workload.trace_replay.is_some() {
-            // Object sizes come from the trace, read after this.
-            tracing::info!(
-                "recv_buffer: {} x {} bytes per worker",
-                ring_size,
-                buffer_size
-            );
-        } else {
-            let per_response = (config.workload.values.length as u32)
-                .div_ceil(buffer_size)
-                .max(1);
-            tracing::info!(
-                "recv_buffer: {} x {} bytes per worker ({} buffer{} per response)",
-                ring_size,
-                buffer_size,
-                per_response,
-                if per_response == 1 { "" } else { "s" }
-            );
-        }
         if let Some(ref cpu_list) = config.general.cpu_list {
             tracing::info!("cpu_list: {}", cpu_list);
         }

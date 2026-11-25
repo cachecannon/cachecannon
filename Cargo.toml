@@ -104,8 +104,9 @@ metriken-exposition = { version = "0.22", default-features = false, features = [
 # `MsgpackToParquet` for `--parquet`; `convert` alone compiles no SQLite.
 metriken-storage = { version = "0.3", default-features = false, features = ["convert"] }
 
-# TLS
-rustls = { version = "0.23", default-features = false, features = ["std", "ring"] }
+# TLS. rustls is not a direct dependency: `TlsClientConfig::from_rustls` takes
+# ringline's fork of it (ringline-tls), so the client config is built from the
+# re-export, `ringline::tls_config::rustls`, which also selects the ring provider.
 webpki-roots = "1"
 
 # Request-level KV-cache traces, model geometry and the request-to-object
@@ -209,17 +210,19 @@ dendro = { version = "0.4", default-features = false }
 
 # Build against unreleased ringline main. Pinned to a commit so builds are
 # reproducible; drop this section once the next ringline release is on crates.io.
-# ringline main carries 0.7.0-alpha.0, so the `ringline` requirements above must
-# be `0.7.0-alpha.0` for this patch to apply: a `0.6.x` requirement does not
+# ringline main carries 0.7.0 pre-releases (0.7.0-alpha.189 at the pin below),
+# so the `ringline` requirement above must be `0.7.0-alpha.0`, which matches
+# every later pre-release, for this patch to apply: a `0.6.x` requirement does not
 # match a 0.7 pre-release, and cargo then builds a second ringline from
 # crates.io alongside the patched one the client crates use.
 [patch.crates-io]
-# ab81ceb is ringline main after #682, which added `Client::recv_ready`.
-# It also carries ringline-redis `ClientBuilder::get_command` / `set_command`
-# (ringline #674), which `[resp] module` uses.
+# b7f1a5a is ringline main after #1017 (ringline 0.7.0-alpha.189,
+# ringline-memcache 0.7.2). It carries `Client::recv_ready` (#682) and
+# ringline-redis `ClientBuilder::get_command` / `set_command` (#674), which
+# `[resp] module` uses.
 # metriken-core declares `links`, so ringline and cachecannon must agree on one
 # metriken-core (0.3, from metriken 0.11.3 since ringline #649).
-ringline = { git = "https://github.com/ringline-rs/ringline", rev = "ab81ceb" }
-ringline-redis = { git = "https://github.com/ringline-rs/ringline", rev = "ab81ceb" }
-ringline-memcache = { git = "https://github.com/ringline-rs/ringline", rev = "ab81ceb" }
-ringline-ping = { git = "https://github.com/ringline-rs/ringline", rev = "ab81ceb" }
+ringline = { git = "https://github.com/ringline-rs/ringline", rev = "b7f1a5a" }
+ringline-redis = { git = "https://github.com/ringline-rs/ringline", rev = "b7f1a5a" }
+ringline-memcache = { git = "https://github.com/ringline-rs/ringline", rev = "b7f1a5a" }
+ringline-ping = { git = "https://github.com/ringline-rs/ringline", rev = "b7f1a5a" }

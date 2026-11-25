@@ -26,7 +26,7 @@ valkey-lab saturate --slo-p999 1ms --start-rate 100000
 cargo install --path . --bin valkey-lab
 ```
 
-Runs on Linux and macOS. It uses io_uring when built on Linux 6.1 or later, and ringline's mio backend otherwise. The backend is fixed when the binary is built, so an io_uring build needs Linux 6.1 or later on the host where it runs. The cachecannon apt and yum repositories also carry a `valkey-lab` package, and install.sh installs it. It is built with io_uring and needs Linux 6.1 or later. To build with mio on a 6.1+ machine, pass `--features ringline/force-mio`.
+Runs on Linux and macOS. It uses io_uring when built on Linux 6.8 or later, and ringline's mio backend otherwise. The backend is fixed when the binary is built, so an io_uring build needs Linux 6.8 or later on the host where it runs. The cachecannon apt and yum repositories also carry a `valkey-lab` package, and install.sh installs it. It is built with io_uring and needs Linux 6.8 or later. To build with mio on a 6.8+ machine, pass `--features ringline/force-mio`.
 
 ## CLI Reference
 

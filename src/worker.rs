@@ -15,7 +15,7 @@ use crate::read_values::ValueReader;
 use crate::tracereplay::TraceReplay;
 use ratelimit::{Ratelimiter, TryWaitError};
 
-use ringline::{AsyncEventHandler, ConnCtx, Connection, DriverCtx, RegionId, SendGuard};
+use ringline::{AsyncEventHandler, Connection, RegionId, SendGuard};
 
 use rand::prelude::*;
 use rand_xoshiro::Xoshiro256PlusPlus;
@@ -301,10 +301,9 @@ pub(crate) struct ValuePoolGuard {
 }
 
 impl SendGuard for ValuePoolGuard {
-    fn as_ptr_len(&self) -> (*const u8, u32) {
-        // SAFETY: offset + len is always within the pool bounds (enforced at construction).
-        let ptr = unsafe { self.pool.as_ptr().add(self.offset as usize) };
-        (ptr, self.len)
+    fn as_bytes(&self) -> &[u8] {
+        let start = self.offset as usize;
+        &self.pool[start..start + self.len as usize]
     }
 
     fn region(&self) -> RegionId {
@@ -881,10 +880,8 @@ async fn routed_wait_send_or_recv(
     node: usize,
     ready: ringline::RecvReadyFuture,
     inflight: &mut InFlight,
-    conn: ConnCtx,
-) -> Result<bool, DisconnectReason> {
-    let woke =
-        recv_with_timeout(ringline::select(queues.wait(node), ready), inflight, conn).await?;
+) -> Result<bool, RecvFailed> {
+    let woke = recv_with_timeout(ringline::select(queues.wait(node), ready), inflight).await?;
     Ok(matches!(woke, ringline::Either::Left(())))
 }
 
@@ -1176,7 +1173,7 @@ impl AsyncEventHandler for BenchHandler {
         }))
     }
 
-    fn on_tick(&mut self, ctx: &mut DriverCtx<'_>) {
+    fn on_tick(&mut self) {
         let phase = self.shared.phase();
 
         // Update recording state on phase transition
@@ -1190,7 +1187,9 @@ impl AsyncEventHandler for BenchHandler {
 
         // Check for shutdown
         if phase.should_stop() {
-            ctx.request_shutdown();
+            // Fails only outside the executor, and ringline calls `on_tick`
+            // inside it.
+            let _ = ringline::request_shutdown();
             return;
         }
 
@@ -1521,6 +1520,15 @@ pub fn key_share_endpoints(shares: &[f64], total: usize) -> Vec<usize> {
 /// A connect that ringline cannot submit (no free connection slot, no TLS
 /// client config) fails when the future is first polled, so it is counted and
 /// logged as a failed connect like any other.
+///
+/// Every connection task closes its connection before it reconnects and when
+/// it returns, including after a failed HELLO, precheck or DMA hello. Since
+/// ringline #743, dropping the last half of a connection closes it, with
+/// the same graceful close as `close()`; a client owns both halves. Each task
+/// keeps the `Connection`, then the client built on it, in a local of its
+/// reconnect loop's body, so the drop at `continue`, at the end of the body,
+/// or at `return` closes it before the next connect. A request timeout closes
+/// it at once through [`RecvFailed::close`].
 pub(crate) async fn establish_connection(
     endpoint: SocketAddr,
     worker_id: usize,
@@ -1568,21 +1576,6 @@ pub(crate) async fn establish_connection(
             metrics::DISCONNECTS_CONNECT_FAILED.increment();
             Err(DisconnectReason::ConnectFailed)
         }
-    }
-}
-
-/// Closes the connection when dropped.
-///
-/// Dropping a ringline `Connection`, or a client built on one, releases its
-/// claim on the slot and leaves the socket open. Each connection task holds
-/// one of these from connect to the end of its loop body. The connection is
-/// therefore closed before every reconnect and when the task returns.
-/// `ConnCtx::close` does nothing for a connection that is already closed.
-pub(crate) struct CloseOnDrop(pub(crate) ConnCtx);
-
-impl Drop for CloseOnDrop {
-    fn drop(&mut self) {
-        self.0.close();
     }
 }
 
@@ -1738,8 +1731,6 @@ async fn resp_connection_task(state: Arc<SharedWorkerState>, endpoint_idx: usize
             }
         };
 
-        let conn = connection.as_conn();
-        let _close = CloseOnDrop(conn);
         metrics::CONNECTIONS_ACTIVE.increment();
         let builder = ringline_redis::Client::builder(connection).on_result(make_resp_callback(
             routed_queues().is_some(),
@@ -1766,7 +1757,7 @@ async fn resp_connection_task(state: Arc<SharedWorkerState>, endpoint_idx: usize
         tracing::debug!(
             worker = state.task_state.worker_id,
             endpoint = %endpoint,
-            conn_index = conn.index(),
+            conn_index = client.id().index(),
             "connected (RESP)"
         );
 
@@ -1846,7 +1837,7 @@ async fn resp_connection_task(state: Arc<SharedWorkerState>, endpoint_idx: usize
                     request_timeout: config.connection.request_timeout,
                     backfill_on_miss: state.task_state.backfill_on_miss,
                 };
-                crate::tracereplay::drive(&mut client, conn, &ctx, &mut rng).await
+                crate::tracereplay::drive(&mut client, &ctx, &mut rng).await
             }
             (Some(kv), None) => {
                 let ctx = crate::kvreplay::KvConn {
@@ -1856,12 +1847,11 @@ async fn resp_connection_task(state: Arc<SharedWorkerState>, endpoint_idx: usize
                     pipeline_depth: config.connection.pipeline_depth,
                     request_timeout: config.connection.request_timeout,
                 };
-                crate::kvreplay::drive(&mut client, conn, &ctx, &mut rng).await
+                crate::kvreplay::drive(&mut client, &ctx, &mut rng).await
             }
             (None, None) => {
                 drive_resp_workload(
                     &mut client,
-                    conn,
                     &state,
                     endpoint_idx,
                     &mut rng,
@@ -1888,7 +1878,6 @@ async fn resp_connection_task(state: Arc<SharedWorkerState>, endpoint_idx: usize
 /// Drive the RESP workload on a connected client using fire/recv pipelining.
 async fn drive_resp_workload(
     client: &mut ringline_redis::Client,
-    conn: ConnCtx,
     state: &Arc<SharedWorkerState>,
     endpoint_idx: usize,
     rng: &mut Xoshiro256PlusPlus,
@@ -2334,10 +2323,11 @@ async fn drive_resp_workload(
             && pipeline_depth.saturating_sub(client.pending_count()) >= batch_size
             && let Ok(ready) = client.recv_ready()
         {
-            match routed_wait_send_or_recv(queues, endpoint_idx, ready, &mut inflight, conn).await {
+            match routed_wait_send_or_recv(queues, endpoint_idx, ready, &mut inflight).await {
                 Ok(true) => continue,
                 Ok(false) => {}
-                Err(reason) => {
+                Err(failed) => {
+                    let reason = failed.close(client);
                     requeue_drained_prefill(
                         &state.task_state,
                         key_buf,
@@ -2351,14 +2341,14 @@ async fn drive_resp_workload(
         // By default, zero-copy recv for every reply, every op kind and phase
         // (prefill SETs included): only the header (kind / hit-miss / length /
         // error) is used, so `recv_meta` drains each value without
-        // materializing it — zero-copy over provided buffers on io_uring,
-        // bounded streaming-drain on mio. `workload.read_values` switches to
+        // materializing it, a streaming drain over the connection's
+        // accumulator on both backends. `workload.read_values` switches to
         // `recv`, which assembles each reply, and reads every GET hit's value.
         let received = match value_reader.as_mut() {
-            None => recv_with_timeout(client.recv_meta(), &mut inflight, conn)
+            None => recv_with_timeout(client.recv_meta(), &mut inflight)
                 .await
                 .map(|r| r.map(map_respmeta)),
-            Some(reader) => recv_with_timeout(client.recv(), &mut inflight, conn)
+            Some(reader) => recv_with_timeout(client.recv(), &mut inflight)
                 .await
                 .map(|r| r.map(|op| map_resp_op(op, reader))),
         };
@@ -2372,7 +2362,8 @@ async fn drive_resp_workload(
                 requeue_drained_prefill(&state.task_state, key_buf, prefill_in_flight.drain(..));
                 return Err(DisconnectReason::RecvError);
             }
-            Err(reason) => {
+            Err(failed) => {
+                let reason = failed.close(client);
                 requeue_drained_prefill(&state.task_state, key_buf, prefill_in_flight.drain(..));
                 return Err(reason);
             }
@@ -2711,49 +2702,46 @@ pub(crate) fn check_resp_redirect_parsed(
 /// loop serves both the ASCII and binary protocols. `Client` and `BinaryClient`
 /// expose the same fire/recv pipelining surface (only the ASCII client adds the
 /// high-level request API and `version()`), so each method here just forwards.
-/// The ASCII or binary client, plus the connection it was built on. The
-/// clients no longer hand out their `ConnCtx` (ringline keeps the read side
-/// exclusive), so the handle is kept here for closing and logging.
 enum McClient {
-    Ascii(ringline_memcache::Client, ConnCtx),
-    Binary(ringline_memcache::BinaryClient, ConnCtx),
+    Ascii(ringline_memcache::Client),
+    Binary(ringline_memcache::BinaryClient),
 }
 
 impl McClient {
     fn is_alive(&self) -> bool {
         match self {
-            McClient::Ascii(c, _) => c.is_alive(),
-            McClient::Binary(c, _) => c.is_alive(),
+            McClient::Ascii(c) => c.is_alive(),
+            McClient::Binary(c) => c.is_alive(),
         }
     }
 
     fn flush(&mut self) -> Result<(), ringline_memcache::Error> {
         match self {
-            McClient::Ascii(c, _) => c.flush(),
-            McClient::Binary(c, _) => c.flush(),
+            McClient::Ascii(c) => c.flush(),
+            McClient::Binary(c) => c.flush(),
         }
     }
 
     #[inline]
     fn pending_count(&self) -> usize {
         match self {
-            McClient::Ascii(c, _) => c.pending_count(),
-            McClient::Binary(c, _) => c.pending_count(),
+            McClient::Ascii(c) => c.pending_count(),
+            McClient::Binary(c) => c.pending_count(),
         }
     }
 
     fn recv_ready(&mut self) -> Result<ringline::RecvReadyFuture, ringline_memcache::Error> {
         match self {
-            McClient::Ascii(c, _) => c.recv_ready(),
-            McClient::Binary(c, _) => c.recv_ready(),
+            McClient::Ascii(c) => c.recv_ready(),
+            McClient::Binary(c) => c.recv_ready(),
         }
     }
 
     #[inline]
     fn fire_get(&mut self, key: &[u8], user_data: u64) -> Result<(), ringline_memcache::Error> {
         match self {
-            McClient::Ascii(c, _) => c.fire_get(key, user_data),
-            McClient::Binary(c, _) => c.fire_get(key, user_data),
+            McClient::Ascii(c) => c.fire_get(key, user_data),
+            McClient::Binary(c) => c.fire_get(key, user_data),
         }
     }
 
@@ -2767,31 +2755,38 @@ impl McClient {
         user_data: u64,
     ) -> Result<(), ringline_memcache::Error> {
         match self {
-            McClient::Ascii(c, _) => c.fire_set_with_guard(key, guard, flags, exptime, user_data),
-            McClient::Binary(c, _) => c.fire_set_with_guard(key, guard, flags, exptime, user_data),
+            McClient::Ascii(c) => c.fire_set_with_guard(key, guard, flags, exptime, user_data),
+            McClient::Binary(c) => c.fire_set_with_guard(key, guard, flags, exptime, user_data),
         }
     }
 
     #[inline]
     fn fire_delete(&mut self, key: &[u8], user_data: u64) -> Result<(), ringline_memcache::Error> {
         match self {
-            McClient::Ascii(c, _) => c.fire_delete(key, user_data),
-            McClient::Binary(c, _) => c.fire_delete(key, user_data),
+            McClient::Ascii(c) => c.fire_delete(key, user_data),
+            McClient::Binary(c) => c.fire_delete(key, user_data),
         }
     }
 
     #[inline]
     async fn recv(&mut self) -> Result<ringline_memcache::CompletedOp, ringline_memcache::Error> {
         match self {
-            McClient::Ascii(c, _) => c.recv().await,
-            McClient::Binary(c, _) => c.recv().await,
+            McClient::Ascii(c) => c.recv().await,
+            McClient::Binary(c) => c.recv().await,
         }
     }
 
-    #[inline]
-    fn conn(&self) -> ConnCtx {
+    fn close(&mut self) {
         match self {
-            McClient::Ascii(_, conn) | McClient::Binary(_, conn) => *conn,
+            McClient::Ascii(c) => c.close(),
+            McClient::Binary(c) => c.close(),
+        }
+    }
+
+    fn id(&self) -> ringline::ConnId {
+        match self {
+            McClient::Ascii(c) => c.id(),
+            McClient::Binary(c) => c.id(),
         }
     }
 }
@@ -2826,8 +2821,6 @@ async fn memcache_connection_task(state: Arc<SharedWorkerState>, endpoint_idx: u
             }
         };
 
-        let conn = connection.as_conn();
-        let _close = CloseOnDrop(conn);
         metrics::CONNECTIONS_ACTIVE.increment();
         let builder = ringline_memcache::Client::builder(connection)
             .on_result(make_memcache_callback(
@@ -2837,22 +2830,22 @@ async fn memcache_connection_task(state: Arc<SharedWorkerState>, endpoint_idx: u
             .max_batch_size(config.effective_batch_size());
         let binary = matches!(config.target.protocol, CacheProtocol::MemcacheBinary);
         let mut client = if binary {
-            McClient::Binary(builder.build_binary(), conn)
+            McClient::Binary(builder.build_binary())
         } else {
-            McClient::Ascii(builder.build(), conn)
+            McClient::Ascii(builder.build())
         };
 
         tracing::debug!(
             worker = state.task_state.worker_id,
             endpoint = %endpoint,
-            conn_index = conn.index(),
+            conn_index = client.id().index(),
             "connected (Memcache)"
         );
 
         // Precheck: send VERSION to verify connectivity
         if state.task_state.shared.phase() == Phase::Precheck && !state.is_precheck_done() {
             let precheck = match &mut client {
-                McClient::Ascii(c, _) => c.version().await.map(|_| ()),
+                McClient::Ascii(c) => c.version().await.map(|_| ()),
                 // The binary subset has no VERSION opcode (some servers drop the
                 // connection on it) and BinaryClient exposes no version(); a live
                 // connection is a sufficient precheck.
@@ -3283,7 +3276,6 @@ async fn drive_memcache_workload(
             continue;
         }
 
-        let conn = client.conn();
         // Routed, with room for a batch: see the RESP recv loop.
         if let Some(ref queues) = routed
             && (phase == Phase::Warmup || phase == Phase::Running)
@@ -3291,10 +3283,11 @@ async fn drive_memcache_workload(
             && pipeline_depth.saturating_sub(client.pending_count()) >= batch_size
             && let Ok(ready) = client.recv_ready()
         {
-            match routed_wait_send_or_recv(queues, endpoint_idx, ready, &mut inflight, conn).await {
+            match routed_wait_send_or_recv(queues, endpoint_idx, ready, &mut inflight).await {
                 Ok(true) => continue,
                 Ok(false) => {}
-                Err(reason) => {
+                Err(failed) => {
+                    let reason = failed.close(client);
                     requeue_drained_prefill(
                         &state.task_state,
                         key_buf,
@@ -3304,7 +3297,7 @@ async fn drive_memcache_workload(
                 }
             }
         }
-        let op = match recv_with_timeout(client.recv(), &mut inflight, conn).await {
+        let op = match recv_with_timeout(client.recv(), &mut inflight).await {
             Ok(Ok(op)) => op,
             Ok(Err(ringline_memcache::Error::ConnectionClosed)) => {
                 requeue_drained_prefill(&state.task_state, key_buf, prefill_in_flight.drain(..));
@@ -3314,7 +3307,8 @@ async fn drive_memcache_workload(
                 requeue_drained_prefill(&state.task_state, key_buf, prefill_in_flight.drain(..));
                 return Err(DisconnectReason::RecvError);
             }
-            Err(reason) => {
+            Err(failed) => {
+                let reason = failed.close(client);
                 requeue_drained_prefill(&state.task_state, key_buf, prefill_in_flight.drain(..));
                 return Err(reason);
             }
@@ -3491,8 +3485,6 @@ async fn ping_connection_task(state: Arc<SharedWorkerState>, endpoint_idx: usize
             }
         };
 
-        let conn = connection.as_conn();
-        let _close = CloseOnDrop(conn);
         metrics::CONNECTIONS_ACTIVE.increment();
         let builder = ringline_ping::Client::builder(connection)
             .on_result(make_ping_callback(state.task_state.ratelimiter.is_some()));
@@ -3501,7 +3493,7 @@ async fn ping_connection_task(state: Arc<SharedWorkerState>, endpoint_idx: usize
         tracing::debug!(
             worker = state.task_state.worker_id,
             endpoint = %endpoint,
-            conn_index = conn.index(),
+            conn_index = client.id().index(),
             "connected (Ping)"
         );
 
@@ -3539,7 +3531,7 @@ async fn ping_connection_task(state: Arc<SharedWorkerState>, endpoint_idx: usize
             }
         }
 
-        let result = drive_ping_workload(&mut client, conn, &state).await;
+        let result = drive_ping_workload(&mut client, &state).await;
 
         metrics::CONNECTIONS_ACTIVE.decrement();
 
@@ -3557,7 +3549,6 @@ async fn ping_connection_task(state: Arc<SharedWorkerState>, endpoint_idx: usize
 /// Drive the Ping workload: send PING, parse PONG, repeat.
 async fn drive_ping_workload(
     client: &mut ringline_ping::Client,
-    conn: ConnCtx,
     state: &Arc<SharedWorkerState>,
 ) -> Result<(), DisconnectReason> {
     // One request in flight at a time on the ping path.
@@ -3618,7 +3609,7 @@ async fn drive_ping_workload(
             let _ = metrics::SCHEDULE_SLIP.increment(slip);
         }
         inflight.push(fired_at);
-        match recv_with_timeout(client.ping(), &mut inflight, conn).await {
+        match recv_with_timeout(client.ping(), &mut inflight).await {
             Ok(Ok(())) => {}
             Ok(Err(ringline_ping::Error::ConnectionClosed)) => {
                 return Err(DisconnectReason::Eof);
@@ -3626,7 +3617,7 @@ async fn drive_ping_workload(
             Ok(Err(_)) => {
                 return Err(DisconnectReason::RecvError);
             }
-            Err(reason) => return Err(reason),
+            Err(failed) => return Err(failed.close(client)),
         }
         inflight.pop();
     }
@@ -3902,8 +3893,6 @@ async fn resp_append_task(state: Arc<SharedWorkerState>, endpoint_idx: usize, se
             }
         };
 
-        let conn = connection.as_conn();
-        let _close = CloseOnDrop(conn);
         metrics::APPEND_CONNECTIONS_ACTIVE.increment();
         let builder =
             ringline_redis::Client::builder(connection).on_result(make_resp_append_callback());
@@ -3930,19 +3919,12 @@ async fn resp_append_task(state: Arc<SharedWorkerState>, endpoint_idx: usize, se
         tracing::debug!(
             worker = state.task_state.worker_id,
             endpoint = %endpoint,
-            conn_index = conn.index(),
+            conn_index = client.id().index(),
             "connected (RESP, append writer)"
         );
 
-        let result = drive_resp_append(
-            &mut client,
-            conn,
-            &state,
-            endpoint_idx,
-            &mut rng,
-            &mut key_buf,
-        )
-        .await;
+        let result =
+            drive_resp_append(&mut client, &state, endpoint_idx, &mut rng, &mut key_buf).await;
 
         metrics::APPEND_CONNECTIONS_ACTIVE.decrement();
 
@@ -3958,7 +3940,6 @@ async fn resp_append_task(state: Arc<SharedWorkerState>, endpoint_idx: usize, se
 /// Drain the append queue for this endpoint on a connected RESP client.
 async fn drive_resp_append(
     client: &mut ringline_redis::Client,
-    conn: ConnCtx,
     state: &Arc<SharedWorkerState>,
     endpoint_idx: usize,
     rng: &mut Xoshiro256PlusPlus,
@@ -4046,7 +4027,7 @@ async fn drive_resp_append(
             continue;
         }
 
-        let result = match recv_with_timeout(client.recv_meta(), &mut inflight, conn).await {
+        let result = match recv_with_timeout(client.recv_meta(), &mut inflight).await {
             Ok(Ok(meta)) => map_respmeta(meta),
             Ok(Err(ringline_redis::Error::ConnectionClosed)) => {
                 requeue_drained_append(&state.task_state, key_buf, in_flight.drain(..));
@@ -4056,7 +4037,8 @@ async fn drive_resp_append(
                 requeue_drained_append(&state.task_state, key_buf, in_flight.drain(..));
                 return Err(DisconnectReason::RecvError);
             }
-            Err(reason) => {
+            Err(failed) => {
+                let reason = failed.close(client);
                 requeue_drained_append(&state.task_state, key_buf, in_flight.drain(..));
                 return Err(reason);
             }
@@ -4115,23 +4097,21 @@ async fn memcache_append_task(state: Arc<SharedWorkerState>, endpoint_idx: usize
             }
         };
 
-        let conn = connection.as_conn();
-        let _close = CloseOnDrop(conn);
         metrics::APPEND_CONNECTIONS_ACTIVE.increment();
         let builder = ringline_memcache::Client::builder(connection)
             .on_result(make_memcache_append_callback())
             .max_batch_size(append.pipeline_depth);
         let binary = matches!(config.target.protocol, CacheProtocol::MemcacheBinary);
         let mut client = if binary {
-            McClient::Binary(builder.build_binary(), conn)
+            McClient::Binary(builder.build_binary())
         } else {
-            McClient::Ascii(builder.build(), conn)
+            McClient::Ascii(builder.build())
         };
 
         tracing::debug!(
             worker = state.task_state.worker_id,
             endpoint = %endpoint,
-            conn_index = conn.index(),
+            conn_index = client.id().index(),
             "connected (Memcache, append writer)"
         );
 
@@ -4231,8 +4211,7 @@ async fn drive_memcache_append(
             continue;
         }
 
-        let conn = client.conn();
-        let op = match recv_with_timeout(client.recv(), &mut inflight, conn).await {
+        let op = match recv_with_timeout(client.recv(), &mut inflight).await {
             Ok(Ok(op)) => op,
             Ok(Err(ringline_memcache::Error::ConnectionClosed)) => {
                 requeue_drained_append(&state.task_state, key_buf, in_flight.drain(..));
@@ -4242,7 +4221,8 @@ async fn drive_memcache_append(
                 requeue_drained_append(&state.task_state, key_buf, in_flight.drain(..));
                 return Err(DisconnectReason::RecvError);
             }
-            Err(reason) => {
+            Err(failed) => {
+                let reason = failed.close(client);
                 requeue_drained_append(&state.task_state, key_buf, in_flight.drain(..));
                 return Err(reason);
             }
@@ -4421,18 +4401,63 @@ impl InFlight {
     }
 }
 
+/// A connection a task can close: the protocol clients, which own both halves
+/// of their connection.
+pub(crate) trait CloseConn {
+    /// Request a graceful close. Does nothing on a connection already closed.
+    fn close_conn(&mut self);
+}
+
+impl CloseConn for ringline_redis::Client {
+    fn close_conn(&mut self) {
+        self.close();
+    }
+}
+
+impl CloseConn for ringline_ping::Client {
+    fn close_conn(&mut self) {
+        self.close();
+    }
+}
+
+impl CloseConn for McClient {
+    fn close_conn(&mut self) {
+        self.close();
+    }
+}
+
+/// A bounded recv that ended without its reply: the request timeout expired,
+/// or the deadline timer could not be armed. The connection must be closed
+/// before the caller reconnects, and [`close`](Self::close) is the only way to
+/// get the [`DisconnectReason`] out, so a caller cannot return the reason
+/// without closing.
+///
+/// `recv_with_timeout` cannot close the connection itself: the recv future it
+/// is given borrows the client mutably, and the client owns the connection.
+#[must_use = "close the connection with `close`"]
+#[derive(Debug)]
+pub(crate) struct RecvFailed(DisconnectReason);
+
+impl RecvFailed {
+    /// Close `conn` and return why the connection ended.
+    pub(crate) fn close(self, conn: &mut impl CloseConn) -> DisconnectReason {
+        conn.close_conn();
+        self.0
+    }
+}
+
 /// Await one reply under the request timeout. On expiry every request in
-/// flight on this connection is counted as timed out (and as an error), the
-/// connection is closed, and the caller gets `DisconnectReason::Timeout` so it
+/// flight on this connection is counted as timed out (and as an error), and
+/// the caller gets a [`RecvFailed`] carrying `DisconnectReason::Timeout`. The
+/// caller closes the connection with it as soon as the recv future is dropped,
 /// requeues its own bookkeeping and reconnects.
 ///
-/// The deadline timer is not armed per recv. On io_uring, cancelling a pending
-/// timeout (`io_timeout_cancel`) walks the ring's whole pending-timeout list,
-/// which holds about one timer per connection, so arming a timeout for every
-/// reply and cancelling it when the reply arrived made each reply cost
-/// O(connections per worker). Profiled at 4096 closed-loop connections on 8
-/// workers, that cancel was 69% of generator CPU and pinned every worker; with
-/// the timeout disabled the same cell used 2.16 cores and ran 22% faster.
+/// The deadline timer is not armed per recv. A ringline timer is an entry in
+/// a per-worker heap and submits nothing to the ring (ringline #838), so a
+/// timer per recv would cost a heap insert and a removal per reply, which has
+/// not been measured here. The repo's CLAUDE.md ("Price any per-request
+/// timer") records the cost of the io_uring timeout timers ringline used
+/// before #838.
 ///
 /// Instead the timer lives in `InFlight` across recvs. It is armed for the
 /// oldest request's deadline and left running when that reply arrives. The
@@ -4444,8 +4469,7 @@ impl InFlight {
 pub(crate) async fn recv_with_timeout<F, T>(
     recv: F,
     inflight: &mut InFlight,
-    conn: ConnCtx,
-) -> Result<T, DisconnectReason>
+) -> Result<T, RecvFailed>
 where
     F: Future<Output = T>,
 {
@@ -4458,11 +4482,10 @@ where
         // Timer pool exhausted. ringline's pool is 65536 per worker, at least
         // four timers per connection at its 16,000-connection table limit, so
         // this should not happen. Without a timer the recv
-        // cannot be bounded: drop the connection, let the caller reconnect,
-        // and say why once.
+        // cannot be bounded: the caller drops the connection and reconnects;
+        // say why once.
         timer_exhausted_warn_once();
-        conn.close();
-        return Err(DisconnectReason::RecvError);
+        return Err(RecvFailed(DisconnectReason::RecvError));
     }
 
     let mut recv = std::pin::pin!(recv);
@@ -4499,13 +4522,9 @@ where
             let n = inflight.len() as u64;
             metrics::REQUEST_TIMEOUTS.add(n);
             metrics::REQUEST_ERRORS.add(n);
-            conn.close();
-            Err(DisconnectReason::Timeout)
+            Err(RecvFailed(DisconnectReason::Timeout))
         }
-        Err(false) => {
-            conn.close();
-            Err(DisconnectReason::RecvError)
-        }
+        Err(false) => Err(RecvFailed(DisconnectReason::RecvError)),
     }
 }
 
