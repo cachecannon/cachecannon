@@ -340,8 +340,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `valkey-lab search`: a query task that panicked or was cancelled resolves
     its `JoinHandle` to a `JoinError` (ringline-rs/ringline#557), reported as
     a `query worker:` error.
-- ringline moves from ab81ceb to b7f1a5a (ringline main after
-  ringline-rs/ringline#1017, ringline 0.7.0-alpha.189), which brings these
+- ringline moves from ab81ceb to 6dc223b (ringline main after
+  ringline-rs/ringline#1021, ringline 0.7.0-alpha.191), which brings these
   changes:
   - Breaking: `general.recv_ring_size` and `general.recv_buffer_size` are
     rejected at config load, with any value. They sized the provided-buffer
@@ -453,6 +453,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     4.3% (range 4.0-5.3%; two identical builds differed by at most 0.4%),
     and throughput rose by a median 2.0% (range 1.6-3.5%; identical builds
     -0.7% to +1.8%).
+  - memcache-proto 0.0.6 (ringline-rs/ringline#1021) finds the end of each
+    memcache ASCII response line with `memchr` for the first `\n` instead of
+    `memchr::memmem::find`. Finding each line end while walking a pipelined
+    buffer of GET hits and STORED replies took 4.05 ns per line instead of
+    16.4 on an AMD Ryzen 7 7840HS (Zen 4) and 9.86 instead of 12.06 on AWS
+    Graviton4. In a cachecannon profile on Zen 4 (2 workers, 256
+    connections, pipeline 16, 64 B values against memcached) the `memmem`
+    search was about 7% of client time. No cachecannon run has measured the
+    change end to end.
 
 ### Fixed
 - `install.sh` on macOS or another non-Linux host says there is no package
