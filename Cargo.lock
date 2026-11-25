@@ -1638,9 +1638,9 @@ dependencies = [
 
 [[package]]
 name = "memcache-proto"
-version = "0.0.5"
+version = "0.0.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1bc235782fb39adfbf6629e80cd16bb5fe09c88081a6d7b3ffe8487c6ddbde5d"
+checksum = "955c8158e0f3979ceeafd26bb3458a44d70d891843692f3340fb3a14b2922ab6"
 dependencies = [
  "bytes",
  "itoa",
@@ -2340,8 +2340,8 @@ dependencies = [
 
 [[package]]
 name = "ringline"
-version = "0.7.0-alpha.189"
-source = "git+https://github.com/ringline-rs/ringline?rev=b7f1a5a#b7f1a5af795fc5bc2312b49f92eeee4d082dfa95"
+version = "0.7.0-alpha.191"
+source = "git+https://github.com/ringline-rs/ringline?rev=6dc223b#6dc223b917701b2d27689dd053503ebe71a362b6"
 dependencies = [
  "bytes",
  "crossbeam-channel",
@@ -2360,7 +2360,7 @@ dependencies = [
 [[package]]
 name = "ringline-memcache"
 version = "0.7.2"
-source = "git+https://github.com/ringline-rs/ringline?rev=b7f1a5a#b7f1a5af795fc5bc2312b49f92eeee4d082dfa95"
+source = "git+https://github.com/ringline-rs/ringline?rev=6dc223b#6dc223b917701b2d27689dd053503ebe71a362b6"
 dependencies = [
  "bytes",
  "histogram 0.11.5",
@@ -2374,7 +2374,7 @@ dependencies = [
 [[package]]
 name = "ringline-ping"
 version = "0.6.0"
-source = "git+https://github.com/ringline-rs/ringline?rev=b7f1a5a#b7f1a5af795fc5bc2312b49f92eeee4d082dfa95"
+source = "git+https://github.com/ringline-rs/ringline?rev=6dc223b#6dc223b917701b2d27689dd053503ebe71a362b6"
 dependencies = [
  "histogram 0.11.5",
  "ping-proto",
@@ -2385,7 +2385,7 @@ dependencies = [
 [[package]]
 name = "ringline-redis"
 version = "0.7.0"
-source = "git+https://github.com/ringline-rs/ringline?rev=b7f1a5a#b7f1a5af795fc5bc2312b49f92eeee4d082dfa95"
+source = "git+https://github.com/ringline-rs/ringline?rev=6dc223b#6dc223b917701b2d27689dd053503ebe71a362b6"
 dependencies = [
  "bytes",
  "histogram 0.11.5",
@@ -2413,7 +2413,7 @@ dependencies = [
 [[package]]
 name = "ringline-tls-config"
 version = "0.1.0"
-source = "git+https://github.com/ringline-rs/ringline?rev=b7f1a5a#b7f1a5af795fc5bc2312b49f92eeee4d082dfa95"
+source = "git+https://github.com/ringline-rs/ringline?rev=6dc223b#6dc223b917701b2d27689dd053503ebe71a362b6"
 dependencies = [
  "ringline-tls",
  "rustls-pki-types",
