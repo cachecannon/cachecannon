@@ -7,12 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-11-26
+
 ### Added
 - `cluster = true` works with `protocol = "dma"` and `[dma] module = "vdma"`. It was refused at
   startup with "cluster mode requires resp protocol". Keys route by hash slot, a `MOVED` reply to
   `DMA.GET` or `DMA.SET` updates the worker's slot table, and a prefill key whose slot moved goes
   to its new owner's queue, as on the RESP path. With `module = "largeobj"`, config load refuses
-  cluster mode.
+  cluster mode. (#281)
 - `[workload.kv_replay]` gains `client = "vllm"`, which sends a trace
   request's operations the way a network-store tier sends them when it runs
   one task per key on vLLM's `DualQueueThreadPool`. A lookup connection sends
@@ -23,7 +25,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   are spread over every idle load- or store-priority connection instead of
   pipelined on the connection that looked up. The default,
   `client = "lmcache"`, is unchanged. The result gains `client` and
-  `load_connections`.
+  `load_connections`. (#278)
 - `[workload.kv_replay]` gains `store_connections`: that many of the
   connections send only SETs, and a trace request's store is queued on its
   worker once its load has finished, so the connection that loaded starts the
@@ -31,14 +33,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   queued; a store that finds it full is dropped whole and counted in
   `kv_stores_dropped`. The result reports `store_queue` (queued to first SET sent), and `store` then
   runs from the store being queued. The default, 0, keeps each request's
-  lookup, load and store on one connection.
+  lookup, load and store on one connection. (#277)
 - KV replay reports `ready` (`kv_ready_time`): from the time the trace
   scheduled a request (open loop) or its start (closed loop) to the end of
   its load. In open loop it includes the time the request waited for a
   connection, which `load` does not. `requests_out` gains the columns
-  `store_queue_ns`, `ready_ns` and `store_dropped`, after `recorded`.
+  `store_queue_ns`, `ready_ns` and `store_dropped`, after `recorded`. (#277)
 - Setting `CACHECANNON_NO_OPEN` to any value, including empty, stops
-  `cachecannon view` opening a browser.
+  `cachecannon view` opening a browser. (#273)
 - `workload.routing = "routed"` loads several nodes the way a client
   population does: each worker's dispatcher draws every request's key from
   the whole keyspace, routes it, and queues it for the owning node, so a node
@@ -59,13 +61,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   worth of tokens a worker holds beyond one, matching the dispatcher, which
   takes one token per request. Needs a rate limit, a RESP or memcache
   protocol, and at least `threads x nodes` connections. The default,
-  `"pinned"`, is the existing behaviour.
-- `target.auto_discovery` supports ElastiCache for Memcached auto discovery.
-  Before the run, cachecannon sends `config get cluster` to the configured
-  endpoints (falling back to `get AmazonElastiCache:cluster` on engines that
-  answer `ERROR`), over TLS when `target.tls` is set, and runs against the
-  nodes listed. Requires protocol `memcache` or `memcache-binary`. Discovery
-  runs once; node changes during the run are not followed.
+  `"pinned"`, is the existing behaviour. (#242, #244)
 - cachecannon carries its own KPI template (`templates/cachecannon.json`, a
   Rezolus `ServiceExtension`) in its recordings: the `/metrics/stream`
   handshake sends it as `service_queries` metadata, which `rezolus record`
@@ -75,7 +71,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Its queries select by metric name and do not select by `source`: Rezolus 6
   evaluates a recording's template against that recording's series (outside
   an A/B comparison), so the section has data when the endpoint is recorded
-  under another `source` name.
+  under another `source` name. (#238, #272)
 - `[workload.kv_replay]` replays a request-level KV-cache trace (the kvtrace
   request format from pelikan-io/cachesim) against a RESP server used as an
   LLM serving engine's KV-cache prefix store, and reports prompt tokens
@@ -114,14 +110,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   millisecond) that found a connection idle and the trace reader behind.
   The config summary (JSON `config` line, clean and verbose headers)
   describes the trace, timing, geometry and write rule instead of the
-  synthetic keyspace and value size, which a KV replay ignores.
+  synthetic keyspace and value size, which a KV replay ignores. (#208, #218)
 - `workload.prefill_rate_limit` paces prefill in requests per second. All
   workers share one limiter, as they share the prefill queues. It starts
   empty when prefill begins and holds at most 10 ms of the rate or one batch,
   whichever is more, plus one batch, so prefill starts at the limit rather
   than with a burst. Unset or 0 leaves prefill unpaced, as before. A config
   whose paced prefill cannot finish within `prefill_timeout` is rejected,
-  including after valkey-lab's `--keyspace` and `--prefill` flags.
+  including after valkey-lab's `--keyspace` and `--prefill` flags. (#217, #220)
 - `[workload.trace_replay]` replays a cachesim object-level trace (the
   `cachetrace` Parquet format from pelikan-io/cachesim: `obj_id` UInt64,
   `obj_size` UInt32, optional `op` UInt8) against a RESP server, one command
@@ -144,35 +140,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   prefill, read_values, append, saturation search, kv_replay and routed mode.
   New `trace_*` counters are registered statically, so every run's metrics
   carry them as zeros when `trace_replay` is not set. The JSON config and
-  result lines gain a `trace_replay` object when it is. The public `Results`
-  and `BenchWorkerConfig` structs gain a `trace_replay` field, so code outside
-  this crate that builds either with a struct literal must add it.
-- `[resp] module = "largeobj"` makes the RESP path (`protocol = "resp"` and
-  `"resp3"`) send a server module's TCP commands, `BLOB.TCP_GET key` and
-  `BLOB.TCP_SET key value`, in place of `GET` and `SET`, prefill included.
-  The default, `module = "none"`, sends `GET` and `SET`. `HELLO 3`, the
-  precheck `PING` and `DEL` are unchanged. Config load refuses the option
-  with another protocol, with `[workload.append]`, whose writers send plain
-  `SET` to the same keys, and with `[workload.kv_replay]`, a combination not
-  run against the module. `BLOB.TCP_SET` answers `WRONGTYPE` on a key that
-  holds a string, so a server filled without the module must be flushed
-  first. Uses ringline-redis
-  `ClientBuilder::get_command` / `set_command` (ringline #674), which the
-  pinned ringline carries. Forward-ported from 0.0.x (#230).
-- `[admin] listen` serves `GET /metrics/stream[?interval=..&layout=wide|long]`,
-  metriken-exposition's stream route: dendro replication frames
-  (`application/vnd.metriken.replication.v1+dendro`), a handshake with
-  `source=cachecannon`, then one frame per interval until the client
-  disconnects. A rezolus recorder that reads this content type records the
-  benchmark into a `.dendro` archive beside agents, with the latency histograms
-  as histograms. Every metric is in one windowless group, `cachecannon/main`.
-  An interval below the 10 ms update floor is served at the floor, which the
-  frame-interval header names. `/metrics` and `/metrics/binary` are
-  unchanged.
+  result lines gain a `trace_replay` object when it is. (#255)
 - `requests_send_failed` counts RESP and memcache main-workload requests not
   sent because a send failed, and is included in `offered`. It is in the
   JSON result, and the clean and verbose outputs print it when it is
-  nonzero.
+  nonzero. (#204)
 - `[workload] read_values = true` computes a CRC-32c over every GET hit's
   value, so client CPU per request includes reading the value. RESP
   then receives through ringline-redis `recv`, which holds each whole reply
@@ -187,153 +159,70 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   unchanged. The metrics endpoints and the parquet recording gain a
   `values_read_bytes` counter, which is 0 when the option is off.
   `docs/reference.md` "Reading values" lists the per-backend work and the
-  timing, memory and error-handling differences.
-- `protocol = "dma"` (`--features dma`): RESP carries the commands and the
-  values transmit over libfabric, server-initiated. `[dma] module` picks the
-  server module dialect, `largeobj` (`BLOB.RDMA_*`, the default) or `vdma`
-  (`DMA.*`). The fabric, buffers, and connection task are the same for both.
-  A server whose module registers only `BLOB.HELLO`, `BLOB.GET` and
-  `BLOB.SET` answers `BLOB.RDMA_HELLO` with an error; every connection
-  retries, and the run stops at precheck with `no connectivity` (the server's
-  reply is logged at debug). The 0.0.x branch falls back to those names.
-  `[dma] checksum = true` checks the CRC-32c the server returns with a read
-  under both modules. Under vdma, writes also carry one; the default module takes no
-  write checksum, so writes are sent without one.
-- `[connection] endpoint_allocation = "key_share"` (zipf, several endpoints):
-  each endpoint gets connections in proportion to the zipf probability its
-  keys carry (at least one if it owns keys, none if it owns none) instead of
-  an equal number. In a rate-limited run in which no connection is held back
-  by its pipeline, each endpoint then receives its zipf share of requests, so
-  the servers together see the global distribution; with the default `even`,
-  every endpoint gets the same share whatever its keys' popularity. With DMA
-  at MiB values (one transfer per connection) or closed loop, the hot
-  endpoint gets less than its share. `docs/reference.md` says how to check
-  the shares a run achieved.
-- `examples/zipfbench.rs`: per-key selection cost of the reject-route, alias
-  and uniform multi-endpoint paths on one core, no network.
-  `cargo run --release --example zipfbench -- [keys] [endpoints] [theta]
-  [threads] [base_addr] [connections]`; prints each endpoint's keys, zipf
-  share and `key_share` connection count.
+  timing, memory and error-handling differences. (#207, #213)
 
 ### Changed
-- With `connection.request_timeout` set (the default, 1 s), the
-  request-timeout check reads the clock only when it arms or fires its timer,
-  instead of on every reply. Timeouts fire at the same deadlines as before. Against Valkey on AWS
-  Graviton4 (c8gn.4xlarge client and server, 256 connections, pipeline 16,
-  80/20 GET/SET, 64-byte values, 4 runs per arm), client user cycles per
-  request fell 8% on one worker and on two. With this and
-  ringline-rs/ringline#1022 (under the ringline move below), user cycles per
-  request were 7% below v0.0.34 on one worker and 5% below on two, and one
-  worker delivered 3.3% more throughput than v0.0.34 (in the two of four
-  rounds where Valkey was not the limit).
-- The viewer draws its charts with the `metriken-charts` crate instead of its
-  own copy of the chart modules, and builds its plot specs with
-  `metriken_charts::plot`. `/lib/charts/` and `/lib/charts.css` are served from
-  the crate. ECharts moves from 5.4 to 6.1.0. A chart with no data is now hidden
-  instead of drawn as an empty card. Hit Rate keeps its minimum 1% y-axis span,
-  and Error Rate's minimum becomes 0.1%, so a small error rate draws larger.
-  Both spans now also hold when zoomed, and both charts draw a value outside
-  0 to 100% at the bound.
-- The request latency histograms (`response_latency`, the per-command
-  latencies, `get_ttfb`, `schedule_slip`, `perceived_latency` and the
-  others defined with `LatencyHistogram`) are sharded per worker thread
-  and merged on read, so workers no longer contend on shared buckets. The
-  KV replay histograms are not sharded. Each written histogram allocates
-  one 58 KiB bucket array per worker that records into it. With the
-  no-limiter slip change below, 64 threads at pipeline 64 on Graviton4
-  went from 21.8M to 111M RPS without a rate limit. (#259)
-- The latency histograms use `metriken::ShardedCounterHistogram` from
-  `metriken` 0.11.7, and `cachecannon::sharded_histogram` is removed. The bump
-  from `metriken` 0.11.3 moves `histogram` from 1.4.1 to 1.6.5. Recorded buckets
-  are the same at the `(7, 64)` configuration these histograms use. Against the
-  previous type, on one Zen 1 guest over loopback, the medians of GET p50 and
-  p99 at 1.38M/s and of closed-loop throughput stayed within the round-to-round
-  spread of two identical binaries. Latency beyond p99 varied too much between
-  identical binaries to compare, and ARM is unmeasured. (#275)
-- With no rate limiter (neither `workload.rate_limit` nor
-  `[workload.saturation_search]`), `schedule_slip` is no longer recorded,
-  so `/metrics` and the parquet recording no longer carry it (before, they
-  carried a histogram of zeros), and workers no longer write the slip.
-  End-of-run output is unchanged. DMA already followed the rule. (#259)
-  Trace replay follows it too. (#264)
-- With a rate limiter, each worker keeps its schedule slip in a
-  thread-local instead of the shared `current_slip_ns` gauge, which every
-  fire loop wrote and every response read. The gauge is refreshed from a
-  worker's first update and every 256th after it. Perceived latency now
-  adds the slip of the worker that sent the request, not of whichever
-  worker wrote the gauge last. On Graviton4 (64 threads, 2400
-  connections, pipeline 64), a 100M RPS limit delivered 13.4M RPS with
-  every worker at 100% CPU, and now holds 100.1M RPS. (#260)
-- ringline moves from dfff2e5 to ab81ceb (ringline main after #682), which
-  brings these changes:
+- Breaking: with `[dma] module = "vdma"`, `DMA.SET` sends `<key> <length>
+  <address> <rkey> <remote-address> [<crc>]` and `DMA.GET` sends `<key>
+  <capacity> <address> <rkey> <remote-address> [<crc-flag>]`. v0.0.31 to
+  v0.0.34 put the key last (`<address> <rkey> <remote-address>
+  <length|capacity> <key> ...`). `DMA.HELLO` carries no version, so a vdma
+  module that takes the old order is not detected at startup. (#281)
+- Breaking: the default DMA module (`[dma] module = "largeobj"`) sends only
+  `BLOB.RDMA_HELLO`, `BLOB.RDMA_GET` and `BLOB.RDMA_SET`. v0.0.31 to v0.0.34
+  fell back to `BLOB.HELLO`, `BLOB.GET` and `BLOB.SET` when the server
+  answered `BLOB.RDMA_HELLO` with an error. Against a module that registers
+  only the old names, every connection retries its hello and the run stops
+  at precheck with `no connectivity` (the server's reply is logged at
+  debug). (#229)
+- Breaking (library): `cachecannon::sharded_histogram` is removed. The
+  public `BenchWorkerConfig` gains `prefill_ratelimiter`, `kv_replay` and
+  `trace_replay`, and `Results` gains `requests_send_failed`,
+  `routed_queue_dropped`, `kv_replay` and `trace_replay`, so code that
+  builds either with a struct literal must add them. (#204, #208, #217,
+  #242, #255, #275)
+- Built against unreleased ringline main (ringline-rs/ringline `2ac73c0`:
+  ringline 0.7.0-alpha.192, ringline-redis 0.7.0, ringline-memcache 0.7.2,
+  ringline-ping 0.6.0) through `[patch.crates-io]`, until those changes are
+  released; v0.0.34 was built on ringline 0.6.10. main is the 0.1
+  development line; 0.0 patch releases come from the `0.0.x` branch. The
+  ringline changes this takes in (#192, #193, #243, #284, #285, #286):
   - Breaking: `[timestamps] mode = "software"` is rejected at config load.
     ringline #667 removed its kernel receive-timestamp mode, so latency is
     always timed with the userspace clock.
-  - `get_ttfb` has samples in every RESP or memcache run that sends GETs.
-    Before, it was filled only under
-    `mode = "software"`, where it equalled `get_latency`. It now runs from
-    the send to the completion batch in which the worker handled the receive
-    carrying the reply's first byte (ringline #672), so it excludes the time
-    between that batch and the client parsing the reply. The clean, verbose
-    and JSON outputs show the GET TTFB row they omitted when it was empty.
-    ringline keeps the arrival log behind it on every connection. ringline
-    #672 estimates the log at 1-3% of server CPU per request from A/B runs
-    of an earlier lookup, and measured +0.4% at one cell for the current
-    one. In cachecannon, generator-limited (2 workers, 256 connections,
-    pipeline 16, 64 B values against memcached), reading each reply's
-    arrival cost about 2.9% of throughput and the log's upkeep about 2.1%,
-    with `Instant` times; ringline #1017 (below) removes most of the first.
-  - The timer pool is ringline's fixed 65,536 slots per worker (ringline
-    #661). cachecannon sized it at two timers per connection on each worker.
-    ringline's connection table holds 16,000 connections per worker, which
-    cachecannon does not raise, so the pool covers four timers per
-    connection at that limit.
-- A run whose computed send copy pool exceeds ringline's per-worker maximum
-  of 65,535 slots logs a warning naming the inputs (connections per worker,
-  pipeline depth, batch, value length, TLS, and for `kv_replay` the largest
-  lookup). The pool was, and still is, capped there; sends past it fail and
-  are counted in `requests_send_failed`. Before, the cap was applied without
-  a message.
-- rustls 0.23.45 → 0.23.46 for RUSTSEC-2026-0346, -0347, -0348 and -0349,
-  published 2026-10-14, which failed `cargo audit` in CI. rustls has since
-  left the build (TLS comes from ringline's fork, `ringline-tls`; see the
-  ringline move below), so `cargo audit` no longer reports rustls
-  advisories against cachecannon.
-- `keyspace.zipf_theta` must now be in (0, 10]; larger values were accepted
-  before. A large theta could underflow every key weight on an endpoint,
-  which the per-endpoint alias tables cannot sample.
-- metriken 0.9 → 0.11.3 (metriken-core 0.3), metriken-exposition 0.16 → 0.22,
-  metriken-query 0.9 → 0.36, and metriken-storage 0.2 for `--parquet`'s
-  msgpack-to-parquet conversion, which left metriken-exposition. No SQLite is
-  compiled: metriken-query is built without its `archive` feature until
-  `cachecannon view` reads `.dendro`. metriken-query 0.36 has no HTTP layer,
-  so the viewer serves `/api/v1/query`, `query_range`, `labels`,
-  `label/{name}/values` and `metadata` itself, with 0.9's request parameters
-  and response bodies. Two differ: `metadata` also returns `interval`, and a
-  range query that is a single `histogram_percentiles` or
-  `histogram_quantiles` call with a step of 1.5 snapshot intervals or more
-  gets a stride derived from the step and returns window-merged quantiles.
-  An explicit stride chooses the window (see Fixed). Query results differ
-  where the engine changed: points are at the recording's own timestamps
-  rather than rounded to a one-second grid, `irate` divides by the measured
-  spacing (2000 req/s reads 1997–2001 where 0.9 read 2003–2007), a range
-  ends at the last sample rather than one grid step past it,
-  `/api/v1/metadata` gives the first and last sample times exactly rather
-  than in whole seconds, and matrix results carry `intervals` and `bands`,
-  which the frontend ignores. The dashboards' section JSON is
-  byte-identical.
-- Built against unreleased ringline main (ringline-rs/ringline `dfff2e5`:
-  ringline 0.7.0-alpha.0, ringline-redis 0.7.0, ringline-memcache 0.7.2,
-  ringline-ping 0.6.0) through `[patch.crates-io]`, until those changes are
-  released. `dfff2e5` is the first ringline main on metriken 0.11
-  (ringline-rs/ringline#649); metriken-core declares `links`, so cachecannon
-  and ringline move to metriken 0.11 together. It includes
-  ringline-rs/ringline#515: from `0a536e0` until that fix, ringline scanned
-  every connection slot on every event-loop iteration, which cost 1.3–2.2× the
-  cycles per request of ringline 0.6.2. main is now the 0.1 development line;
-  0.0 patch releases come from the `0.0.x` branch. The ringline changes this
-  takes in:
-  - Handlers take an owned `ringline::Connection` in `on_accept`.
+  - Breaking: `general.recv_ring_size` and `general.recv_buffer_size` are
+    rejected at config load, with any value. They sized the provided-buffer
+    receive ring that ringline removed for TCP (ringline-rs/ringline#716).
+    The verbose output's `recv_buffer:` line is gone with them.
+  - Breaking: the packages, and any binary built with io_uring, need Linux
+    6.8 or later (v0.0.34 ran on 6.1 and later; ringline-rs/ringline#932).
+    On an older kernel, for example Debian 12's 6.1, they fail at launch. A build on an older
+    Linux host gets the mio backend without an error, which the `io_engine`
+    line names; `--features ringline/force-mio` selects it on any host.
+  - Breaking: each worker's ring defaults to 4096 submission and 65536
+    completion entries (was 256 and 1024), about 2.5 MiB per worker. Linux
+    6.14 to 7.2, except 7.2.y from 7.2.11 and 6.18.y from 6.18.58, charges
+    that to `RLIMIT_MEMLOCK` summed over the user's processes. ringline
+    raises the soft limit when the hard limit allows, and under a lower hard
+    limit shrinks the rings. cachecannon sets each worker's connection table
+    to twice the busiest worker's main and append connections, at most
+    16,000, and ringline does not shrink the rings below what that table
+    needs. A worker's rings then take between 44 KiB and the full 2.5 MiB:
+    about 330 to 660 bytes per connection on that worker (the completion
+    ring is a power of two), and the full size from about 4,000 connections
+    per worker. When they do not fit, the run fails at startup with
+    ringline's error, which names the limit, and a line naming `ulimit -l`
+    and the connection count. systemd's default 8 MiB limit holds three
+    full-size workers, so on those kernels a run that ran on v0.0.34, for
+    example 25,000 connections on 4 workers (10 MiB), fails until the limit
+    is raised. The smaller table also means that against a server that
+    stops reading, connections closing after a request timeout, whose
+    queued sends drain with no time bound, can hold every spare slot, and
+    later reconnects fail and count in `disconnects_connect_failed`.
+  - Breaking: more than 16,000 connections (main and append) on one worker is
+    refused at startup, naming `general.threads`. Before, the connections past
+    ringline's 16,000-slot table failed to connect and were retried while the
+    run continued.
   - `connect` returns a builder that resolves to a `Connection`, with TLS set
     by `.tls(name)` (ringline-rs/ringline#533). The client crates take that
     `Connection`, and building a client no longer fails. `connect_timeout` still
@@ -350,16 +239,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `valkey-lab search`: a query task that panicked or was cancelled resolves
     its `JoinHandle` to a `JoinError` (ringline-rs/ringline#557), reported as
     a `query worker:` error.
-- ringline moves from ab81ceb to 2ac73c0 (ringline main after
-  ringline-rs/ringline#1022, ringline 0.7.0-alpha.192), which brings these
-  changes:
-  - Breaking: `general.recv_ring_size` and `general.recv_buffer_size` are
-    rejected at config load, with any value. They sized the provided-buffer
-    receive ring that ringline removed for TCP (ringline-rs/ringline#716).
-    The verbose output's `recv_buffer:` line is gone with them.
+  - `get_ttfb` has samples in every RESP or memcache run that sends GETs.
+    Before, it was filled only under
+    `mode = "software"`, where it equalled `get_latency`. It now runs from
+    the send to the completion batch in which the worker handled the receive
+    carrying the reply's first byte (ringline #672), so it excludes the time
+    between that batch and the client parsing the reply. The clean, verbose
+    and JSON outputs show the GET TTFB row they omitted when it was empty.
+    ringline keeps the arrival log behind it on every connection. ringline
+    #672 estimates the log at 1-3% of server CPU per request from A/B runs
+    of an earlier lookup, and measured +0.4% at one cell for the current
+    one. In cachecannon, generator-limited (2 workers, 256 connections,
+    pipeline 16, 64 B values against memcached), reading each reply's
+    arrival cost about 2.9% of throughput and the log's upkeep about 2.1%,
+    with `Instant` times; ringline #1017 (below) removes most of the first.
+  - The timer pool is ringline's fixed 65,536 slots per worker (ringline
+    #661). cachecannon sized it at two timers per connection on each worker.
+    cachecannon refuses more than 16,000 connections on one worker, so the
+    pool covers at least four timers per connection.
   - On io_uring each connection receives into its own buffer: a one-shot
     receive armed when the client waits for a reply, in place of the
-    multishot receives from the per-worker ring that earlier builds used. A
+    multishot receives from the per-worker ring that v0.0.34 used. A
     connection holds a 32 KiB buffer from its first receive, about 313 MiB at
     10,000 connections; a reply that does not fit borrows a larger buffer
     from a per-worker pool that keeps up to 16 MiB of free buffers. Each
@@ -396,59 +296,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     timeout and every `sleep` in the idle and rate-limit paths are entries in
     a per-worker heap, with no SQE or CQE each, and a timer that is dropped
     before it fires submits no cancel.
-  - Breaking: the packages, and any binary built with io_uring, need Linux
-    6.8 or later (was 6.1; ringline-rs/ringline#932). On an older kernel,
-    for example Debian 12's 6.1, they fail at launch. A build on an older
-    Linux host gets the mio backend without an error, which the `io_engine`
-    line names; `--features ringline/force-mio` selects it on any host.
-  - Breaking: each worker's ring defaults to 4096 submission and 65536
-    completion entries (was 256 and 1024), about 2.5 MiB per worker. Linux
-    6.14 to 7.2, except 7.2.y from 7.2.11 and 6.18.y from 6.18.58, charges
-    that to `RLIMIT_MEMLOCK` summed over the user's processes. ringline
-    raises the soft limit when the hard limit allows, and under a lower hard
-    limit shrinks the rings. cachecannon sets each worker's connection table
-    to twice the busiest worker's main and append connections, at most
-    16,000, and ringline does not shrink the rings below what that table
-    needs. A worker's rings then take between 44 KiB and the full 2.5 MiB:
-    about 330 to 660 bytes per connection on that worker (the completion
-    ring is a power of two), and the full size from about 4,000 connections
-    per worker. When they do not fit, the run fails at startup with
-    ringline's error, which names the limit, and a line naming `ulimit -l`
-    and the connection count. systemd's default 8 MiB limit holds three
-    full-size workers, so on those kernels a run that ran on v0.0.34, for
-    example 25,000 connections on 4 workers (10 MiB), fails until the limit
-    is raised. Left at ringline's default, the table would shrink with the
-    rings and the connections past it would fail to connect while the run
-    continued. The smaller table also means that against a server that
-    stops reading, connections closing after a request timeout, whose
-    queued sends drain with no time bound, can hold every spare slot, and
-    later reconnects fail and count in `disconnects_connect_failed`.
-  - Breaking: more than 16,000 connections (main and append) on one worker is
-    refused at startup, naming `general.threads`. Before, the connections past
-    ringline's 16,000-slot table failed to connect and were retried while the
-    run continued.
   - On io_uring a worker's idle tick is 10 ms (was 1 ms), so a worker can
     notice the end of a run up to 10 ms later.
   - Dropping a connection, or a client built on one, closes it
-    (ringline-rs/ringline#743). cachecannon's close guard is removed: every
+    (ringline-rs/ringline#743). Every
     connection task still closes its connection before it reconnects and
     when it returns, by dropping the client, and closes it at once on a
     request timeout.
   - TLS client configs are built with ringline's rustls fork
     (`ringline-tls` 0.1.2, through `ringline::tls_config::rustls`), and
     cachecannon no longer depends on `rustls` directly. TLS 1.2 is offered
-    as well as TLS 1.3; earlier builds offered only TLS 1.3. ringline's
+    as well as TLS 1.3; v0.0.34 offered only TLS 1.3. ringline's
     unbuffered TLS engine is the default, and on io_uring a TLS connection
-    receives ciphertext directly.
+    receives ciphertext directly. `ringline-tls` is a fork of rustls 0.23,
+    so `cargo audit` does not report rustls advisories against these builds;
+    an advisory against rustls 0.23 may still affect them.
   - On io_uring a copy send wider than one send-pool slot (16 KiB), such as
     a batch of copied values or the ciphertext of a TLS send that fills two
     or more slots, goes to the kernel as one
     `sendmsg` when nothing else is in flight on the connection; before, its
     first slot went alone and the rest followed (ringline-rs/ringline#697).
-  - ringline's per-connection cap on zero-copy send slab entries
-    (`zero_copy_hold_cap`, 16 by default) is turned off. At the cap the
-    clients copy a guarded batch, values included, into the send pool, which
-    is sized without zero-copy value bytes.
   - ringline's worker threads are named `rl-work-N` (were
     `ringline-worker`, as Linux truncated the old names), so per-thread CPU
     filters that match the old name need the new one.
@@ -470,44 +337,72 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     16.4 on an AMD Ryzen 7 7840HS (Zen 4) and 9.86 instead of 12.06 on AWS
     Graviton4. In a cachecannon profile on Zen 4 (2 workers, 256
     connections, pipeline 16, 64 B values against memcached) the `memmem`
-    search was about 7% of client time. No cachecannon run has measured the
-    change end to end.
+    search was about 7% of client time. Against memcached on AWS Graviton4
+    (c8gn.4xlarge client and server, one worker, 256 connections, pipeline
+    16), `memmem` took 417 user cycles per request in v0.0.34 and does not
+    appear in this build's profile.
   - ringline-redis drains each RESP GET reply through `with_data` instead of
     `with_bytes` (ringline-rs/ringline#1022). On io_uring the drain had used
     `with_bytes`, with several atomic refcount operations per reply, since
     ringline-rs/ringline#696; v0.0.34 used `with_segments` and did
-    not pay this. Against Valkey on AWS Graviton4 (c8gn.4xlarge client and
-    server, one worker, 256 connections, pipeline 16, 80/20 GET/SET, 64-byte
-    values, 4 runs per arm), user cycles per request fell from 6,437 to
-    6,137 and throughput rose 3.9% against ringline 6dc223b. That is still
-    2.5% more user cycles per request than v0.0.34; see the
-    `recv_with_timeout` clock read under Changed.
+    not pay this.
+- With `connection.request_timeout` set (the default, 1 s), the
+  request-timeout check reads the clock only when it arms or fires its timer,
+  instead of on every reply. Timeouts fire at the same deadlines as before. Against Valkey on AWS
+  Graviton4 (c8gn.4xlarge client and server, 256 connections, pipeline 16,
+  80/20 GET/SET, 64-byte values, 4 runs per arm), client user cycles per
+  request fell 8% on one worker and on two. With this and
+  ringline-rs/ringline#1022 (under the ringline entry above), user cycles per
+  request were 7% below v0.0.34 on one worker and 5% below on two, and one
+  worker delivered 3.3% more throughput than v0.0.34 (in the two of four
+  rounds where Valkey was not the limit). (#286)
+- `GET /metrics/stream` with an `interval` below the 10 ms update floor is
+  served at the floor, which the `x-metriken-frame-interval` header names.
+  v0.0.31 to v0.0.34 refused it with a 400. (#235)
+- The viewer draws its charts with the `metriken-charts` crate instead of its
+  own copy of the chart modules, and builds its plot specs with
+  `metriken_charts::plot`. `/lib/charts/` and `/lib/charts.css` are served from
+  the crate. ECharts moves from 5.4 to 6.1.0. A chart with no data is now hidden
+  instead of drawn as an empty card. Hit Rate keeps its minimum 1% y-axis span,
+  and Error Rate's minimum becomes 0.1%, so a small error rate draws larger.
+  Both spans now also hold when zoomed, and both charts draw a value outside
+  0 to 100% at the bound. (#273)
+- The latency histograms use `metriken::ShardedCounterHistogram` from
+  `metriken` 0.11.7, and `cachecannon::sharded_histogram` is removed. The bump
+  from `metriken` 0.11.3 moves `histogram` from 1.4.1 to 1.6.5. Recorded buckets
+  are the same at the `(7, 64)` configuration these histograms use. Against the
+  previous type, on one Zen 1 guest over loopback, the medians of GET p50 and
+  p99 at 1.38M/s and of closed-loop throughput stayed within the round-to-round
+  spread of two identical binaries. Latency beyond p99 varied too much between
+  identical binaries to compare, and ARM is unmeasured. (#275)
 
 ### Fixed
 - `install.sh` on macOS or another non-Linux host says there is no package
   for it and links to the build-from-source instructions. It said
   cachecannon requires Linux, though source builds have run on macOS since
-  0.0.14.
+  0.0.14. (#282)
 - The `io_engine` line printed at startup and the JSON output's `engine`
   field name the I/O backend the binary was built with. Since 0.0.12 they
   said `io_uring` for every Linux build, including one built on a kernel too
-  old for ringline's io_uring driver (older than 6.8 in this release, 6.0 in
-  earlier ones), where ringline uses mio.
+  old for ringline's io_uring driver (a build host older than 6.8 in this
+  release, 6.0 in v0.0.34), where ringline uses mio. (#280)
 - The viewer's Server and Client sections draw their charts. Their queries
   went to the benchmark recording, so every one returned `Metric not found`.
-  Each section now queries its own recording, over that recording's time range.
+  Each section now queries its own recording, over that recording's time range. (#274)
 - `CPU Usage %` in those sections is a share of the host's cores. Its query was
   1e11 too high: `cpu_usage` counts nanoseconds, and the query multiplied by 100
   where a percentage chart needs a fraction. It selects its two states with
-  `=~`, because `=` stops matching them in later `metriken-query` versions.
+  `=~`, because `=` stops matching them in later `metriken-query` versions. (#274)
 - The viewer's RESET ZOOM button resets the zoom. It raised
-  `chartsState.resetZoom is not a function`.
+  `chartsState.resetZoom is not a function`. (#273)
 - The .deb and .rpm binaries run on glibc 2.28 and newer. They were linked on
   the Ubuntu 24.04 runner and needed `GLIBC_2.39` (x86_64 in every release,
   aarch64 since 0.0.16), so they failed to load on Amazon Linux 2023 and
   RHEL 9 (glibc 2.34) with "version `GLIBC_2.39' not found". The release
   builds now link with `cargo zigbuild` against glibc 2.28, and a step fails
-  the release if a binary needs a newer version.
+  the release if a binary needs a newer version. They also need Linux 6.8 or
+  later (see Changed), so RHEL 9 (5.14) and Amazon Linux 2023 on a
+  6.1 kernel still cannot run them. (#270)
 - `cachecannon view` charts the whole recording. The frontend queried only
   the last hour (`Math.min(3600, duration)` in `script.js`), so a four-hour
   run showed its final hour. Charts now span the recording with a step of
@@ -527,20 +422,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   recording a 9.0 s per-snapshot p99 reads 55 ms at p99 and 9.0 s at p99.9.
   The overview's six queries return 3.4 MB, against 1.4 MB for the last
   hour before. Zoom acts on the fetched points, so zooming far into a long
-  run shows step-spaced points.
-- `[workload.append] connections` is checked against the node count after
-  cluster discovery. Validation counts the seed endpoints, so a cluster run
-  with fewer writers than nodes passed it and then stalled: a node with no
-  writer never drained its append queue and the first batch never
-  committed. The run now fails at startup.
-- Every connection task (RESP, RESP append, memcache, memcache append, ping
-  and DMA) closes its connection before reconnecting and when it returns.
-  After a failed `HELLO 3`, a failed DMA hello, a failed precheck or a failed
-  DMA transfer, the task reconnected without closing the old connection, and
-  dropping a ringline connection does not close it. A server that refused
-  every hello gained one open connection per task every 100 ms. Request
-  timeouts, kv-replay send failures and protocol errors (closed by the
-  ringline client) already closed the connection.
+  run shows step-spaced points. The server applies the stride to any
+  `/api/v1/query_range` request that is a single such call with a step of
+  1.5 snapshot intervals or more, including one from the query box; a
+  stride given in the query chooses the window. (#258)
 - `valkey-lab` validates its config after applying the CLI flags. The flags
   were applied after `Config::load` validated the file (or to an unvalidated
   default config without `--config`), so they could set what a config file
@@ -548,38 +433,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   nothing and exited 0), `--data-size 0`, `--distribution` other than
   `recency` on an `[workload.append]` config, or `--rate-limit`,
   `--prefill`, `--cluster` and `saturate` on a `kv_replay` config. Those
-  are now rejected before the run, naming the config key.
-- A run with `rate_limit` no longer opens with a burst. Each worker's limiter
-  started full and kept refilling while connections opened and prefill ran,
-  so warmup began by releasing a second's share of requests at once: about
-  2,200 within the first 100 ms at `rate_limit = 2000` against a fake server,
-  and, at 26,820 req/s of 1 MiB values, enough to make the sending NIC
-  queue or drop packets for ten seconds. Each limiter now starts holding only
-  its stagger, at most one batch, and is reset to it when warmup begins.
-- `protocol = "dma"` rate-limited runs take tokens from the worker's
-  dispatcher, as RESP and memcache do. A connection the limiter turned away
-  re-polled it every 100 us, so client CPU scaled with connections rather
-  than rate: 1536 connections at 14,950 req/s of 1 MiB values used 17.6
-  CPUs, and 0.26 with the dispatcher; GET p99 was 378 and 387 us.
-  Closed-loop runs are unchanged.
-- Multi-endpoint `distribution = "zipf"` drew from the global zipf and
-  discarded keys that routed to another endpoint: about `1 / P(endpoint)`
-  draws, key renders and ketama hashes per request (61 at 48 endpoints and
-  100,000 keys; `examples/zipfbench` measures the per-key cost on the client
-  host). Each endpoint now samples zipf restricted to its own keys from an
-  alias table built once at startup: the same pmf the rejection produced, in
-  O(1). Closed loop against 48 server processes with 1536 connections and
-  4 KiB values, zipf went from 2.04M to 6.10M req/s on RESP (uniform keys:
-  6.1M) and from 1.9M to 3.80M on DMA (uniform: 3.73M). RESP and DMA only;
-  memcache and `recency` still reject-route. The tables use the startup key
-  partition, so in cluster mode a slot that moves during the run is not
-  followed: the old owner's connections keep sending its keys and get MOVED,
-  as the uniform path already does.
+  are now rejected before the run, naming the config key. (#220)
 - A connection the server closed while it had no requests in flight now
   reconnects. Its sends failed without reaching `recv`, where a close is
   noticed, so it retried for the rest of the run: a rate-limited run (64
   connections, 2000 req/s) whose server restarted after 10 s of a 30 s run
-  finished at 499 req/s with batch 16 and 588 with batch 1, and now at 1932.
+  finished at 499 req/s with batch 16 and 588 with batch 1, and now at 1932. (#204)
 - The ringline send copy pool and zero-copy send slab are sized from the
   workload, per worker: two of each outstanding send's slots and entries for
   every connection, counting `pipeline_depth / batch_size` batches per
@@ -593,13 +452,140 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   threads, with `RLIMIT_MEMLOCK` raised so zero-copy sends could not fail
   with `ENOMEM` (ringline-rs/ringline#642), 101 connections served no request
   in a 10 s window at the defaults, and none with two slab entries per
-  connection (this change sizes four for that run).
+  connection (this change sizes four for that run). A pool that would exceed
+  ringline's per-worker maximum of 65,535 slots is capped there, with a
+  warning naming the inputs (connections per worker, pipeline depth, batch,
+  value length, TLS, and for `kv_replay` the largest lookup); sends past it
+  fail and are counted in `requests_send_failed`. (#204, #208)
 - A failed send discards every request the client had buffered since its
   last flush. Those requests stayed in `requests_sent` and in the
   request-timeout queue, and prefill and append keys among them were not
   requeued. Each fire loop now flushes what it buffered itself, rather than
   leaving the batch tail to `recv`, where a failure was reported as a receive
-  error, and withdraws and requeues the discarded requests.
+  error, and withdraws and requeues the discarded requests. (#204)
+
+### Known issues
+- With `endpoint_allocation = "even"` (the default), an endpoint that owns no
+  keys still gets connections. Ketama can leave endpoints with no keys even
+  with more keys than endpoints: 128 keys (a 16 GiB keyspace of 128 MiB
+  values) over 48 endpoints leaves 3 empty in `examples/zipfbench` at its
+  default base address 172.31.0.10:6379 (the count depends on the addresses).
+  In RESP and memcache each such connection claims a rate-limit token batch,
+  finds no key and drops it, which lowers the achieved rate; DMA draws a key
+  before it claims a token. `key_share` (zipf only) gives such endpoints no
+  connections. (#212, #233)
+
+## [0.0.34] - 2026-10-27
+
+### Changed
+- Latency histograms are sharded per worker thread and merged on read, so
+  workers no longer contend on shared buckets. On main, with this and the
+  no-limiter slip change below, 64 threads at pipeline 64 on Graviton4 with
+  no rate limit went from 21.8M to 111M RPS. Each written histogram
+  allocates one 58 KiB bucket array per worker that records into it.
+  Counter shards rise from 64 to 256. (#259)
+- With no rate limiter (neither `workload.rate_limit` nor
+  `[workload.saturation_search]`), RESP, memcache and ping workers no
+  longer write or read the shared `current_slip_ns` gauge and no longer
+  record `schedule_slip`, so `/metrics` and the parquet recording no
+  longer carry `schedule_slip` (before, they carried a histogram of
+  zeros). End-of-run output is unchanged. (#259)
+- With a rate limiter, each RESP, memcache, ping and DMA worker keeps its
+  schedule slip in a thread-local instead of the shared `current_slip_ns`
+  gauge, which every fire loop wrote and every response read. The gauge is
+  refreshed from a worker's first update and every 256th after it.
+  Perceived latency now adds the slip of the worker that sent the request,
+  not of whichever worker wrote the gauge last. On main, on Graviton4 (64
+  threads, 2400 connections, pipeline 64), a 100M RPS limit delivered 13.4M
+  RPS with every worker at 100% CPU, and now holds 100.1M RPS. (#260, #264)
+
+### Security
+- arrow and parquet 58 → 60, metriken-query 0.36 → 0.37 and
+  metriken-storage 0.2 → 0.3 (the first releases on parquet 60).
+  parquet 58 depends on zstd 0.13, which RUSTSEC-2026-0391 and the
+  zstd-safe and zstd-sys advisories (RUSTSEC-2026-0395 to -0406, -0410)
+  cover with no fixed 0.13 release, and which failed `cargo audit` in CI.
+  The lockfile now holds zstd 0.14.3, zstd-safe 8.2.0 and zstd-sys 2.1.2,
+  the fixed releases. It also moves lru 0.12 → 0.18 (RUSTSEC-2026-0002,
+  RUSTSEC-2026-0253) and drops thrift 0.17.
+  In the viewer's query box, `rate(x[range])` now uses the whole
+  `[range]` (it used one step), and `deriv(x[range])` is the least-squares
+  slope over `[range]` (it used `[t - 2·step, t + step]`, and over a
+  counter it was the slope of the rate), as in Prometheus; `irate`, which
+  the dashboards use, is unchanged. (#262)
+
+## [0.0.33] - 2026-10-21
+
+### Added
+- `target.auto_discovery` supports ElastiCache for Memcached auto discovery.
+  Before the run, cachecannon sends `config get cluster` to the configured
+  endpoints (falling back to `get AmazonElastiCache:cluster` on engines that
+  answer `ERROR`), over TLS when `target.tls` is set, and runs against the
+  nodes listed. Requires protocol `memcache` or `memcache-binary`. Discovery
+  runs once; node changes during the run are not followed. (#249)
+
+### Fixed
+- `[workload.append] connections` is checked against the node count after
+  cluster discovery. Validation counts the seed endpoints, so a cluster run
+  with fewer writers than nodes passed it and then stalled: a node with no
+  writer never drained its append queue and the first batch never
+  committed. The run now fails at startup. (#249)
+
+## [0.0.32] - 2026-10-21
+
+### Security
+- `webpki-roots` 0.26.11 and 1.0.8 to 1.0.10 (RUSTSEC-2026-0381: the bundled
+  emSign ECC Root CA - G3 allowed paths through distrusted emSign
+  intermediates) and `rustls-webpki` 0.103.15 to 0.103.16 (RUSTSEC-2026-0382:
+  certificate verification could accept distrusted intermediates).
+  cachecannon now depends on `webpki-roots` 1 directly. The default root store
+  (used when `tls_ca_file` is unset) no longer contains emSign ECC Root CA - G3
+  or Atos TrustedRoot 2011 and gains SECOM TLS ECC/RSA Root CA 2024 and Telia
+  EC/RSA TLS Root CA v3, so a server whose chain ends only at one of the two
+  removed roots now fails verification. (#246)
+
+## [0.0.31] - 2026-10-17
+
+### Added
+- Valkey large object storage (BLOB) over TCP (`[resp] module`) and RDMA
+  (`protocol = "dma"`, built with `--features dma`). (#223, #230)
+- Streaming metrics endpoint, `GET /metrics/stream`, which enables recording
+  into `.dendro` archives. (#206)
+- `[connection] endpoint_allocation = "key_share"`: with zipf keys over several
+  endpoints, each endpoint gets connections in proportion to its keys'
+  popularity, so in a rate-limited run the servers together see the global
+  distribution. (#231)
+
+### Changed
+- `keyspace.zipf_theta` must be in (0, 10]. (#231)
+- With zipf keys over several endpoints, RESP draws a different key sequence
+  from the same `general.seed` than 0.0.30. (#231)
+- `cachecannon view` query results can differ slightly from 0.0.30: points sit
+  at the recording's own timestamps and `irate` divides by the measured
+  spacing. (#206)
+
+### Fixed
+- A rate-limited run no longer opens with a burst of up to a second's requests
+  at the start of warmup. (#232)
+- Multi-endpoint zipf on RESP picks each key in constant time instead of
+  redrawing until one routes to the endpoint; measured on main at 48
+  endpoints, it runs about as fast as uniform keys. (#231)
+- A connection that failed its handshake or precheck is closed before the
+  task reconnects; a server refusing every handshake used to collect open
+  connections. (#228)
+
+### Security
+- rustls 0.23.46 for RUSTSEC-2026-0346, -0347, -0348 and -0349. (#224)
+
+### Known issues
+- With the default `endpoint_allocation = "even"`, an endpoint that owns no
+  keys still gets connections, and under a rate limit RESP and memcache lose
+  tokens to them, lowering the achieved rate. `key_share` (zipf only) avoids
+  this.
+
+## [0.0.30] - 2026-10-01
+
+### Fixed
 - Each process now draws a fresh RNG seed, so separate cachecannon processes no
   longer send the same key sequence. Every connection's RNG was seeded from its
   position alone (`42 + worker_id * 10000 + i`), so with the same `threads` and
@@ -618,41 +604,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   append writer) and position through SplitMix64, so connections within a run,
   and the same connection across runs, never share a stream.
 
-### Known issues
-- With `endpoint_allocation = "even"` (the default), an endpoint that owns no
-  keys still gets connections. Ketama can leave endpoints with no keys even
-  with more keys than endpoints: 128 keys (a 16 GiB keyspace of 128 MiB
-  values) over 48 endpoints leaves 3 empty in `examples/zipfbench` at its
-  default base address 172.31.0.10:6379 (the count depends on the addresses).
-  In RESP and memcache each such connection claims a rate-limit token batch,
-  finds no key and drops it, which lowers the achieved rate; DMA draws a key
-  before it claims a token. `key_share` (zipf only) gives such endpoints no
-  connections.
+## [0.0.29] - 2026-09-29
 
-### Security
-- `webpki-roots` 0.26.11 and 1.0.8 to 1.0.10 (RUSTSEC-2026-0381: the bundled
-  emSign ECC Root CA - G3 allowed paths through distrusted emSign
-  intermediates) and `rustls-webpki` 0.103.15 to 0.103.16 (RUSTSEC-2026-0382:
-  certificate verification could accept distrusted intermediates).
-  cachecannon now depends on `webpki-roots` 1 directly. The default root store
-  (used when `tls_ca_file` is unset) no longer contains emSign ECC Root CA - G3
-  or Atos TrustedRoot 2011 and gains SECOM TLS ECC/RSA Root CA 2024 and Telia
-  EC/RSA TLS Root CA v3, so a server whose chain ends only at one of the two
-  removed roots now fails verification.
-- arrow and parquet 58 → 60, metriken-query 0.36 → 0.37 and
-  metriken-storage 0.2 → 0.3 (the first releases on parquet 60).
-  parquet 58 depends on zstd 0.13, which RUSTSEC-2026-0391 and the
-  zstd-safe and zstd-sys advisories (RUSTSEC-2026-0395 to -0406, -0410)
-  cover with no fixed 0.13 release, and which failed `cargo audit` in CI.
-  The lockfile now holds zstd 0.14.3, zstd-safe 8.2.0 and zstd-sys 2.1.2,
-  the fixed releases. It also moves lru 0.12 → 0.18 (RUSTSEC-2026-0002,
-  RUSTSEC-2026-0253) and drops thrift 0.17. kvtrace and cachetrace move
-  to pelikan-io/cachesim 7fdb6de, which is on parquet 60.
-  In the viewer's query box, `rate(x[range])` now uses the whole
-  `[range]` (it used one step), and `deriv(x[range])` is the least-squares
-  slope over `[range]` (it used `[t - 2·step, t + step]`, and over a
-  counter it was the slope of the rate), as in Prometheus; `irate`, which
-  the dashboards use, is unchanged. (#263)
+### Changed
+- Requires ringline 0.6.8 (was 0.6.2), picking up the io_uring fixes in
+  ringline 0.6.4 through 0.6.8. Those that apply to cachecannon's use of
+  ringline: a zero-copy send notification is expected whenever the send's
+  completion carries `IORING_CQE_F_MORE`, so a late notification no longer
+  releases a send-slab entry the kernel may still hold; a copied send larger
+  than one send-pool slot is admitted whole or not at all, instead of sending
+  a prefix and failing; a send that cannot be pushed on a full submission
+  queue is retried instead of dropped; and a multishot recv completion for a
+  closed connection is no longer attributed to the next connection in its
+  slot. The changes to `forward_held`, send chains and segmented recv do not
+  affect cachecannon, which uses none of them.
 
 ## [0.0.28] - 2026-09-28
 
