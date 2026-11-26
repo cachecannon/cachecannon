@@ -4386,6 +4386,14 @@ impl InFlight {
         }
     }
 
+    /// Whether a deadline applies: the timeout is enabled and a request is in
+    /// flight. [`remaining`](Self::remaining) is `Some` exactly when this is
+    /// true.
+    #[inline]
+    fn bounded(&self) -> bool {
+        !self.timeout.is_zero() && !self.fired.is_empty()
+    }
+
     /// Time left before the oldest in-flight request expires. `None` when no
     /// deadline applies (timeout disabled, or nothing in flight); `Some(ZERO)`
     /// when it has already expired.
@@ -4475,10 +4483,16 @@ where
 {
     // No request in flight or the timeout is disabled. A timer left armed from
     // an earlier recv keeps running; it is checked on the next bounded recv.
-    let Some(remaining) = inflight.remaining(Instant::now()) else {
+    if !inflight.bounded() {
         return Ok(recv.await);
-    };
-    if inflight.timer.is_none() && !inflight.arm(remaining) {
+    }
+    // The clock is read only to arm the timer. A running timer fires no later
+    // than the oldest request's deadline and is checked against the clock
+    // then, so a recv under a running timer needs no clock read.
+    if inflight.timer.is_none()
+        && let Some(remaining) = inflight.remaining(Instant::now())
+        && !inflight.arm(remaining)
+    {
         // Timer pool exhausted. ringline's pool is 65536 per worker, at least
         // four timers per connection at its 16,000-connection table limit, so
         // this should not happen. Without a timer the recv
@@ -4803,6 +4817,22 @@ mod inflight_tests {
         let mut disabled = disabled;
         disabled.push(now);
         assert_eq!(disabled.remaining(now), None, "zero timeout disables");
+    }
+
+    #[test]
+    fn bounded_matches_remaining() {
+        let now = Instant::now();
+        let mut f = InFlight::new(Duration::from_secs(1), 4);
+        assert!(!f.bounded());
+        f.push(now);
+        assert!(f.bounded());
+        assert!(f.remaining(now).is_some());
+        f.pop();
+        assert!(!f.bounded());
+        let mut disabled = InFlight::new(Duration::ZERO, 4);
+        disabled.push(now);
+        assert!(!disabled.bounded());
+        assert!(disabled.remaining(now).is_none());
     }
 
     #[test]

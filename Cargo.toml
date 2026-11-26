@@ -216,13 +216,13 @@ dendro = { version = "0.4", default-features = false }
 # match a 0.7 pre-release, and cargo then builds a second ringline from
 # crates.io alongside the patched one the client crates use.
 [patch.crates-io]
-# 6dc223b is ringline main after #1021 (ringline 0.7.0-alpha.191,
+# 2ac73c0 is ringline main after #1022 (ringline 0.7.0-alpha.192,
 # ringline-memcache 0.7.2). It carries `Client::recv_ready` (#682) and
 # ringline-redis `ClientBuilder::get_command` / `set_command` (#674), which
 # `[resp] module` uses.
 # metriken-core declares `links`, so ringline and cachecannon must agree on one
 # metriken-core (0.3, from metriken 0.11.3 since ringline #649).
-ringline = { git = "https://github.com/ringline-rs/ringline", rev = "6dc223b" }
-ringline-redis = { git = "https://github.com/ringline-rs/ringline", rev = "6dc223b" }
-ringline-memcache = { git = "https://github.com/ringline-rs/ringline", rev = "6dc223b" }
-ringline-ping = { git = "https://github.com/ringline-rs/ringline", rev = "6dc223b" }
+ringline = { git = "https://github.com/ringline-rs/ringline", rev = "2ac73c0" }
+ringline-redis = { git = "https://github.com/ringline-rs/ringline", rev = "2ac73c0" }
+ringline-memcache = { git = "https://github.com/ringline-rs/ringline", rev = "2ac73c0" }
+ringline-ping = { git = "https://github.com/ringline-rs/ringline", rev = "2ac73c0" }
