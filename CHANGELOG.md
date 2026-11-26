@@ -216,6 +216,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   share and `key_share` connection count.
 
 ### Changed
+- With `connection.request_timeout` set (the default, 1 s), the
+  request-timeout check reads the clock only when it arms or fires its timer,
+  instead of on every reply. Timeouts fire at the same deadlines as before. Against Valkey on AWS
+  Graviton4 (c8gn.4xlarge client and server, 256 connections, pipeline 16,
+  80/20 GET/SET, 64-byte values, 4 runs per arm), client user cycles per
+  request fell 8% on one worker and on two. With this and
+  ringline-rs/ringline#1022 (under the ringline move below), user cycles per
+  request were 7% below v0.0.34 on one worker and 5% below on two, and one
+  worker delivered 3.3% more throughput than v0.0.34 (in the two of four
+  rounds where Valkey was not the limit).
 - The viewer draws its charts with the `metriken-charts` crate instead of its
   own copy of the chart modules, and builds its plot specs with
   `metriken_charts::plot`. `/lib/charts/` and `/lib/charts.css` are served from
@@ -340,8 +350,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `valkey-lab search`: a query task that panicked or was cancelled resolves
     its `JoinHandle` to a `JoinError` (ringline-rs/ringline#557), reported as
     a `query worker:` error.
-- ringline moves from ab81ceb to 6dc223b (ringline main after
-  ringline-rs/ringline#1021, ringline 0.7.0-alpha.191), which brings these
+- ringline moves from ab81ceb to 2ac73c0 (ringline main after
+  ringline-rs/ringline#1022, ringline 0.7.0-alpha.192), which brings these
   changes:
   - Breaking: `general.recv_ring_size` and `general.recv_buffer_size` are
     rejected at config load, with any value. They sized the provided-buffer
@@ -462,6 +472,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     connections, pipeline 16, 64 B values against memcached) the `memmem`
     search was about 7% of client time. No cachecannon run has measured the
     change end to end.
+  - ringline-redis drains each RESP GET reply through `with_data` instead of
+    `with_bytes` (ringline-rs/ringline#1022). On io_uring the drain had used
+    `with_bytes`, with several atomic refcount operations per reply, since
+    ringline-rs/ringline#696; v0.0.34 used `with_segments` and did
+    not pay this. Against Valkey on AWS Graviton4 (c8gn.4xlarge client and
+    server, one worker, 256 connections, pipeline 16, 80/20 GET/SET, 64-byte
+    values, 4 runs per arm), user cycles per request fell from 6,437 to
+    6,137 and throughput rose 3.9% against ringline 6dc223b. That is still
+    2.5% more user cycles per request than v0.0.34; see the
+    `recv_with_timeout` clock read under Changed.
 
 ### Fixed
 - `install.sh` on macOS or another non-Linux host says there is no package
